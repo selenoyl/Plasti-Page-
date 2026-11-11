@@ -137,9 +137,9 @@ class Audio(unittest.TestCase):
         # twice = the single tone (100 frames) twice with the tone gap (250 ms) between
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=3000, tones="twice", languages=["en"])
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 24000 + 100 + 2000 + 100 + 2400 + 80 + 2400)
-        # older config: "chime": false means no tone; no lead silence set = 2.5 s
+        # older config: "chime": false means no tone; no lead silence set = none
         cfg["audio"] = {"repeat": 1, "chime": False, "languages": ["en"]}
-        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), lead + 80 + 2400)
+        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
 
     def test_volume_gain_and_limiter(self):
         import io, math, wave as _w
@@ -171,7 +171,8 @@ class Audio(unittest.TestCase):
 
     def test_lead_silence_is_silent(self):
         import io, wave as _w
-        wav, _ = self.lib.build(self.cfg, 2, 5)
+        cfg = dict(self.cfg, audio=dict(self.cfg["audio"], lead_silence_ms=2500))
+        wav, _ = self.lib.build(cfg, 2, 5)
         with _w.open(io.BytesIO(wav)) as w:
             start = w.readframes(2500 * 8)
         self.assertEqual(set(start), {0})
@@ -301,7 +302,7 @@ class ConfigUpdate(unittest.TestCase):
             self.assertEqual(new["zones"]["floor"]["dial"], "##61")
             self.assertEqual(new["audio"]["keep_dry_run_pages"], 0)
             with open(path, encoding="utf-8") as f:
-                self.assertEqual(json.load(f)["audio"]["lead_silence_ms"], 2500)
+                self.assertEqual(json.load(f)["audio"]["lead_silence_ms"], 0)
             out = subprocess.check_output([sys.executable, script, path, CONFIG]).decode()
             self.assertIn("already up to date", out)
         finally:

@@ -220,7 +220,7 @@ class AudioLibrary:
         repeat = max(1, int(opts.get("repeat", 2)))
         # Silence first, so the paging system is open before the tone starts.
         gap = silence(int(opts.get("repeat_gap_ms", DEFAULT_GAPS["repeat_gap_ms"])))
-        frames = (silence(int(opts.get("lead_silence_ms", 2500)))
+        frames = (silence(int(opts.get("lead_silence_ms", 0)))
                   + (once + gap) * (repeat - 1) + once + silence(300))
         frames = apply_gain(frames, float(opts.get("gain_db", 0)))
         out = io.BytesIO()
