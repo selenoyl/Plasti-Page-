@@ -47,8 +47,8 @@
   },
   "zones": {
     "floor": {
-      "dial": "",
-      "_note": "Digits the HT813 dials on the ATA2 line to page the factory floor. Empty = not set yet. Easier to set on the admin page."
+      "dial": "F,*60,2,1",
+      "_note": "Floor page from the ATA2 (ext 5912): Link (hook flash, 300 ms on the HT813), *60 general page, 2 = speakers, 1 = zone 1. Same as PAGE, SPEAKER, 1 on a Norstar desk phone. Found on the floor; can be changed on the admin page."
     },
     "office": {
       "dial": "",

@@ -221,7 +221,8 @@ match except where marked):
 | FXO PORT | Check SIP User ID for incoming INVITE / Allow Incoming SIP Messages from SIP Proxy Only / Authenticate incoming INVITE | No / No / No (direct calls allowed) |
 | FXO PORT | Stage Method | 2 |
 | FXO PORT | Preferred DTMF method | RFC2833 first, payload 101 |
-| FXO PORT | Send Hook Flash To PSTN | Yes (so `F` works), 600 ms |
+| FXO PORT | Send Hook Flash To PSTN | Yes (so `F` works) |
+| FXO PORT | **Hook Flash Duration** | **300 ms**. At 600 ms (the default) the Norstar ATA2 took it as a short hang-up, not Link, and the call went to extension 5939. |
 | FXO PORT | Preferred Vocoder | PCMU first |
 | FXO PORT | **Number of Rings** | **50** (it never answers calls coming in on the ATA2 line) |
 | ADVANCED | Disable Direct IP Call | No |
@@ -233,7 +234,15 @@ match except where marked):
 
 **Admin page tools:**
 - **Call the HT813 (no dialing):** holds the ATA2 line about 3 s and dials nothing. Proves laptop → HT813 → line.
-- **Try page digits:** dials what you type, then plays the maintenance bell tone for about 4 s (no spoken message). Use it to find the page code, then put it in "Zone floor dial". On a Norstar desk phone the floor page is PAGE, SPEAKER, 1 (Feature 62, zone 1). From the ATA2 line, try `F,*62`, then `F,*621`.
+- **Try page digits:** dials what you type, then plays the maintenance bell tone for about 4 s (no spoken message), and records what the line sends back (play it under "Last phone test").
+
+**The floor page code is `F,*60,2,1`:**
+- `F` is Link, the hook flash.
+- `*60` is the general page.
+- `2` picks the speakers.
+- `1` is zone 1.
+
+It's the same as PAGE, SPEAKER, 1 on a Norstar desk phone. The ATA2 is extension 5912. Every ATA2 feature code must start with Link ([pbxbook: Enhanced ATA, ATA2 Access Codes](https://pbxbook.com/norstar/enhanced_ata.html)).
 
 Both work with dry run on.
 
