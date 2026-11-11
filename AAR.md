@@ -46,6 +46,7 @@ By Ethan Brady & Ryan Raikes
 | D38 | 11 Nov 2026 | Board firmware 1.1.0: network updates from a browser at `http://<board IP>/update`, behind a password set over USB (`otapass`; off until set), plus a status page at `/`. Refused while a call is waiting to be sent. Partition scheme "Minimal SPIFFS (1.9MB APP with OTA)". The board stays on Wi-Fi only. | User's choice: no cable needed for later updates. Wi-Fi only, as chosen; the Ethernet port is unused. |
 | D39 | 11 Nov 2026 | Board firmware 1.1.1: the Wi-Fi radio is started first in setup. In 1.1.0, a board with no Wi-Fi set started its web server before the network stack existed and crash-looped (`assert failed: xQueueSemaphoreTake ... pxQueue`), and the default ID read P833-000000. Found on the first real board. The PC stand-in now aborts the same way, so the test would catch it. | Bug found on the bench. |
 | D40 | 11 Nov 2026 | Board firmware 1.1.2: the default board ID comes from the chip's factory MAC (ESP.getEfuseMac), e.g. P833-D7156C; WiFi.macAddress() read zeros at start-up on the real board. First release meant to be installed with the network update page. | Seen on the bench (P833-000000). |
+| D41 | 11 Nov 2026 | Receiver 0.4.3: dry-run page audio is no longer saved by default (`audio.keep_dry_run_pages` = 0; settable 0 to 100 on the admin page). The installer moves the old default of 20 to 0, and the receiver removes saved files beyond the setting when it starts. Fixed: a setting of 0 used to keep every file. | User request; Preview covers listening before sending. |
 
 ## Open points
 

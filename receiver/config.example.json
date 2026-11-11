@@ -17,7 +17,7 @@
       "en",
       "es"
     ],
-    "keep_dry_run_pages": 20
+    "keep_dry_run_pages": 0
   },
   "phone": {
     "_note": "HT813 phone step settings. Easier to tune on the admin page, which saves its own values on top of these.",

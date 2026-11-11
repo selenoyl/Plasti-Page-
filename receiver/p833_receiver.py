@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -79,7 +79,8 @@ def tuning_of(cfg):
             "code_zone": {str(c): cfg["codes"][c]["zone"] for c in range(2, 10)},
             "code_tone": {str(c): cfg["codes"][c].get("tone", "") for c in range(2, 10)},
             "audio": {"repeat": cfg["audio"]["repeat"], "tones": tone_style(cfg),
-                      "lead_silence_ms": cfg["audio"]["lead_silence_ms"]}}
+                      "lead_silence_ms": cfg["audio"]["lead_silence_ms"],
+                      "keep_dry_run_pages": cfg["audio"]["keep_dry_run_pages"]}}
 
 
 def apply_tuning(cfg, t):
@@ -100,6 +101,8 @@ def apply_tuning(cfg, t):
         cfg["audio"]["repeat"] = a["repeat"]
     if "lead_silence_ms" in a:
         cfg["audio"]["lead_silence_ms"] = a["lead_silence_ms"]
+    if "keep_dry_run_pages" in a:
+        cfg["audio"]["keep_dry_run_pages"] = a["keep_dry_run_pages"]
     if a.get("tones") in ("once", "twice", "off"):
         cfg["audio"]["tones"] = a["tones"]
     elif "chime" in a:                        # settings saved by v0.3.x
@@ -164,6 +167,12 @@ def parse_tuning(form, cfg, tone_names=None):
             raise ValueError
     except ValueError:
         errs.append("silence at the start must be 0 to 10000 ms")
+    try:
+        audio["keep_dry_run_pages"] = int(form.get("keep_dry_run_pages", "0") or "0")
+        if not 0 <= audio["keep_dry_run_pages"] <= 100:
+            raise ValueError
+    except ValueError:
+        errs.append("dry-run pages to keep must be 0 to 100")
     return {"phone": phone, "zone_dial": dials, "code_zone": zones, "code_tone": tones,
             "audio": audio}, errs
 
@@ -197,7 +206,7 @@ def load_config(path):
     audio.setdefault("tones", "once" if audio.get("chime", True) else "off")
     audio.setdefault("repeat", 2)
     audio.setdefault("languages", ["en", "es"])
-    audio.setdefault("keep_dry_run_pages", 20)
+    audio.setdefault("keep_dry_run_pages", 0)
     audio.setdefault("lead_silence_ms", 2500)
     phone = cfg.setdefault("phone", {})
     for k, v in PHONE_DEFAULTS.items():
@@ -455,22 +464,44 @@ def accept_call(app, call, ip, note=""):
 # ---------------------------------------------------------------- pagers ---
 
 class DryRunPager:
-    """Logs the page it would send and saves its audio. Never dials."""
+    """Logs the page it would send. Never dials.
 
-    def __init__(self, save_dir=None, keep=20):
-        self.save_dir, self.keep = save_dir, keep
+    It can also keep the audio of the last N dry-run pages for listening back
+    (audio.keep_dry_run_pages, set on the admin page; 0 = off, the default).
+    The setting is read for each page, so a change applies at once."""
+
+    def __init__(self, save_dir=None, cfg=None):
+        self.save_dir, self.cfg = save_dir, cfg
+
+    def keep(self):
+        try:
+            return max(0, int((self.cfg or {}).get("audio", {}).get("keep_dry_run_pages", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def prune(self, keep):
+        """Delete saved dry-run audio beyond the newest `keep` files (all of them for 0)."""
+        if not self.save_dir or not os.path.isdir(self.save_dir):
+            return 0
+        old = sorted(n for n in os.listdir(self.save_dir) if n.endswith(".wav"))
+        gone = old[:len(old) - keep] if keep < len(old) else []
+        for n in gone:
+            try:
+                os.remove(os.path.join(self.save_dir, n))
+            except OSError as e:
+                LOG.warning("could not delete old dry-run audio %s: %s", n, e)
+        return len(gone)
 
     def page(self, zone, dial, en, es, audio=None):
         LOG.info("DRY RUN page: zone=%s dial=%s | %s | %s", zone, dial, en, es)
-        if audio and self.save_dir:
+        keep = self.keep()
+        if audio and self.save_dir and keep > 0:
             try:
                 os.makedirs(self.save_dir, exist_ok=True)
                 name = datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".wav"
                 with open(os.path.join(self.save_dir, name), "wb") as f:
                     f.write(audio)
-                old = sorted(n for n in os.listdir(self.save_dir) if n.endswith(".wav"))
-                for n in old[:-self.keep]:
-                    os.remove(os.path.join(self.save_dir, n))
+                self.prune(keep)
                 return True, "dry run, not dialed; audio saved as %s" % name
             except OSError as e:
                 LOG.warning("could not save dry-run audio: %s", e)
@@ -1009,6 +1040,11 @@ def page_html(app, admin, msg=""):
                     "max=10000 step=100 value='%d' style='width:7em'></td><td class=small>Silence at the very "
                     "beginning of the page audio, so the paging system is open before the tone starts. "
                     "2000 to 3000 is usual.</td></tr>" % int(cfg["audio"]["lead_silence_ms"]))
+        rows.append("<tr><td>Keep audio of the last dry-run pages</td><td><input name=keep_dry_run_pages "
+                    "type=number min=0 max=100 value='%d' style='width:5em'></td><td class=small>0 = off (normal). "
+                    "Set it to, say, 20 to keep the audio of recent dry-run pages in "
+                    "/var/lib/p833-receiver/last_pages/ for listening back. Preview is usually enough.</td></tr>"
+                    % int(cfg["audio"]["keep_dry_run_pages"]))
         rows.append("<tr><td>Times the message plays</td><td><input name=repeat type=number min=1 max=5 value='%d' "
                     "style='width:5em'></td><td class=small>Each time: tone, English, Spanish.</td></tr>"
                     % int(cfg["audio"]["repeat"]))
@@ -1105,8 +1141,10 @@ def main(argv=None):
     state = State(cfg, args.state_dir, args.log_dir)
     if args.dry_run:
         state.dry_run = True   # for this run only; not saved
-    dry_pager = DryRunPager(os.path.join(args.state_dir, "last_pages"),
-                            int(cfg["audio"]["keep_dry_run_pages"]))
+    dry_pager = DryRunPager(os.path.join(args.state_dir, "last_pages"), cfg)
+    removed = dry_pager.prune(dry_pager.keep())
+    if removed:
+        LOG.info("removed %d saved dry-run audio file(s) (keeping %d)", removed, dry_pager.keep())
     worker = PageWorker(cfg, state, make_live_pager(cfg), dry_pager)
     if worker.audio.load_error:
         LOG.warning("AUDIO: %s", worker.audio.load_error)

@@ -250,6 +250,8 @@ class ConfigUpdate(unittest.TestCase):
             cfg["codes"]["4"]["es"] = "Se solicita un supervisor en la prensa {press}."   # 0.4.1 wording
             del cfg["codes"]["7"]["why"]
             cfg["zones"]["floor"]["dial"] = "##61"
+            cfg["audio"]["keep_dry_run_pages"] = 20           # the old default
+            del cfg["audio"]["lead_silence_ms"]               # a setting the laptop doesn't have yet
             path = os.path.join(tmp, "config.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f)
@@ -262,6 +264,9 @@ class ConfigUpdate(unittest.TestCase):
             self.assertEqual(new["codes"][4]["es"], "Se solicita un supervisor en la prensa número {press}.")
             self.assertEqual(new["codes"][7]["why"], "audit check-in")
             self.assertEqual(new["zones"]["floor"]["dial"], "##61")
+            self.assertEqual(new["audio"]["keep_dry_run_pages"], 0)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["audio"]["lead_silence_ms"], 2500)
             out = subprocess.check_output([sys.executable, script, path, CONFIG]).decode()
             self.assertIn("already up to date", out)
         finally:
@@ -280,7 +285,7 @@ class Server(unittest.TestCase):
         self.state.dry_run = False          # route pages to the fake pager
         self.audio_dir = make_fake_audio(os.path.join(self.tmp, "audio"))
         self.worker = R.PageWorker(cfg, self.state, self.pager,
-                                   dry_pager=R.DryRunPager(os.path.join(self.tmp, "last_pages")),
+                                   dry_pager=R.DryRunPager(os.path.join(self.tmp, "last_pages"), cfg),
                                    audio=A.AudioLibrary(self.audio_dir))
         self.worker.start()
         R.Handler.app = {"cfg": cfg, "state": self.state, "worker": self.worker, "key": KEY,
@@ -512,13 +517,35 @@ class Server(unittest.TestCase):
         self.wait_pages()
         self.assertTrue(self.pager.audio[0].startswith(b"RIFF"))
 
-    def test_dry_run_saves_audio(self):
+    def test_dry_run_saves_no_audio_by_default(self):
+        self.assertEqual(self.cfg["audio"]["keep_dry_run_pages"], 0)
         self.state.dry_run = True
         self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 3})
         self.wait_pages()
-        saved = os.listdir(os.path.join(self.tmp, "last_pages"))
-        self.assertEqual(len(saved), 1)
-        self.assertIn("audio saved as", self.wait_row()["detail"])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "last_pages")))
+        self.assertEqual(self.wait_row()["detail"], "dry run, not dialed")
+
+    def test_dry_run_keeps_last_n_when_asked(self):
+        self.state.dry_run = True
+        self.cfg["audio"]["keep_dry_run_pages"] = 2
+        for seq, press in ((1, 3), (2, 4), (3, 5)):
+            self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": seq, "code": 2, "press": press})
+            self.wait_pages()
+            time.sleep(0.01)
+        saved = sorted(os.listdir(os.path.join(self.tmp, "last_pages")))
+        self.assertEqual(len(saved), 2)
+        self.assertIn("audio saved as", self.log_rows()[-1]["detail"])
+        # back to 0: the next start removes what was saved
+        self.cfg["audio"]["keep_dry_run_pages"] = 0
+        self.assertEqual(self.worker.dry.prune(self.worker.dry.keep()), 2)
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "last_pages")), [])
+
+    def test_keep_setting_on_admin_page(self):
+        self.admin("/admin/tuning", self.tuning_form(keep_dry_run_pages="15"))
+        self.assertEqual(self.cfg["audio"]["keep_dry_run_pages"], 15)
+        _, loc, _ = self.admin("/admin/tuning", self.tuning_form(keep_dry_run_pages="500"))
+        self.assertIn("Not saved", urllib.parse.unquote(loc))
+        self.assertIn("name=keep_dry_run_pages", self.admin("/admin")[2])
 
     def test_missing_audio_fails_live_page(self):
         os.remove(os.path.join(self.audio_dir, "en", "n", "3.wav"))

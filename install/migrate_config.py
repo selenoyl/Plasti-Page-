@@ -65,6 +65,12 @@ OLD_DEFAULTS = [
 ]
 
 
+# Nested settings whose default changed: (section, key, old default).
+OLD_NESTED_DEFAULTS = [
+    ("audio", "keep_dry_run_pages", 20),   # 0.3.0 to 0.4.2 saved dry-run audio; now off
+]
+
+
 def main(installed, example):
     with open(installed, encoding="utf-8") as f:
         cfg = json.load(f, object_pairs_hook=OrderedDict)
@@ -82,6 +88,17 @@ def main(installed, example):
             elif icode[field] != value and (code, field, icode[field]) in old:
                 icode[field] = value
                 changes.append("code %s %s: now \"%s\"" % (code, field, value))
+
+    # Nested settings whose default changed: replace only if still the old default.
+    for section, key, old_value in OLD_NESTED_DEFAULTS:
+        if section in cfg and section in new and cfg[section].get(key) == old_value \
+                and new[section].get(key, old_value) != old_value:
+            cfg[section][key] = new[section][key]
+            changes.append("%s.%s: now %s" % (section, key, json.dumps(new[section][key])))
+        for nkey, nval in new.get(section, {}).items():      # new nested settings
+            if section in cfg and nkey not in cfg[section] and not nkey.startswith("_"):
+                cfg[section][nkey] = nval
+                changes.append("added setting %s.%s" % (section, nkey))
 
     for key, value in new.items():
         if key not in cfg:
