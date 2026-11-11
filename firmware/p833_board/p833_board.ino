@@ -26,7 +26,7 @@
 #error "Needs the esp32 board package 3.0.0 or newer (Arduino IDE: Tools > Board > Boards Manager > esp32)"
 #endif
 
-#define FW_VERSION "1.1.1"
+#define FW_VERSION "1.1.2"
 
 // ---- Board pins (Waveshare wiki and demo code for the ESP32-S3-ETH-8DI-8RO):
 //   DI1..DI8 = GPIO4..GPIO11, optocoupler inputs read with the pull-up on;
@@ -86,10 +86,12 @@ String getS(const char* k, const String& def) { return prefs.getString(k, def); 
 
 void loadSettings() {
   prefs.begin("p833", false);
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
+  // Default ID from the chip's factory MAC (e8:f6:0a:d7:15:6c -> P833-D7156C).
+  // Read from eFuse: WiFi.macAddress() can read zeros this early.
+  uint64_t mac = ESP.getEfuseMac();   // byte 0 of the MAC is the lowest byte
   char defId[20];
-  snprintf(defId, sizeof(defId), "P833-%02X%02X%02X", mac[3], mac[4], mac[5]);
+  snprintf(defId, sizeof(defId), "P833-%02X%02X%02X", (unsigned)((mac >> 24) & 0xFF),
+           (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
   cfg.id = getS("id", defId);
   cfg.ssid = getS("ssid", "");
   cfg.pass = getS("pass", "");

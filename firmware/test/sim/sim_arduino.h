@@ -119,7 +119,10 @@ class SimSerial {
 };
 extern SimSerial Serial;
 
-struct SimEsp { void restart() { std::printf("[sim] ESP.restart()\n"); std::exit(3); } };
+struct SimEsp {
+  void restart() { std::printf("[sim] ESP.restart()\n"); std::exit(3); }
+  uint64_t getEfuseMac() { return 0x6c15d70af6e8ULL; }   // MAC e8:f6:0a:d7:15:6c, lowest byte first
+};
 extern SimEsp ESP;
 
 // ---- Preferences (kept in memory)
