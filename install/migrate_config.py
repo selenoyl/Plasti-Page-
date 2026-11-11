@@ -68,6 +68,9 @@ OLD_DEFAULTS = [
 # Nested settings whose default changed: (section, key, old default).
 OLD_NESTED_DEFAULTS = [
     ("audio", "keep_dry_run_pages", 20),   # 0.3.0 to 0.4.2 saved dry-run audio; now off
+    ("audio", "gain_db", 6),               # 0.5.3 default; +8 was found clearer on the floor
+    ("audio", "lead_silence_ms", 2500),    # 0.4.1 default; the feedback eliminator needs no lead-in
+    ("phone", "wait_after_dial_ms", 2000),  # 1000 worked on the floor
 ]
 
 

@@ -39,6 +39,7 @@ import wave
 
 RATE = 8000
 DEFAULT_VOICES = {"en": "en_US-hfc_female-medium", "es": "es_MX-claude-high"}
+NUMBER_LENGTH_SCALE = 1.35   # numbers said slower than the rest, so they're easier to catch on a PA
 MAX_PRESS = 100     # press numbers recorded: 1 to this; higher presses page as "press unknown"
 # Trim silence gently: -60 dB and keep 60 ms before the first sound, so soft
 # starts ("five", "six", "seis") are not clipped.
@@ -110,6 +111,8 @@ def main():
     p.add_argument("--voice-es", default=DEFAULT_VOICES["es"])
     p.add_argument("--length-scale", type=float, default=1.05,
                    help="speaking pace; above 1 is slower (clearer on a PA)")
+    p.add_argument("--number-length-scale", type=float, default=NUMBER_LENGTH_SCALE,
+                   help="speaking pace for the press numbers (higher = slower)")
     p.add_argument("--max-press", type=int, default=MAX_PRESS,
                    help="record press numbers 1 to this (1-999); higher presses page as press unknown")
     p.add_argument("--all", action="store_true", help="re-make every clip, not just changed ones")
@@ -138,6 +141,7 @@ def main():
     except (OSError, ValueError):
         old = {}
     same_voices = (old.get("voices") == voices and old.get("length_scale") == a.length_scale
+                   and old.get("number_length_scale") == a.number_length_scale
                    and old.get("filter") == FILTER and old.get("pronounce") == PRONOUNCE)
     old_clips = old.get("clips", {}) if same_voices and not a.all else {}
 
@@ -153,6 +157,7 @@ def main():
             download_voice(voices[lang], Path(a.voices_dir))
             loaded[lang] = PiperVoice.load(os.path.join(a.voices_dir, voices[lang] + ".onnx"))
     syn = SynthesisConfig(length_scale=a.length_scale)
+    syn_number = SynthesisConfig(length_scale=a.number_length_scale)
 
     tmpdir = tempfile.mkdtemp()
     start = time.time()
@@ -161,7 +166,8 @@ def main():
             lang, text = plan[key]
             raw = os.path.join(tmpdir, "raw.wav")
             with wave.open(raw, "wb") as w:
-                loaded[lang].synthesize_wav(spoken(lang, text), w, syn_config=syn)
+                loaded[lang].synthesize_wav(spoken(lang, text), w,
+                                            syn_config=syn_number if "/n/" in key else syn)
             dest = os.path.join(a.out, key)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", raw, "-af", FILTER,
@@ -185,7 +191,8 @@ def main():
     make_chime(os.path.join(a.out, "chime.wav"))
     manifest = {"_about": "P833 page audio. By Ethan Brady & Ryan Raikes. Made by tools/make_audio.py; "
                           "do not edit by hand.",
-                "rate": RATE, "voices": voices, "length_scale": a.length_scale, "max_press": a.max_press,
+                "rate": RATE, "voices": voices, "length_scale": a.length_scale,
+                "number_length_scale": a.number_length_scale, "max_press": a.max_press,
                 "filter": FILTER, "pronounce": PRONOUNCE,
                 "clips": {k: t for k, (_, t) in sorted(plan.items())}}
     with open(man_path, "w", encoding="utf-8") as f:

@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 
-VERSION = "0.5.3"
+VERSION = "0.6.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -83,7 +83,10 @@ def tuning_of(cfg):
             "audio": {"repeat": cfg["audio"]["repeat"], "tones": tone_style(cfg),
                       "lead_silence_ms": cfg["audio"]["lead_silence_ms"],
                       "keep_dry_run_pages": cfg["audio"]["keep_dry_run_pages"],
-                      "gain_db": cfg["audio"]["gain_db"]}}
+                      "gain_db": cfg["audio"]["gain_db"],
+                      "lang_gap_ms": cfg["audio"]["lang_gap_ms"],
+                      "repeat_gap_ms": cfg["audio"]["repeat_gap_ms"],
+                      "tone_gap_ms": cfg["audio"]["tone_gap_ms"]}}
 
 
 def apply_tuning(cfg, t):
@@ -106,8 +109,9 @@ def apply_tuning(cfg, t):
         cfg["audio"]["lead_silence_ms"] = a["lead_silence_ms"]
     if "keep_dry_run_pages" in a:
         cfg["audio"]["keep_dry_run_pages"] = a["keep_dry_run_pages"]
-    if "gain_db" in a:
-        cfg["audio"]["gain_db"] = a["gain_db"]
+    for k in ("gain_db", "lang_gap_ms", "repeat_gap_ms", "tone_gap_ms"):
+        if k in a:
+            cfg["audio"][k] = a[k]
     if a.get("tones") in ("once", "twice", "off"):
         cfg["audio"]["tones"] = a["tones"]
     elif "chime" in a:                        # settings saved by v0.3.x
@@ -184,6 +188,15 @@ def parse_tuning(form, cfg, tone_names=None):
             raise ValueError
     except ValueError:
         errs.append("page volume must be -6 to 12 dB")
+    for key, label, default in (("lang_gap_ms", "pause between English and Spanish", 400),
+                                ("repeat_gap_ms", "pause before the repeat", 500),
+                                ("tone_gap_ms", "pause between the two tones", 250)):
+        try:
+            audio[key] = int(form.get(key, str(default)) or str(default))
+            if not 0 <= audio[key] <= 3000:
+                raise ValueError
+        except ValueError:
+            errs.append("%s must be 0 to 3000 ms" % label)
     return {"phone": phone, "zone_dial": dials, "code_zone": zones, "code_tone": tones,
             "audio": audio}, errs
 
@@ -218,8 +231,11 @@ def load_config(path):
     audio.setdefault("repeat", 2)
     audio.setdefault("languages", ["en", "es"])
     audio.setdefault("keep_dry_run_pages", 0)
-    audio.setdefault("lead_silence_ms", 2500)
+    audio.setdefault("lead_silence_ms", 0)
     audio.setdefault("gain_db", 0)
+    audio.setdefault("lang_gap_ms", 400)
+    audio.setdefault("repeat_gap_ms", 500)
+    audio.setdefault("tone_gap_ms", 250)
     phone = cfg.setdefault("phone", {})
     for k, v in PHONE_DEFAULTS.items():
         phone.setdefault(k, v)
@@ -785,15 +801,23 @@ class Handler(BaseHTTPRequestHandler):
             if digits:
                 lib = self.app["worker"].audio
                 try:
-                    if form.get("play") == "page":
-                        # Exactly what a real Maintenance call at press 27 would play.
-                        wav, _notes = lib.build(self.app["cfg"], 2, 27)
-                        what = "a full test page (Maintenance, press 27)"
+                    if form.get("play", "").startswith("page"):
+                        # Exactly what a real call of that code at press 27 would play.
+                        try:
+                            code = int(form.get("play")[4:] or 2)
+                        except ValueError:
+                            code = 2
+                        if code not in self.app["cfg"]["codes"]:
+                            code = 2
+                        wav, _notes = lib.build(self.app["cfg"], code, 27)
+                        what = "a full test page (code %d %s, press 27)" % (code, self.app["cfg"]["codes"][code]["who"])
                     else:
                         # The first code's department tone (the maintenance bell), twice.
                         tone = self.app["cfg"]["codes"][2].get("tone", "")
-                        wav = lib._wrap(b"", lib._frames("tones/twice/%s.wav" % tone) if tone
-                                        else lib._frames("chime.wav"), {"repeat": 1, "lead_silence_ms": 0})
+                        one = lib._frames("tones/single/%s.wav" % tone) if tone else lib._frames("chime.wav")
+                        gap = b"\x00\x00" * (8 * int(self.app["cfg"]["audio"].get("tone_gap_ms", 250)))
+                        wav = lib._wrap(b"", one + gap + one, {"repeat": 1, "lead_silence_ms": 0,
+                                                               "gain_db": self.app["cfg"]["audio"].get("gain_db", 0)})
                 except AudioError as e:
                     return self._back("Phone test not run: no audio to play (%s)" % e)
             LOG.info("phone %s from admin page (%s)", "digit trial %s" % digits if digits else "connection test", who)
@@ -1109,6 +1133,15 @@ def page_html(app, admin, msg=""):
                     "if it sounds harsh or distorted on the floor, turn it down. Preview and Listen play at this "
                     "volume. Other places to turn it up: the paging amplifier's own volume, and the HT813's FXO "
                     "port <i>Gain TX</i>.</td></tr>" % int(cfg["audio"]["gain_db"]))
+        for key, label, help_ in (
+                ("tone_gap_ms", "Pause between the two tones (ms)", "When the tone plays twice."),
+                ("lang_gap_ms", "Pause between English and Spanish (ms)", ""),
+                ("repeat_gap_ms", "Pause before the message repeats (ms)", "")):
+            rows.append("<tr><td>%s</td><td><input name=%s type=number min=0 max=3000 step=50 value='%d' "
+                        "style='width:6em'></td><td class=small>%s Keep every pause shorter than the time the "
+                        "paging feedback eliminator waits before it decides a page has ended (often well under "
+                        "a second), or it cuts the page there.</td></tr>" % (
+                            label, key, int(cfg["audio"][key]), help_))
         rows.append("<tr><td>Keep audio of the last dry-run pages</td><td><input name=keep_dry_run_pages "
                     "type=number min=0 max=100 value='%d' style='width:5em'></td><td class=small>0 = off (normal). "
                     "Set it to, say, 20 to keep the audio of recent dry-run pages in "
@@ -1137,7 +1170,7 @@ the line. Save any changed settings first.</p>
 <form method=post action='/admin/phonetest' onsubmit="return confirm('Dial these digits through the HT813 and play the chosen sound? If the digits open a page zone, that zone hears it. This works with dry run on.')">
 <label>Digits <input name=digits required maxlength=32 size=12 value='%s'></label>
 <label>then play <select name=play><option value=bell>the bell (about 4 s)</option>
-<option value=page>a full test page (Maintenance, press 27)</option></select></label>
+%s</select></label>
 <button>Dial and play</button></form>
 <h3>Last phone test</h3>
 <p>What the line sent back to the HT813 during the last test (dial tone, beeps, error tones, silence):<br>
@@ -1152,6 +1185,9 @@ F = hook flash (Link). On a Norstar desk phone the floor page is PAGE, SPEAKER, 
 <b>F,*62</b>, then <b>F,*621</b>. When one works, put it in "Zone floor dial" above and Save.</p></div>
 """ % ("<b>Saved settings in use.</b>" if tuned else "Now using the config file's values.", "\n".join(rows),
        e(cfg["zones"].get("floor", {}).get("dial") or "F,*60,2,1"),
+       "".join("<option value='page%d'>a full test page: code %d %s%s, press 27</option>" % (
+           c, c, e(cfg["codes"][c]["who"]), " (%s)" % e(cfg["codes"][c]["why"]) if cfg["codes"][c].get("why") else "")
+           for c in range(2, 10)),
        e(" / ".join("%s: %s" % (z, v.get("dial") or "not set") for z, v in cfg["zones"].items())))
         admin_html = """
 <div class=card><h2>Settings</h2>%s

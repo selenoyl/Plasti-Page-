@@ -118,19 +118,25 @@ class Audio(unittest.TestCase):
         cfg = json.loads(json.dumps(self.cfg, default=str))
         cfg["codes"] = self.cfg["codes"]
         ngap, pgap = 8 * A.NUMBER_GAP_MS, 8 * A.PIECE_GAP_MS
-        lead = 2500 * 8            # default 2.5 s of silence first
-        # tone 100 frames + 0.3 s; per language: lead, number gap, number, piece gap, reason; 0.7 s between
+        lead = 8 * self.cfg["audio"]["lead_silence_ms"]
+        langgap, repgap = 8 * 400, 8 * 500           # default pauses: English->Spanish, before the repeat
+        # tone 100 frames + 0.3 s; per language: lead, number gap, number, piece gap, reason
         lang = 80 + ngap + 80 + pgap + 80
-        once = 100 + 2400 + lang + 5600 + lang
+        once = 100 + 2400 + lang + langgap + lang
         cfg["audio"] = dict(self.cfg["audio"], repeat=1)
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=2)
-        self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + 9600 + once + 2400)
+        self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + repgap + once + 2400)
+        # the pauses follow the settings
+        cfg["audio"] = dict(self.cfg["audio"], repeat=2, lang_gap_ms=200, repeat_gap_ms=300)
+        once2 = 100 + 2400 + lang + 1600 + lang
+        self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once2 + 2400 + once2 + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=0, tones="off", languages=["en"])
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 5)[0]), 80 + ngap + 80 + 2400)
+        # twice = the single tone (100 frames) twice with the tone gap (250 ms) between
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=3000, tones="twice", languages=["en"])
-        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 24000 + 200 + 2400 + 80 + 2400)
+        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 24000 + 100 + 2000 + 100 + 2400 + 80 + 2400)
         # older config: "chime": false means no tone; no lead silence set = 2.5 s
         cfg["audio"] = {"repeat": 1, "chime": False, "languages": ["en"]}
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), lead + 80 + 2400)
@@ -770,7 +776,7 @@ class Server(unittest.TestCase):
         with urllib.request.urlopen(req) as r:
             self.assertEqual(r.headers["Content-Type"], "audio/wav")
             self.assertTrue(r.read().startswith(b"RIFF"))
-        self.assertEqual(ht.audio_frames, 2)           # the fake "twice" tone is 200 samples = 2 packets
+        self.assertEqual(ht.audio_frames, 2)           # fake tone 100 samples x 2 (with a silent gap) = 2 packets
         self.assertTrue(ht.wait_bye())
         # the same trial, playing a full test page
         _, loc, _ = self.admin("/admin/phonetest", {"digits": "F61", "play": "page"})

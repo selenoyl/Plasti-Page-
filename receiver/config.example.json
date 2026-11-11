@@ -9,10 +9,13 @@
   "page_retries": 3,
   "page_retry_wait_s": 10,
   "audio": {
-    "_note": "Page = lead_silence_ms of silence, then department tone (per code, see codes.tone), English, Spanish, played 'repeat' times. tones: once, twice or off. Voice clips are made by tools/make_audio.py; tone files are in audio/tones.",
+    "_note": "Page = lead_silence_ms of silence (0: the paging feedback eliminator records from the start), then the department tone (per code, see codes.tone; once, twice or off), English, Spanish, played 'repeat' times. Keep every pause short (tone_gap_ms, lang_gap_ms, repeat_gap_ms): the feedback eliminator ends a page at a silence. Voice clips: tools/make_audio.py; tones: audio/tones/single.",
     "tones": "once",
-    "lead_silence_ms": 2500,
-    "gain_db": 6,
+    "lead_silence_ms": 0,
+    "gain_db": 8,
+    "tone_gap_ms": 250,
+    "lang_gap_ms": 400,
+    "repeat_gap_ms": 500,
     "repeat": 2,
     "languages": [
       "en",
@@ -29,7 +32,7 @@
     "wait_after_answer_ms": 1500,
     "dtmf_ms": 120,
     "dtmf_gap_ms": 120,
-    "wait_after_dial_ms": 2000,
+    "wait_after_dial_ms": 1000,
     "max_call_s": 90
   },
   "boards": {

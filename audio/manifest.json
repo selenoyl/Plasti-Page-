@@ -6,6 +6,7 @@
   "es": "es_MX-claude-high"
  },
  "length_scale": 1.05,
+ "number_length_scale": 1.35,
  "max_press": 100,
  "filter": "silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.06,areverse,silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.06,areverse,highpass=f=200,lowpass=f=3400",
  "pronounce": {
