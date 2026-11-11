@@ -10,6 +10,8 @@
 import io
 import json
 import os
+import re
+import unicodedata
 import wave
 
 RATE = 8000
@@ -28,24 +30,22 @@ def split_text(text):
     return pre.strip(), post if any(ch.isalnum() for ch in post) else ""
 
 
-def shared_lead(cfg, lang):
-    """The words every message shares just before the press number, e.g.
-    'requested to press' or 'en la prensa'. They are recorded together with
-    each number ('requested to press 27'), which sounds far more natural than
-    a number said on its own. At least one word is left for each message."""
-    pres = [split_text(cfg["codes"][c][lang])[0].split() for c in sorted(cfg["codes"])]
-    k = 0
-    while all(len(p) > k + 1 for p in pres) and len({tuple(p[-(k + 1):]) for p in pres}) == 1:
-        k += 1
-    return pres[0][len(pres[0]) - k:] if k else []
+def slug(text):
+    """'Se solicita un técnico en la prensa' -> 'se_solicita_un_tecnico_en_la_prensa'."""
+    t = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+    return "_".join(re.findall(r"[a-z0-9]+", t))[:60] or "x"
 
 
 def parts(cfg, code, lang):
-    """(message start, shared lead before the number, tail after the number)."""
-    pre, post = split_text(cfg["codes"][code][lang])
-    lead = shared_lead(cfg, lang)
-    words = pre.split()
-    return " ".join(words[:len(words) - len(lead)]), " ".join(lead), post
+    """(lead, tail) around the press number. The lead and the number are recorded
+    together as one phrase ('Maintenance requested to press 27'), so the whole
+    start of the sentence is said naturally in one breath. Codes with the same
+    lead (2, 8 and 9; 4 and 7) share those recordings."""
+    return split_text(cfg["codes"][code][lang])
+
+
+def number_key(lang, lead, press):
+    return "%s/n/%s/%d.wav" % (lang, slug(lead), press)
 
 
 def number_text(lead, press):
@@ -129,13 +129,9 @@ class AudioLibrary:
             if self.clips.get(key) not in (None, want):
                 warn.append(key)
             return keys, warn
-        head, lead, post = parts(cfg, code, lang)
-        keys, expect = [], {}
-        if head:
-            keys.append("%s/c%d_pre.wav" % (lang, code))
-            expect[keys[-1]] = head
-        keys.append("%s/n/%d.wav" % (lang, press))
-        expect[keys[-1]] = number_text(lead, press)
+        lead, post = parts(cfg, code, lang)
+        keys = [number_key(lang, lead, press)]
+        expect = {keys[0]: number_text(lead, press)}
         if post:
             keys.append("%s/c%d_post.wav" % (lang, code))
             expect[keys[-1]] = post
@@ -172,7 +168,9 @@ class AudioLibrary:
     def _wrap(self, lead, body, opts):
         once = lead + body
         repeat = max(1, int(opts.get("repeat", 2)))
-        frames = (once + silence(1200)) * (repeat - 1) + once + silence(300)
+        # Silence first, so the paging system is open before the tone starts.
+        frames = (silence(int(opts.get("lead_silence_ms", 2500)))
+                  + (once + silence(1200)) * (repeat - 1) + once + silence(300))
         out = io.BytesIO()
         with wave.open(out, "wb") as w:
             w.setnchannels(1)
@@ -191,7 +189,7 @@ class AudioLibrary:
                 for press in (0, 1):
                     keys, warn = self.pieces(cfg, code, press, lang)
                     for k in keys:
-                        if k not in self.clips:
+                        if k not in self.clips or not os.path.exists(os.path.join(self.folder, k)):
                             problems.append("missing clip %s" % k)
                     for k in warn:
                         problems.append("clip %s no longer matches the config wording" % k)

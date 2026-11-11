@@ -27,6 +27,7 @@ result for each step.
 | A15 | Admin: turn dry run off, send one test call, then turn it back on | FAILED "phone pager not built yet" (until the phone step exists), then dry-run again | ☐ |
 | A17 | Admin: **Preview** codes 2 to 9 at press 27, code 2 at press 0, and code 2 at press 150 | right department tone, English, Spanish, twice; words and number right; 150 says "press number unknown" with a note; nothing logged | ☐ |
 | A18 | Admin page, Audio box | "OK: all messages recorded" | ☐ |
+| A19 | On the real PA: a test page | the start of the tone is not cut off (raise "Silence at the start" if it is); one voice throughout; words clear | ☐ |
 | A16 | `sudo bash install/update.sh` | "Already the newest version", service running, boards and dry-run setting kept | ☐ |
 
 ## B. At the cell (needs the board firmware)

@@ -9,8 +9,9 @@
   "page_retries": 3,
   "page_retry_wait_s": 10,
   "audio": {
-    "_note": "Page = department tone (per code, see codes.tone), English, Spanish, played 'repeat' times. tones: once, twice or off. Voice clips are made by tools/make_audio.py; tone files are in audio/tones.",
+    "_note": "Page = lead_silence_ms of silence, then department tone (per code, see codes.tone), English, Spanish, played 'repeat' times. tones: once, twice or off. Voice clips are made by tools/make_audio.py; tone files are in audio/tones.",
     "tones": "once",
+    "lead_silence_ms": 2500,
     "repeat": 2,
     "languages": [
       "en",

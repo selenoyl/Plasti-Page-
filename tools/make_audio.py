@@ -6,10 +6,10 @@
 # Piper offline voice, in English and Spanish, as phone-quality WAV files
 # (8 kHz, 16-bit, mono, trimmed, 200-3400 Hz):
 #
-#   <out>/<lang>/c<code>_pre.wav     "Maintenance requested to press"
 #   <out>/<lang>/c<code>_post.wav    "for camera fault."  (codes with a reason)
 #   <out>/<lang>/c<code>_nopress.wav the whole press-0 message
-#   <out>/<lang>/n/<1..100>.wav      the press number with the words before it
+#   <out>/<lang>/n/<lead>/<1..100>.wav  "Maintenance requested to press 27", one
+#                                    folder per distinct start of the message
 #                                    (--max-press; higher presses say "unknown")
 #   <out>/chime.wav                  attention chime played before a page
 #   <out>/manifest.json              the text of every clip, so the receiver can
@@ -59,28 +59,25 @@ def spoken(lang, text):
 
 # The receiver's own splitting rules, so the clips always match how it joins them.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "receiver"))
-from p833_audio import number_text, parts, split_text  # noqa: E402,F401
+from p833_audio import number_key, number_text, parts, split_text  # noqa: E402,F401
 
 
 def clip_plan(cfg, max_press=MAX_PRESS):
     """Every clip to make: {relative path: (lang, text)}.
 
     'Maintenance requested to press 27 for camera fault.' is recorded as
-    'Maintenance' + 'requested to press 27' + 'for camera fault.'"""
+    'Maintenance requested to press 27' + 'for camera fault.' The first part is
+    one phrase per department and number, shared by codes with the same start."""
     cfg = dict(cfg, codes={int(k): v for k, v in cfg["codes"].items()})
     plan = {}
     for code, c in sorted(cfg["codes"].items()):
         for lang in ("en", "es"):
-            head, lead, post = parts(cfg, code, lang)
-            if head:
-                plan["%s/c%d_pre.wav" % (lang, code)] = (lang, head)
+            lead, post = parts(cfg, code, lang)
             if post:
                 plan["%s/c%d_post.wav" % (lang, code)] = (lang, post)
             plan["%s/c%d_nopress.wav" % (lang, code)] = (lang, c.get(lang + "_no_press", c[lang]))
-    for lang in ("en", "es"):
-        lead = parts(cfg, min(cfg["codes"]), lang)[1]
-        for n in range(1, max_press + 1):
-            plan["%s/n/%d.wav" % (lang, n)] = (lang, number_text(lead, n))
+            for n in range(1, max_press + 1):
+                plan[number_key(lang, lead, n)] = (lang, number_text(lead, n))
     return plan
 
 

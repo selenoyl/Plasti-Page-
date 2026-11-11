@@ -36,6 +36,8 @@ By Ethan Brady & Ryan Raikes
 | D28 | 11 Nov 2026 | Only presses 1 to 100 are recorded (about 250 files, 7 MB, down from 2,036 files, 66 MB). A press above 100 pages as "press number unknown", with a note. | User's choice. A page with the wrong number would be worse than one that says it's unknown. |
 | D29 | 11 Nov 2026 | Each department has its own tone, from the user's andon tones (phone versions): maintenance bell (2, 8, 9), technician wood (3), supervisor glide (4, 7), quality flute (5), packaging pluck (6). The tone plays before each play of the message; once, twice or off, and per-code choice, on the admin page. | User request. The tones are kept as supplied (about 4 dB quieter than the speech). |
 | D30 | 11 Nov 2026 | Preview on the admin page shows the exact words and plays the exact audio of a test call before it is sent; it sends and logs nothing. | User request: hear the message before sending it. |
+| D31 | 11 Nov 2026 | Every page starts with 2.5 s of silence (adjustable 0 to 10 s on the admin page). | User request: the paging system must not miss the beginning of the message. |
+| D32 | 11 Nov 2026 | The start of the message and the press number are recorded as one phrase per department ("Maintenance requested to press 27"): 1,000 clips for presses 1 to 100 in two languages, 1,033 files and 45 MB in total. Supersedes the shared number clips of D24. | The user heard "Maintenance" as a different voice: recorded alone, the word was said as a finished statement, about 10% lower in pitch. The user chose this over the smaller set. |
 
 ## Open points
 

@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -78,7 +78,8 @@ def tuning_of(cfg):
             "zone_dial": {z: v.get("dial", "") for z, v in cfg["zones"].items()},
             "code_zone": {str(c): cfg["codes"][c]["zone"] for c in range(2, 10)},
             "code_tone": {str(c): cfg["codes"][c].get("tone", "") for c in range(2, 10)},
-            "audio": {"repeat": cfg["audio"]["repeat"], "tones": tone_style(cfg)}}
+            "audio": {"repeat": cfg["audio"]["repeat"], "tones": tone_style(cfg),
+                      "lead_silence_ms": cfg["audio"]["lead_silence_ms"]}}
 
 
 def apply_tuning(cfg, t):
@@ -97,6 +98,8 @@ def apply_tuning(cfg, t):
     a = t.get("audio", {})
     if "repeat" in a:
         cfg["audio"]["repeat"] = a["repeat"]
+    if "lead_silence_ms" in a:
+        cfg["audio"]["lead_silence_ms"] = a["lead_silence_ms"]
     if a.get("tones") in ("once", "twice", "off"):
         cfg["audio"]["tones"] = a["tones"]
     elif "chime" in a:                        # settings saved by v0.3.x
@@ -155,6 +158,12 @@ def parse_tuning(form, cfg, tone_names=None):
             raise ValueError
     except ValueError:
         errs.append("plays must be 1 to 5")
+    try:
+        audio["lead_silence_ms"] = int(form.get("lead_silence_ms", ""))
+        if not 0 <= audio["lead_silence_ms"] <= 10000:
+            raise ValueError
+    except ValueError:
+        errs.append("silence at the start must be 0 to 10000 ms")
     return {"phone": phone, "zone_dial": dials, "code_zone": zones, "code_tone": tones,
             "audio": audio}, errs
 
@@ -189,6 +198,7 @@ def load_config(path):
     audio.setdefault("repeat", 2)
     audio.setdefault("languages", ["en", "es"])
     audio.setdefault("keep_dry_run_pages", 20)
+    audio.setdefault("lead_silence_ms", 2500)
     phone = cfg.setdefault("phone", {})
     for k, v in PHONE_DEFAULTS.items():
         phone.setdefault(k, v)
@@ -952,7 +962,8 @@ def page_html(app, admin, msg=""):
             audio_html = "<p>OK: all messages recorded. Voices: %s.</p>" % e(
                 ", ".join("%s %s" % (k, v) for k, v in sorted(s["audio_voices"].items())))
         style = tone_style(cfg)
-        audio_html += "<p class=small>Page = %s, English, Spanish, played %d time(s).</p>" % (
+        audio_html += "<p class=small>Page = %.1f s silence, then %s, English, Spanish, played %d time(s).</p>" % (
+            int(cfg["audio"]["lead_silence_ms"]) / 1000.0,
             {"once": "department tone", "twice": "department tone twice", "off": "no tone"}[style],
             int(cfg["audio"].get("repeat", 2)))
         ph = cfg["phone"]
@@ -994,6 +1005,10 @@ def page_html(app, admin, msg=""):
                     "tone two times.</td></tr>" % "".join(
                         "<option value='%s'%s>%s</option>" % (v, " selected" if style == v else "", label)
                         for v, label in (("once", "once"), ("twice", "twice"), ("off", "off"))))
+        rows.append("<tr><td>Silence at the start (ms)</td><td><input name=lead_silence_ms type=number min=0 "
+                    "max=10000 step=100 value='%d' style='width:7em'></td><td class=small>Silence at the very "
+                    "beginning of the page audio, so the paging system is open before the tone starts. "
+                    "2000 to 3000 is usual.</td></tr>" % int(cfg["audio"]["lead_silence_ms"]))
         rows.append("<tr><td>Times the message plays</td><td><input name=repeat type=number min=1 max=5 value='%d' "
                     "style='width:5em'></td><td class=small>Each time: tone, English, Spanish.</td></tr>"
                     % int(cfg["audio"]["repeat"]))
