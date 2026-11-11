@@ -136,13 +136,24 @@ class SipPager:
         with self.line:
             return self._page(zone, dial, audio)
 
-    def connection_test(self, seconds=3):
-        """Call the HT813 and hold the line for a few seconds WITHOUT dialing
-        anything, so nobody is paged. Proves laptop -> HT813 -> line works."""
+    def connection_test(self, seconds=3, digits="", wav=None):
+        """With no digits: call the HT813 and hold the line for a few seconds
+        WITHOUT dialing, so nobody is paged (proves laptop -> HT813 -> line).
+        With digits: dial them, then play `wav` (a short tone), to find the
+        page code by trying candidates."""
         ph = self.cfg["phone"]
+        if digits and not re.match(r"^[0-9*#,F]{1,32}$", digits):
+            return False, "digits may only be 0-9 * # , F (got %s)" % digits
+        try:
+            pcm = wav_to_pcm(wav) if (digits and wav) else b"\x00\x00" * int(RATE * seconds)
+        except ValueError as e:
+            return False, str(e)
         with self.line:
             try:
-                secs = self.call(ph, "", b"\x00\x00" * int(RATE * seconds))
+                secs = self.call(ph, digits, pcm)
+                if digits:
+                    return True, ("dialed %s through HT813 %s:%s, then played the tone %.0f s and hung up. "
+                                  "Did the floor speakers play it?" % (digits, ph["ht813_ip"], ph["sip_port"], secs))
                 return True, ("HT813 %s:%s answered, held the line %.0f s and hung up. Nothing was dialed."
                               % (ph["ht813_ip"], ph["sip_port"], secs))
             except CallFailed as e:

@@ -50,6 +50,7 @@ result for each step.
 
 | # | Step | Expected | Pass |
 |---|---|---|---|
-| C1 | Analog phone on the ATA2: find the digits that page zone 1 | digits written into config `zones.floor.dial` | ☐ |
+| C0 | Admin page: "Call the HT813 (no dialing)" | Phone test OK; the HT813's FXO shows in use for ~3 s | ☐ |
+| C1 | Admin page: "Try page digits" with F,*62, then F,*621 (or what the phone admin says) | the floor speakers play the bell for one of them; put it in "Zone floor dial" and Save | ☐ |
 | C2 | One live test page, at an agreed quiet time | heard on the floor, in English then Spanish | ☐ |
 | C3 | Unplug the HT813, then a call | logged FAILED after 3 tries | ☐ |

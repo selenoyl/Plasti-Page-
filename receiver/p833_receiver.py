@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 
-VERSION = "0.4.3"
+VERSION = "0.5.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -762,8 +762,19 @@ class Handler(BaseHTTPRequestHandler):
             live = self.app["worker"].live
             if not hasattr(live, "connection_test"):
                 return self._back("The phone pager isn't available.")
-            LOG.info("phone connection test from admin page (%s)", who)
-            ok, detail = live.connection_test()
+            digits = form.get("digits", "").replace(" ", "").upper()
+            wav = None
+            if digits:
+                # The trial plays the first code's department tone (the maintenance bell), twice.
+                lib = self.app["worker"].audio
+                tone = self.app["cfg"]["codes"][2].get("tone", "")
+                try:
+                    wav = lib._wrap(b"", lib._frames("tones/twice/%s.wav" % tone) if tone
+                                    else lib._frames("chime.wav"), {"repeat": 1, "lead_silence_ms": 0})
+                except AudioError as e:
+                    return self._back("Phone test not run: no tone to play (%s)" % e)
+            LOG.info("phone %s from admin page (%s)", "digit trial %s" % digits if digits else "connection test", who)
+            ok, detail = live.connection_test(digits=digits, wav=wav)
             LOG.info("phone connection test: %s", detail)
             return self._back(("Phone test OK: " if ok else "Phone test FAILED: ") + detail)
 
@@ -1074,7 +1085,14 @@ until then the zones, codes, tones and plays already apply (see Listen and the l
 <form method=post action='/admin/phonetest' onsubmit="return confirm('Call the HT813 now? It takes the ATA2 line off-hook for about 3 seconds and dials NOTHING, so nobody is paged. This works with dry run on.')">
 <button>Call the HT813 (no dialing)</button></form>
 <p class=small>Uses the saved address and SIP port above. OK means the laptop reached the HT813 and it picked up
-the line. Save any changed settings first.</p></div>
+the line. Save any changed settings first.</p>
+<h3>Try page digits</h3>
+<form method=post action='/admin/phonetest' onsubmit="return confirm('Dial these digits through the HT813 and play the maintenance bell tone for about 4 seconds? If the digits open a page zone, that zone hears the bell (no spoken message). This works with dry run on.')">
+<label>Digits <input name=digits required maxlength=32 size=12 placeholder='F,*62'></label>
+<button>Dial and play the bell</button></form>
+<p class=small>To find the page code without paging a message. 0-9 * #, comma = half-second pause,
+F = hook flash (Link). On a Norstar desk phone the floor page is PAGE, SPEAKER, 1; from the ATA2 line try
+<b>F,*62</b>, then <b>F,*621</b>. When one works, put it in "Zone floor dial" above and Save.</p></div>
 """ % ("<b>Saved settings in use.</b>" if tuned else "Now using the config file's values.", "\n".join(rows))
         admin_html = """
 <div class=card><h2>Settings</h2>%s

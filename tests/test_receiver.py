@@ -719,6 +719,20 @@ class Server(unittest.TestCase):
         self.assertTrue(ht.wait_bye())
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "calls.csv")))   # not a page, not logged
 
+    def test_try_page_digits(self):
+        ht = self.use_fake_ht813()
+        self.state.dry_run = True                      # works with dry run on
+        _, loc, _ = self.admin("/admin/phonetest", {"digits": "f,*62"})
+        msg = urllib.parse.unquote(loc)
+        self.assertIn("Phone test OK", msg)
+        self.assertIn("dialed F,*62", msg)
+        self.assertEqual(ht.digits, ["F", "*", "6", "2"])
+        self.assertEqual(ht.audio_frames, 2)           # the fake "twice" tone is 200 samples = 2 packets
+        self.assertTrue(ht.wait_bye())
+        _, loc, _ = self.admin("/admin/phonetest", {"digits": "PAGE1"})
+        self.assertIn("FAILED", urllib.parse.unquote(loc))
+        self.assertIn("Try page digits", self.admin("/admin")[2])
+
     def test_phone_connection_test_reports_no_answer(self):
         self.use_fake_ht813(mode="silent")
         self.cfg["phone"]["max_call_s"] = 2

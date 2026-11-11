@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.4.3:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.5.0:** receiving, checking, logging, dry-run paging, the
 admin page, the editable phone settings and the recorded page audio are in and
 tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
@@ -201,6 +201,41 @@ then the **department tone**, English, Spanish, and the tone and message again
 
   Until the clips are re-made, the Audio box flags any that no longer match, and the old clips play. A page with a missing clip fails.
 - Custom pages from the admin page have no audio, because they are free text. In dry run they are logged; live, they fail.
+
+## Phone paging through the HT813
+
+With dry run off, each page is a phone call from the laptop to the Grandstream
+HT813's FXO port (direct SIP call, no phone server). The HT813 takes the ATA2
+line off-hook; the laptop sends the zone's dial digits as tones (2-stage), waits
+for the page to open, plays the page audio and hangs up. The settings are under
+**Phone and paging setup** on the admin page.
+
+**HT813 settings that matter** (firmware 1.0.17.3; the factory settings already
+match except where marked):
+
+| Page | Setting | Value |
+|---|---|---|
+| FXO PORT | Account Active | Yes |
+| FXO PORT | **SIP Registration** | **No** (no phone server) |
+| FXO PORT | Local SIP Port | 5062 (the admin page's "HT813 FXO SIP port") |
+| FXO PORT | Check SIP User ID for incoming INVITE / Allow Incoming SIP Messages from SIP Proxy Only / Authenticate incoming INVITE | No / No / No (direct calls allowed) |
+| FXO PORT | Stage Method | 2 |
+| FXO PORT | Preferred DTMF method | RFC2833 first, payload 101 |
+| FXO PORT | Send Hook Flash To PSTN | Yes (so `F` works), 600 ms |
+| FXO PORT | Preferred Vocoder | PCMU first |
+| FXO PORT | **Number of Rings** | **50** (it never answers calls coming in on the ATA2 line) |
+| ADVANCED | Disable Direct IP Call | No |
+| ADVANCED | **TR-069** | **No** (otherwise it reports to Grandstream's cloud) |
+| ADVANCED | **3CX Auto Provision** / **Allow DHCP Option 66 or 160 to override server** | **No** / **No** |
+| ADVANCED | Automatic Upgrade | No; and **Always Skip the Firmware Check** |
+| BASIC | Reply to ICMP on WAN port | Yes (so it answers ping when troubleshooting) |
+| BASIC | Admin password | changed from the label's |
+
+**Admin page tools:**
+- **Call the HT813 (no dialing):** holds the ATA2 line about 3 s and dials nothing. Proves laptop → HT813 → line.
+- **Try page digits:** dials what you type, then plays the maintenance bell tone for about 4 s (no spoken message). Use it to find the page code, then put it in "Zone floor dial". On a Norstar desk phone the floor page is PAGE, SPEAKER, 1 (Feature 62, zone 1). From the ATA2 line, try `F,*62`, then `F,*621`.
+
+Both work with dry run on.
 
 ## Cell boards
 
