@@ -38,6 +38,7 @@ if [ -e "$APP" ] || [ -e "$ETC" ] || [ -e "$UNIT" ]; then
     for p in "$APP" "$ETC" "$UNIT" /var/log/p833-receiver /var/lib/p833-receiver; do
         [ -e "$p" ] && cp -a --parents "$p" "$BK"/
     done
+    rm -rf "$BK$APP/audio"   # the clips are in the download; no need to keep a copy each time
     chmod 700 "$BK"
     echo "Backed up the old install to $BK"
 fi
@@ -50,9 +51,21 @@ fi
 
 # --- Program files.
 install -d -m 755 "$APP"
-install -m 644 receiver/p833_receiver.py "$APP"/
+install -m 644 receiver/p833_receiver.py receiver/p833_audio.py "$APP"/
 install -m 755 tools/p833_test_sender.py "$APP"/
 install -m 644 receiver/config.example.json "$APP"/
+# Recorded page audio (made by tools/make_audio.py). Replaced as a whole.
+if [ -f audio/manifest.json ]; then
+    rm -rf "$APP/audio.new"
+    cp -r audio "$APP/audio.new"
+    find "$APP/audio.new" -type d -exec chmod 755 {} +
+    find "$APP/audio.new" -type f -exec chmod 644 {} +
+    rm -rf "$APP/audio"
+    mv "$APP/audio.new" "$APP/audio"
+    echo "Audio: $(find "$APP/audio" -name '*.wav' | wc -l) clips installed"
+else
+    echo "Audio: no recorded clips in this folder; pages will have no sound until they are added"
+fi
 
 # --- Config: keep the existing one; drop the new example beside it.
 install -d -m 755 "$ETC"

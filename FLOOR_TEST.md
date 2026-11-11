@@ -25,6 +25,8 @@ result for each step.
 | A13 | Admin: add a board `TEST_1`, rename it, remove it | the list updates each time and stays the same after a restart | ☐ |
 | A14 | Admin: send a custom page | logged as code "custom", dry-run | ☐ |
 | A15 | Admin: turn dry run off, send one test call, then turn it back on | FAILED "phone pager not built yet" (until the phone step exists), then dry-run again | ☐ |
+| A17 | Admin: **Listen** for codes 2, 7, 8 and 9 at press 27, and code 2 at press 0 | chime, English, Spanish, twice; words and number right | ☐ |
+| A18 | Admin page, Audio box | "OK: all messages recorded" | ☐ |
 | A16 | `sudo bash install/update.sh` | "Already the newest version", service running, boards and dry-run setting kept | ☐ |
 
 ## B. At the cell (needs the board firmware)

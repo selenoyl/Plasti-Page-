@@ -15,8 +15,9 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.2.1:** receiving, checking, logging, dry-run paging and the
-admin page work and are tested. The phone call to the HT813 is not built yet:
+**Status, version 0.3.0:** receiving, checking, logging, dry-run paging, the
+admin page and joining the recorded audio into a page work and are tested.
+The recorded clips themselves are not in the repository yet (see "Page audio"). The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
 No real page can go out.
 
@@ -150,6 +151,32 @@ Other uses:
 
 Credentials never go in `config.json`. The board key and admin password are in `secrets.env`, which only root can read.
 
+## Page audio
+
+Every page is spoken from clips recorded ahead of time, so the laptop needs no
+speech program and no internet. A page plays: chime, English, Spanish, and the
+whole thing again (`audio.repeat`, default 2).
+
+- The clips live in `audio/` in the repository and are installed to `/opt/p833-receiver/audio`.
+- They are made by `tools/make_audio.py` with the free offline Piper voices: `en_US-lessac-medium` (English) and `es_MX-claude-high` (Spanish).
+- Each message is recorded in pieces ("Maintenance requested to press", the number, "for camera fault."), and the numbers 1 to 999 are recorded once each. That's about 2,000 clips.
+- On the admin page:
+  - The **Audio** box shows whether every message is recorded and matches the config wording.
+  - **Listen** plays any call in the browser without paging.
+- In dry run, the audio of the last 20 pages is saved in `/var/lib/p833-receiver/last_pages/`.
+- If you change the wording in the config, re-make the clips. The Audio box flags clips that no longer match the wording. Until they're re-made, the old clips play. A page with a missing clip fails.
+
+  ```bash
+  python3 -m pip install piper-tts
+  ```
+
+  ```bash
+  python3 tools/make_audio.py --config /etc/p833-receiver/config.json --out audio
+  ```
+
+  Then run `sudo bash install/install.sh`. This needs Python 3.9 or newer, ffmpeg, and internet the first time, to download the voices.
+- Custom pages from the admin page have no audio yet, because they are free text. In dry run they are logged; live, they fail.
+
 ## Board to laptop message (for the board firmware)
 
 Over Wi-Fi, by HTTP POST to `http://192.168.83.10:8833`, with the header
@@ -196,6 +223,9 @@ The laptop replies `200 {"ok": true, ...}`. The board resends the **same** body 
 | `tools/p833_test_sender.py` | Test sender that plays a board. |
 | `install/install.sh` | First setup, or reinstall from this folder. Safe to run again. |
 | `install/update.sh` | Fetch the newest version from GitHub and run the installer. |
+| `receiver/p833_audio.py` | Joins the recorded clips into a page. |
+| `tools/make_audio.py` | Records the clips with Piper (run on a PC with internet). |
+| `audio/` | The recorded clips and `manifest.json` (once made). |
 | `install/migrate_config.py` | Run by the installer: updates default wording in an installed config, keeping your own edits. |
 | `install/p833-receiver.service` | systemd unit. |
 | `install/laptop-stay-awake.sh` | Lid and sleep settings. |

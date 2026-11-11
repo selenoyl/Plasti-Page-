@@ -19,8 +19,107 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "receiver"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "install"))
 import p833_receiver as R          # noqa: E402
 import p833_test_sender as S       # noqa: E402
+import p833_audio as A             # noqa: E402
+import make_audio as M             # noqa: E402  (stdlib part only; piper not needed)
+
+
+def make_fake_audio(folder, cfg_path=None, drop=(), change=None):
+    """A fake clip library: each clip is a short beep whose length encodes nothing in
+    particular; enough to test joining, checks and missing clips."""
+    import wave as _w
+    with open(cfg_path or CONFIG, encoding="utf-8") as f:
+        cfg = json.load(f)
+    plan = M.clip_plan(cfg)
+    clips = {}
+    for key, (lang, text) in plan.items():
+        clips[key] = text
+        if key in drop:
+            continue
+        path = os.path.join(folder, key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with _w.open(path, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+            w.writeframes(b"\x10\x00" * 80)          # 10 ms
+    M.make_chime(os.path.join(folder, "chime.wav"))
+    if change:
+        clips.update(change)
+    with open(os.path.join(folder, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump({"rate": 8000, "voices": {"en": "fake-en", "es": "fake-es"}, "clips": clips}, f)
+    return folder
+
+
+class Audio(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.lib = A.AudioLibrary(make_fake_audio(cls.tmp))
+        cls.cfg = R.load_config(CONFIG)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def frames(self, wav):
+        import io, wave as _w
+        with _w.open(io.BytesIO(wav)) as w:
+            self.assertEqual((w.getframerate(), w.getsampwidth(), w.getnchannels()), (8000, 2, 1))
+            return w.getnframes()
+
+    def test_split_matches_make_audio(self):
+        for code in range(2, 10):
+            for lang in ("en", "es"):
+                t = self.cfg["codes"][code][lang]
+                self.assertEqual(A.split_text(t), M.split_text(t))
+        self.assertEqual(A.split_text("Maintenance requested to press {press}."),
+                         ("Maintenance requested to press", ""))
+        self.assertEqual(A.split_text("Maintenance requested to press {press} for camera fault."),
+                         ("Maintenance requested to press", "for camera fault."))
+
+    def test_pieces(self):
+        keys, warn = self.lib.pieces(self.cfg, 8, 27, "en")
+        self.assertEqual(keys, ["en/c8_pre.wav", "en/n/27.wav", "en/c8_post.wav"])
+        self.assertEqual(self.lib.pieces(self.cfg, 2, 27, "es")[0], ["es/c2_pre.wav", "es/n/27.wav"])
+        self.assertEqual(self.lib.pieces(self.cfg, 2, 0, "en")[0], ["en/c2_nopress.wav"])
+        self.assertEqual(warn, [])
+
+    def test_build_lengths(self):
+        cfg = json.loads(json.dumps(self.cfg, default=str))
+        cfg["codes"] = self.cfg["codes"]
+        # chime 0.5 s + 0.3 s gap, en 3 clips + 2 gaps, 0.7 s, es 3 clips + 2 gaps, tail
+        cfg["audio"] = dict(self.cfg["audio"], repeat=1)
+        one = self.frames(self.lib.build(cfg, 8, 27)[0])
+        expect = 4000 + 2400 + (3 * 80 + 2 * 720) + 5600 + (3 * 80 + 2 * 720) + 2400
+        self.assertEqual(one, expect)
+        cfg["audio"] = dict(self.cfg["audio"], repeat=2)
+        two = self.frames(self.lib.build(cfg, 8, 27)[0])
+        self.assertEqual(two, 2 * (expect - 2400) + 9600 + 2400)
+        cfg["audio"] = dict(self.cfg["audio"], repeat=1, chime=False, languages=["en"])
+        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
+
+    def test_check_ok_and_stale(self):
+        self.assertEqual(self.lib.check(self.cfg), [])
+        tmp = tempfile.mkdtemp()
+        try:
+            lib = A.AudioLibrary(make_fake_audio(tmp, drop=("es/n/1.wav",),
+                                                 change={"en/c2_pre.wav": "Maintenance needed at press"}))
+            probs = lib.check(self.cfg)
+            self.assertTrue(any("en/c2_pre.wav no longer matches" in p for p in probs), probs)
+            wav, stale = lib.build(self.cfg, 2, 5)
+            self.assertEqual(stale, ["en/c2_pre.wav"])
+            with self.assertRaises(A.AudioError):
+                lib.build(self.cfg, 2, 1)          # es/n/1.wav is missing
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_no_library(self):
+        lib = A.AudioLibrary("/nonexistent/p833")
+        self.assertTrue(lib.check(self.cfg))
+        with self.assertRaises(A.AudioError):
+            lib.build(self.cfg, 2, 5)
+
 
 CONFIG = os.path.join(ROOT, "receiver", "config.example.json")
 KEY = "test-key-123"
@@ -108,7 +207,10 @@ class Server(unittest.TestCase):
         self.state = R.State(cfg, self.tmp, self.tmp)
         self.pager = FakePager()
         self.state.dry_run = False          # route pages to the fake pager
-        self.worker = R.PageWorker(cfg, self.state, self.pager)
+        self.audio_dir = make_fake_audio(os.path.join(self.tmp, "audio"))
+        self.worker = R.PageWorker(cfg, self.state, self.pager,
+                                   dry_pager=R.DryRunPager(os.path.join(self.tmp, "last_pages")),
+                                   audio=A.AudioLibrary(self.audio_dir))
         self.worker.start()
         R.Handler.app = {"cfg": cfg, "state": self.state, "worker": self.worker, "key": KEY,
                          "admin_password": ADMIN_PW}
@@ -299,9 +401,13 @@ class Server(unittest.TestCase):
         st, loc, _ = self.admin("/admin/custom", {"zone": "floor", "en": "Test page one.", "es": "Prueba uno."})
         self.assertEqual(st, 303)
         self.wait_pages(1)
-        self.assertEqual(self.pager.sent, [("floor", "TO-VERIFY", "Test page one.", "Prueba uno.")])
+        self.assertEqual(self.pager.sent, [])        # live: no audio for custom text yet
         row = self.wait_row()
-        self.assertEqual((row["code"], row["result"]), ("custom", "sent"))
+        self.assertEqual((row["code"], row["result"]), ("custom", "FAILED"))
+        self.state.dry_run = True
+        self.admin("/admin/custom", {"zone": "floor", "en": "Test page two."})
+        self.wait_pages()
+        self.assertEqual(self.log_rows()[-1]["result"], "dry-run")
         _, loc, _ = self.admin("/admin/custom", {"zone": "nowhere", "en": "x"})
         self.assertIn("not sent", urllib.parse.unquote(loc))
         _, loc, _ = self.admin("/admin/custom", {"zone": "floor", "en": ""})
@@ -330,6 +436,46 @@ class Server(unittest.TestCase):
         _, _, body = self.admin("/admin?msg=%3Cscript%3Ex%3C/script%3E")
         self.assertNotIn("<script>x</script>", body)
 
+    def test_live_page_carries_audio(self):
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 9, "press": 27})
+        self.wait_pages()
+        self.assertTrue(self.pager.audio[0].startswith(b"RIFF"))
+
+    def test_dry_run_saves_audio(self):
+        self.state.dry_run = True
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 3})
+        self.wait_pages()
+        saved = os.listdir(os.path.join(self.tmp, "last_pages"))
+        self.assertEqual(len(saved), 1)
+        self.assertIn("audio saved as", self.wait_row()["detail"])
+
+    def test_missing_audio_fails_live_page(self):
+        os.remove(os.path.join(self.audio_dir, "en", "n", "3.wav"))
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 3})
+        self.wait_pages()
+        row = self.wait_row()
+        self.assertEqual((row["result"], row["attempts"]), ("FAILED", "0"))
+        self.assertIn("no audio", row["detail"])
+        self.assertEqual(self.pager.sent, [])
+
+    def test_custom_page_live_has_no_audio_yet(self):
+        self.admin("/admin/custom", {"zone": "floor", "en": "Hello."})
+        self.wait_pages()
+        self.assertEqual(self.wait_row()["result"], "FAILED")
+
+    def test_listen(self):
+        st, _, _ = self.admin("/admin/listen?code=8&press=27", pw=None)
+        self.assertEqual(st, 401)
+        url = "http://127.0.0.1:%d/admin/listen?code=8&press=27" % self.port
+        req = urllib.request.Request(url, headers={"Authorization": "Basic " + base64.b64encode(
+            ("a:" + ADMIN_PW).encode()).decode()})
+        with urllib.request.urlopen(req) as r:
+            self.assertEqual(r.headers["Content-Type"], "audio/wav")
+            self.assertTrue(r.read().startswith(b"RIFF"))
+        self.assertEqual(self.admin("/admin/listen?code=1&press=27")[0], 400)
+        self.assertEqual(self.pager.sent, [])          # listening never pages
+        self.assertIn("all messages recorded", self.admin("/admin")[2])
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):
@@ -339,9 +485,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class FakePager:
     def __init__(self):
         self.sent = []
+        self.audio = []
         self.fail = 0
 
-    def page(self, zone, dial, en, es):
+    def page(self, zone, dial, en, es, audio=None):
+        self.audio.append(audio)
         if self.fail:
             self.fail -= 1
             return False, "fake failure"

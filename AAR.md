@@ -24,6 +24,9 @@ By Ethan Brady & Ryan Raikes
 | D16 | 11 Nov 2026 | `install.sh` handles both first setup and updates; `update.sh` pulls from GitHub and then runs it. | User request. Every run backs up first and keeps the config, secrets, board list and log. |
 | D17 | 11 Nov 2026 | All pages now say "<Who> requested to press N", including codes 7 to 9 ("Maintenance requested to press N for camera fault"). Spanish: "Se solicita ... en la prensa N". Press 0: "<Who> requested. Press number unknown." Replaces D7's "needed at" and the PLC brief's "required at". | User's choice. |
 | D18 | 11 Nov 2026 | On update, the installer (`install/migrate_config.py`) replaces page text in the laptop's config only where it is still an old default, and adds new settings. Hand-edited text and the dial digits are kept. | So wording changes reach the laptop without losing local edits. The old config is backed up first. |
+| D19 | 11 Nov 2026 | Page audio is recorded ahead of time with the Piper offline voices (en_US-lessac-medium, es_MX-claude-high), in pieces plus the numbers 1 to 999, and joined at page time: chime, English, Spanish, played twice. | No speech program or internet needed on the laptop; natural voice. |
+| D20 | 11 Nov 2026 | The clips are made in the build session and pushed to the repository (user's choice). | User's choice. |
+| D21 | 11 Nov 2026 | A live page with a missing clip fails (FAILED, "no audio"); a clip whose text no longer matches the config still plays, with a warning on the admin page. | A silent page is useless and must show as failed; old wording is better than none. |
 
 ## Open points
 
@@ -31,7 +34,7 @@ By Ethan Brady & Ryan Raikes
 |---|---|---|
 | O1 | Digits that page zone 1 from the ATA2 line. "PAGE then 1" is the desk-phone way; an analog line on an ATA2 likely needs a feature code. Test with an analog phone on the ATA2. | User / phone admin |
 | O2 | The phone step: the laptop calls the HT813, which dials the page and plays the audio. Includes the HT813 settings. | Next build step |
-| O3 | Spoken audio: not built yet. Pre-recorded clips (each message, 0 to 999, "unknown") in English and Spanish, about 16 MB. The Piper voice files can't be downloaded from this build session (huggingface.co is blocked), so they would be made on the laptop, which has internet, or the session's network must allow huggingface.co. | Next build step |
+| O3 | Spoken audio: the receiver side is built (v0.3.0); the clips are not yet recorded. Pre-recorded clips (each message, 0 to 999, "unknown") in English and Spanish, about 16 MB. The Piper voice files can't be downloaded from this build session (huggingface.co is blocked), so they would be made on the laptop, which has internet, or the session's network must allow huggingface.co. | Next build step |
 | O4 | Spanish wording to be checked by a Spanish-speaking lead, especially "Se solicita calidad / empaque". | User |
 | O5 | Board firmware (Arduino sketch). Needs the Waveshare pin list and the input wiring; waveshare.com is blocked in this session, so the board's wiki page or schematic is needed. | User to supply, then build |
 | O6 | Input wiring: PLC 24 V sourcing output into the board's isolated input. Confirm the input's voltage range and common terminal before wiring. | Confirm from the datasheet |
@@ -39,4 +42,6 @@ By Ethan Brady & Ryan Raikes
 | O8 | Who maintains the laptop. | User |
 | O9 | IoT network: Wi-Fi name and password for the boards, fixed addresses (proposed 192.168.83.x), and whether the laptop is wired or on Wi-Fi. | User / IT |
 | O11 | The admin password travels as plain HTTP on the IoT network. Acceptable while the network stays isolated; revisit if the laptop ever joins the plant LAN. | Later |
+| O12 | Custom pages (free text) have no audio. Needs Piper installed on the laptop to speak them live. | Later, if wanted |
+| O13 | Spanish voice is Mexican Spanish (es_MX). Change it if the floor would rather hear Spain Spanish (es_ES). | User |
 | O10 | calls.csv grows slowly (a few lines per call). A yearly archive is enough; no rotation is set up yet. | Later |

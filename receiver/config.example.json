@@ -8,6 +8,16 @@
   "board_silent_after_s": 180,
   "page_retries": 3,
   "page_retry_wait_s": 10,
+  "audio": {
+    "_note": "Page = chime, English, Spanish, played 'repeat' times. Clips are made by tools/make_audio.py.",
+    "chime": true,
+    "repeat": 2,
+    "languages": [
+      "en",
+      "es"
+    ],
+    "keep_dry_run_pages": 20
+  },
   "boards": {
     "RSP_LH": {
       "cell": "RSP LH"

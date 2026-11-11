@@ -30,7 +30,10 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-VERSION = "0.2.1"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from p833_audio import AudioError, AudioLibrary  # noqa: E402
+
+VERSION = "0.3.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -61,6 +64,15 @@ def load_config(path):
     cfg.setdefault("board_silent_after_s", 180)
     cfg.setdefault("page_retries", 3)
     cfg.setdefault("page_retry_wait_s", 10)
+    audio = cfg.setdefault("audio", {})
+    here = os.path.dirname(os.path.abspath(__file__))
+    # Installed: /opt/p833-receiver/audio. Run from the repo: <repo>/audio.
+    audio.setdefault("dir", next((d for d in (os.path.join(here, "audio"), os.path.join(here, "..", "audio"))
+                                  if os.path.isdir(d)), os.path.join(here, "audio")))
+    audio.setdefault("chime", True)
+    audio.setdefault("repeat", 2)
+    audio.setdefault("languages", ["en", "es"])
+    audio.setdefault("keep_dry_run_pages", 20)
     return cfg
 
 
@@ -287,10 +299,25 @@ def accept_call(app, call, ip, note=""):
 # ---------------------------------------------------------------- pagers ---
 
 class DryRunPager:
-    """Logs the page it would send. Never dials."""
+    """Logs the page it would send and saves its audio. Never dials."""
 
-    def page(self, zone, dial, en, es):
+    def __init__(self, save_dir=None, keep=20):
+        self.save_dir, self.keep = save_dir, keep
+
+    def page(self, zone, dial, en, es, audio=None):
         LOG.info("DRY RUN page: zone=%s dial=%s | %s | %s", zone, dial, en, es)
+        if audio and self.save_dir:
+            try:
+                os.makedirs(self.save_dir, exist_ok=True)
+                name = datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".wav"
+                with open(os.path.join(self.save_dir, name), "wb") as f:
+                    f.write(audio)
+                old = sorted(n for n in os.listdir(self.save_dir) if n.endswith(".wav"))
+                for n in old[:-self.keep]:
+                    os.remove(os.path.join(self.save_dir, n))
+                return True, "dry run, not dialed; audio saved as %s" % name
+            except OSError as e:
+                LOG.warning("could not save dry-run audio: %s", e)
         return True, "dry run, not dialed"
 
 
@@ -301,7 +328,7 @@ class NotBuiltPager:
     silently going nowhere."""
     built = False
 
-    def page(self, zone, dial, en, es):
+    def page(self, zone, dial, en, es, audio=None):
         return False, "phone pager not built yet (HT813 step); nothing was dialed"
 
 
@@ -314,11 +341,25 @@ class PageWorker(threading.Thread):
 
     Dry run is checked for each page, so the admin switch takes effect at once."""
 
-    def __init__(self, cfg, state, live_pager, dry_pager=None):
+    def __init__(self, cfg, state, live_pager, dry_pager=None, audio=None):
         super().__init__(daemon=True)
         self.cfg, self.state = cfg, state
         self.live, self.dry = live_pager, dry_pager or DryRunPager()
+        self.audio = audio or AudioLibrary(cfg["audio"]["dir"])
         self.jobs = queue.Queue()
+
+    def make_audio(self, rec):
+        """Return (WAV bytes or None, note for the log)."""
+        try:
+            if rec["code"] == "custom":
+                return self.audio.build_custom(self.cfg, rec["en"], rec["es"]), ""
+            wav, stale = self.audio.build(self.cfg, int(rec["code"]), int(rec["press"]))
+            if stale:
+                LOG.warning("audio out of date for: %s", ", ".join(stale))
+                return wav, "audio does not match the config wording; run make_audio"
+            return wav, ""
+        except AudioError as e:
+            return None, "no audio: %s" % e
 
     def run(self):
         while True:
@@ -327,11 +368,12 @@ class PageWorker(threading.Thread):
             dial = self.cfg["zones"][zone]["dial"]
             dry = self.state.dry_run
             pager = self.dry if dry else self.live
-            tries = self.cfg["page_retries"]
-            ok, detail, n = False, "", 0
+            audio, audio_note = self.make_audio(rec)
+            tries = self.cfg["page_retries"] if (audio or dry) else 0
+            ok, detail, n = False, audio_note, 0
             for n in range(1, tries + 1):
                 try:
-                    ok, detail = pager.page(zone, dial, rec["en"], rec["es"])
+                    ok, detail = pager.page(zone, dial, rec["en"], rec["es"], audio)
                 except Exception as e:  # a pager bug must not stop the worker
                     ok, detail = False, "error: %s" % e
                 if ok:
@@ -340,6 +382,8 @@ class PageWorker(threading.Thread):
                 if n < tries:
                     time.sleep(self.cfg["page_retry_wait_s"])
             rec["attempts"] = n
+            if audio_note and audio_note not in detail:
+                detail = audio_note + "; " + detail
             rec["detail"] = (rec["note"] + "; " if rec.get("note") else "") + detail
             if ok:
                 rec["result"] = "dry-run" if dry else "sent"
@@ -528,6 +572,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(200, status_obj(self.app))
         if parts.path in ("/", "/index.html"):
             return self._reply(200, page_html(self.app, False).encode(), "text/html; charset=utf-8")
+        if parts.path == "/admin/listen":
+            if not self._admin_ok():
+                return self._ask_password()
+            q = parse_qs(parts.query)
+            try:
+                code, press = int(q.get("code", [""])[0]), int(q.get("press", [""])[0])
+                if not (2 <= code <= 9 and 0 <= press <= 999):
+                    raise ValueError
+            except ValueError:
+                return self._reply(400, b"code 2-9 and press 0-999 needed", "text/plain")
+            try:
+                wav, stale = self.app["worker"].audio.build(self.app["cfg"], code, press)
+            except AudioError as e:
+                return self._reply(404, ("No audio: %s" % e).encode(), "text/plain; charset=utf-8")
+            return self._reply(200, wav, "audio/wav")
         if parts.path == "/admin":
             if not self._admin_ok():
                 return self._ask_password()
@@ -563,6 +622,8 @@ def status_obj(app):
         calls = list(reversed(st.calls))
     return {"version": VERSION, "dry_run": st.dry_run,
             "phone_pager_built": getattr(app["worker"].live, "built", True),
+            "audio_voices": app["worker"].audio.manifest.get("voices", {}),
+            "audio_problems": app["worker"].audio.check(cfg),
             "pages_waiting": app["worker"].jobs.qsize(),
             "boards": boards, "calls": calls}
 
@@ -653,6 +714,17 @@ def page_html(app, admin, msg=""):
             switch = ("<p>Dry run is <b>OFF</b>: pages are dialed.</p>"
                       "<form method=post action='/admin/dryrun'><input type=hidden name=dry_run value=on>"
                       "<button>Turn dry run ON (stop dialing)</button></form>")
+        probs = s["audio_problems"]
+        if probs:
+            audio_html = "<p><b>Audio problems (%d):</b></p><ul>%s</ul>" % (len(probs), "".join(
+                "<li>%s</li>" % e(x) for x in probs[:12])) + ("<p>...</p>" if len(probs) > 12 else "")
+            audio_html += ("<p class=small>Clips are made by tools/make_audio.py from the config wording. "
+                           "Until fixed, affected pages use the old clips, or fail if a clip is missing.</p>")
+        else:
+            audio_html = "<p>OK: all messages recorded. Voices: %s.</p>" % e(
+                ", ".join("%s %s" % (k, v) for k, v in sorted(s["audio_voices"].items())))
+        audio_html += "<p class=small>Page = %schime, English, Spanish, played %d time(s).</p>" % (
+            "" if cfg["audio"].get("chime", True) else "no ", int(cfg["audio"].get("repeat", 2)))
         admin_html = """
 <div class=card><h2>Settings</h2>%s
 <p class=small>Saved on the laptop and kept through restarts. The config file's "dry_run" is only the default.</p></div>
@@ -661,9 +733,11 @@ def page_html(app, admin, msg=""):
 <label>From board <select name=board required>%s</select></label>
 <label>Call <select name=code>%s</select></label>
 <label>Press <input name=press type=number min=0 max=999 value=0 required style='width:6em'></label>
-<button>Send test call</button></form>
+<button>Send test call</button>
+<button formaction='/admin/listen' formmethod=get formtarget=_blank>Listen (no page)</button></form>
 <p class=small>Goes through the same checks, repeat drop, log and pager as a real call from that board.
-Press 0 tests the "press number unknown" message.</p></div>
+Press 0 tests the "press number unknown" message. <b>Listen</b> plays the page in this browser without sending anything.</p></div>
+<div class=card><h2>Audio</h2>%s</div>
 <div class=card><h2>Add or rename a board</h2>
 <form method=post action='/admin/board/add'>
 <label>Board ID <input name=board required maxlength=32 pattern='[A-Za-z0-9_-]{1,32}' placeholder='FSP_LH' size=10></label>
@@ -677,8 +751,9 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <label>English <input name=en required maxlength=200 size=60 placeholder='Test page. Maintenance requested to press 12.'></label><br>
 <label>Spanish <input name=es maxlength=200 size=60 placeholder='Prueba. Se solicita mantenimiento en la prensa 12.'></label><br>
 <button>Send custom page</button></form>
-<p class=small>Your own wording, read English then Spanish (leave Spanish empty for English only). Logged as code "custom".</p></div>
-""" % (switch, live_warn, board_opts, code_opts, live_warn, zone_opts)
+<p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
+Custom text has no recorded audio yet, so with dry run off a custom page fails until on-laptop speech is added.</p></div>
+""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts)
 
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -727,7 +802,16 @@ def main(argv=None):
     state = State(cfg, args.state_dir, args.log_dir)
     if args.dry_run:
         state.dry_run = True   # for this run only; not saved
-    worker = PageWorker(cfg, state, make_live_pager(cfg))
+    dry_pager = DryRunPager(os.path.join(args.state_dir, "last_pages"),
+                            int(cfg["audio"]["keep_dry_run_pages"]))
+    worker = PageWorker(cfg, state, make_live_pager(cfg), dry_pager)
+    if worker.audio.load_error:
+        LOG.warning("AUDIO: %s", worker.audio.load_error)
+    else:
+        problems = worker.audio.check(cfg)
+        LOG.info("audio: %d clips, voices %s%s", len(worker.audio.clips),
+                 worker.audio.manifest.get("voices"),
+                 "; %d problem(s), see the admin page" % len(problems) if problems else "")
     worker.start()
     Handler.app = {"cfg": cfg, "state": state, "worker": worker, "key": key,
                    "admin_password": admin_pw}
