@@ -59,6 +59,11 @@ PLC slot 2 OUT14 (24 V sourcing) --> DI1 --> decode pulses --> Wi-Fi --> laptop 
 - The COM wiring comes from Waveshare's wiki for their Modbus 8-channel I/O module, which uses the same "DI COM / DGND" terminals and input design: "COM connected to the negative pole of the power supply: high-level active, PNP type wet contact active input, 5 V to 36 V DC". This board's own wiki doesn't describe it, so **confirm it with `watch` on the bench** (setup step 5) before relying on it.
 - Keep the Wi-Fi antenna on the SMA connector and outside any metal enclosure if you can.
 
+**If a call from the panel shows nothing in `watch`** (as happened on the first cell):
+1. Jumper 24 V to DI1 to prove the input works.
+2. Force `Local:2:O.Data.14` on in Studio 5000 to prove the wire is on the output the program uses.
+3. Look at the card door label: outputs count from 0, so **OUT14 is the 15th terminal**.
+
 ## Flash it (once per board)
 
 1. Install the **Arduino IDE** (2.x).
