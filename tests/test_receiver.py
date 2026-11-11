@@ -331,7 +331,7 @@ class Server(unittest.TestCase):
         st, txt = self.post("/call", {"board": "RSP_LH", "boot": "b1", "seq": 5, "code": 2, "press": 27})
         self.assertEqual(st, 200, txt)
         self.wait_pages(1)
-        self.assertEqual(self.pager.sent, [("floor", "", "Maintenance requested to press number 27.",
+        self.assertEqual(self.pager.sent, [("floor", "F,*60,2,1", "Maintenance requested to press number 27.",
                                             "Se solicita mantenimiento en la prensa número 27.")])
         row = self.log_rows()[-1]
         self.assertEqual((row["cell"], row["press"], row["code"], row["result"]),
@@ -612,10 +612,10 @@ class Server(unittest.TestCase):
         # reset
         self.admin("/admin/tuning/reset", {})
         self.assertEqual((self.cfg["zones"]["floor"]["dial"], self.cfg["codes"][4]["zone"],
-                          self.cfg["phone"]["ht813_ip"]), ("", "floor", "192.168.83.20"))
+                          self.cfg["phone"]["ht813_ip"]), ("F,*60,2,1", "floor", "192.168.83.20"))
         cfg3 = R.load_config(CONFIG)
         R.State(cfg3, self.tmp, self.tmp)
-        self.assertEqual(cfg3["zones"]["floor"]["dial"], "")
+        self.assertEqual(cfg3["zones"]["floor"]["dial"], "F,*60,2,1")
 
     def test_tuning_bad_values_not_saved(self):
         for bad in ({"ht813_ip": "300.1.1.1"}, {"dial_floor": "PAGE1"}, {"dtmf_ms": "5"},
