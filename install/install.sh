@@ -59,6 +59,8 @@ install -d -m 755 "$ETC"
 if [ -e "$ETC/config.json" ]; then
     install -m 644 receiver/config.example.json "$ETC/config.json.new"
     echo "Kept your $ETC/config.json (new example saved as config.json.new)"
+    "$PY" install/migrate_config.py "$ETC/config.json" receiver/config.example.json
+    chmod 644 "$ETC/config.json"
 else
     install -m 644 receiver/config.example.json "$ETC/config.json"
     echo "Installed $ETC/config.json (dry run is ON)"

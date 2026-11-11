@@ -1,68 +1,104 @@
 {
   "_about": "P833 Call Receiver config. By Ethan Brady & Ryan Raikes. Installed at /etc/p833-receiver/config.json. Restart the service after editing: sudo systemctl restart p833-receiver",
-
   "listen": "0.0.0.0",
   "port": 8833,
   "dry_run": true,
-
   "repeat_window_s": 600,
   "same_call_window_s": 15,
   "board_silent_after_s": 180,
   "page_retries": 3,
   "page_retry_wait_s": 10,
-
   "boards": {
-    "RSP_LH": {"cell": "RSP LH"},
-    "RSP_RH": {"cell": "RSP RH"},
-    "FSP_LH": {"cell": "FSP LH"},
-    "FSP_RH": {"cell": "FSP RH"}
+    "RSP_LH": {
+      "cell": "RSP LH"
+    },
+    "RSP_RH": {
+      "cell": "RSP RH"
+    },
+    "FSP_LH": {
+      "cell": "FSP LH"
+    },
+    "FSP_RH": {
+      "cell": "FSP RH"
+    }
   },
-
   "zones": {
-    "floor":  {"dial": "TO-VERIFY", "_note": "Digits the HT813 dials on the ATA2 line to page the factory floor. Verify with an analog phone on the ATA2."},
-    "office": {"dial": "TO-VERIFY", "_note": "Not used by any code yet."}
+    "floor": {
+      "dial": "TO-VERIFY",
+      "_note": "Digits the HT813 dials on the ATA2 line to page the factory floor. Verify with an analog phone on the ATA2."
+    },
+    "office": {
+      "dial": "TO-VERIFY",
+      "_note": "Not used by any code yet."
+    }
   },
-
   "codes": {
-    "2": {"who": "Maintenance", "zone": "floor",
-          "en": "Maintenance needed at press {press}.",
-          "es": "Se necesita mantenimiento en la prensa {press}.",
-          "en_no_press": "Maintenance needed. Press number unknown.",
-          "es_no_press": "Se necesita mantenimiento. Prensa desconocida."},
-    "3": {"who": "Technician", "zone": "floor",
-          "en": "Technician needed at press {press}.",
-          "es": "Se necesita un técnico en la prensa {press}.",
-          "en_no_press": "Technician needed. Press number unknown.",
-          "es_no_press": "Se necesita un técnico. Prensa desconocida."},
-    "4": {"who": "Supervisor", "zone": "floor",
-          "en": "Supervisor needed at press {press}.",
-          "es": "Se necesita un supervisor en la prensa {press}.",
-          "en_no_press": "Supervisor needed. Press number unknown.",
-          "es_no_press": "Se necesita un supervisor. Prensa desconocida."},
-    "5": {"who": "Quality", "zone": "floor",
-          "en": "Quality needed at press {press}.",
-          "es": "Se necesita calidad en la prensa {press}.",
-          "en_no_press": "Quality needed. Press number unknown.",
-          "es_no_press": "Se necesita calidad. Prensa desconocida."},
-    "6": {"who": "Packaging", "zone": "floor",
-          "en": "Packaging needed at press {press}.",
-          "es": "Se necesita empaque en la prensa {press}.",
-          "en_no_press": "Packaging needed. Press number unknown.",
-          "es_no_press": "Se necesita empaque. Prensa desconocida."},
-    "7": {"who": "Supervisor", "why": "audit check-in", "zone": "floor",
-          "en": "Supervisor required at press {press} for audit check-in.",
-          "es": "Se requiere un supervisor en la prensa {press} para la revisión de auditoría.",
-          "en_no_press": "Supervisor required for audit check-in. Press number unknown.",
-          "es_no_press": "Se requiere un supervisor para la revisión de auditoría. Prensa desconocida."},
-    "8": {"who": "Maintenance", "why": "camera fault", "zone": "floor",
-          "en": "Maintenance required at press {press} for camera fault.",
-          "es": "Se requiere mantenimiento en la prensa {press} por falla de cámara.",
-          "en_no_press": "Maintenance required for camera fault. Press number unknown.",
-          "es_no_press": "Se requiere mantenimiento por falla de cámara. Prensa desconocida."},
-    "9": {"who": "Maintenance", "why": "Red Rabbit failure", "zone": "floor",
-          "en": "Maintenance required at press {press} for Red Rabbit failure.",
-          "es": "Se requiere mantenimiento en la prensa {press} por falla de Red Rabbit.",
-          "en_no_press": "Maintenance required for Red Rabbit failure. Press number unknown.",
-          "es_no_press": "Se requiere mantenimiento por falla de Red Rabbit. Prensa desconocida."}
+    "2": {
+      "who": "Maintenance",
+      "zone": "floor",
+      "en": "Maintenance requested to press {press}.",
+      "es": "Se solicita mantenimiento en la prensa {press}.",
+      "en_no_press": "Maintenance requested. Press number unknown.",
+      "es_no_press": "Se solicita mantenimiento. Prensa desconocida."
+    },
+    "3": {
+      "who": "Technician",
+      "zone": "floor",
+      "en": "Technician requested to press {press}.",
+      "es": "Se solicita un técnico en la prensa {press}.",
+      "en_no_press": "Technician requested. Press number unknown.",
+      "es_no_press": "Se solicita un técnico. Prensa desconocida."
+    },
+    "4": {
+      "who": "Supervisor",
+      "zone": "floor",
+      "en": "Supervisor requested to press {press}.",
+      "es": "Se solicita un supervisor en la prensa {press}.",
+      "en_no_press": "Supervisor requested. Press number unknown.",
+      "es_no_press": "Se solicita un supervisor. Prensa desconocida."
+    },
+    "5": {
+      "who": "Quality",
+      "zone": "floor",
+      "en": "Quality requested to press {press}.",
+      "es": "Se solicita calidad en la prensa {press}.",
+      "en_no_press": "Quality requested. Press number unknown.",
+      "es_no_press": "Se solicita calidad. Prensa desconocida."
+    },
+    "6": {
+      "who": "Packaging",
+      "zone": "floor",
+      "en": "Packaging requested to press {press}.",
+      "es": "Se solicita empaque en la prensa {press}.",
+      "en_no_press": "Packaging requested. Press number unknown.",
+      "es_no_press": "Se solicita empaque. Prensa desconocida."
+    },
+    "7": {
+      "who": "Supervisor",
+      "why": "audit check-in",
+      "zone": "floor",
+      "en": "Supervisor requested to press {press} for audit check-in.",
+      "es": "Se solicita un supervisor en la prensa {press} para la revisión de auditoría.",
+      "en_no_press": "Supervisor requested for audit check-in. Press number unknown.",
+      "es_no_press": "Se solicita un supervisor para la revisión de auditoría. Prensa desconocida."
+    },
+    "8": {
+      "who": "Maintenance",
+      "why": "camera fault",
+      "zone": "floor",
+      "en": "Maintenance requested to press {press} for camera fault.",
+      "es": "Se solicita mantenimiento en la prensa {press} por falla de cámara.",
+      "en_no_press": "Maintenance requested for camera fault. Press number unknown.",
+      "es_no_press": "Se solicita mantenimiento por falla de cámara. Prensa desconocida."
+    },
+    "9": {
+      "who": "Maintenance",
+      "why": "Red Rabbit failure",
+      "zone": "floor",
+      "en": "Maintenance requested to press {press} for Red Rabbit failure.",
+      "es": "Se solicita mantenimiento en la prensa {press} por falla de Red Rabbit.",
+      "en_no_press": "Maintenance requested for Red Rabbit failure. Press number unknown.",
+      "es_no_press": "Se solicita mantenimiento por falla de Red Rabbit. Prensa desconocida."
+    }
   }
 }

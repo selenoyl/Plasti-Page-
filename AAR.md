@@ -22,6 +22,8 @@ By Ethan Brady & Ryan Raikes
 | D14 | 11 Nov 2026 | The board list and dry-run switch are saved in `/var/lib/p833-receiver`, not the config. The config gives first-time defaults only. | The service can't write `/etc`, and settings changed on the page must survive restarts and updates. |
 | D15 | 11 Nov 2026 | With dry run off and no phone step built, pages are logged FAILED instead of the receiver refusing to start. | The switch has to work from the page; failing loudly never hides a lost page. |
 | D16 | 11 Nov 2026 | `install.sh` handles both first setup and updates; `update.sh` pulls from GitHub and then runs it. | User request. Every run backs up first and keeps the config, secrets, board list and log. |
+| D17 | 11 Nov 2026 | All pages now say "<Who> requested to press N", including codes 7 to 9 ("Maintenance requested to press N for camera fault"). Spanish: "Se solicita ... en la prensa N". Press 0: "<Who> requested. Press number unknown." Replaces D7's "needed at" and the PLC brief's "required at". | User's choice. |
+| D18 | 11 Nov 2026 | On update, the installer (`install/migrate_config.py`) replaces page text in the laptop's config only where it is still an old default, and adds new settings. Hand-edited text and the dial digits are kept. | So wording changes reach the laptop without losing local edits. The old config is backed up first. |
 
 ## Open points
 
@@ -29,8 +31,8 @@ By Ethan Brady & Ryan Raikes
 |---|---|---|
 | O1 | Digits that page zone 1 from the ATA2 line. "PAGE then 1" is the desk-phone way; an analog line on an ATA2 likely needs a feature code. Test with an analog phone on the ATA2. | User / phone admin |
 | O2 | The phone step: the laptop calls the HT813, which dials the page and plays the audio. Includes the HT813 settings. | Next build step |
-| O3 | Spoken audio: proposed pre-recorded clips (each message, 0 to 999, "unknown") in English and Spanish, about 16 MB. | Next build step |
-| O4 | Spanish wording to be checked by a Spanish-speaking lead, especially "Se necesita calidad / empaque". | User |
+| O3 | Spoken audio: not built yet. Pre-recorded clips (each message, 0 to 999, "unknown") in English and Spanish, about 16 MB. The Piper voice files can't be downloaded from this build session (huggingface.co is blocked), so they would be made on the laptop, which has internet, or the session's network must allow huggingface.co. | Next build step |
+| O4 | Spanish wording to be checked by a Spanish-speaking lead, especially "Se solicita calidad / empaque". | User |
 | O5 | Board firmware (Arduino sketch). Needs the Waveshare pin list and the input wiring; waveshare.com is blocked in this session, so the board's wiki page or schematic is needed. | User to supply, then build |
 | O6 | Input wiring: PLC 24 V sourcing output into the board's isolated input. Confirm the input's voltage range and common terminal before wiring. | Confirm from the datasheet |
 | O7 | Laptop details: AlmaLinux version, Python version and network interfaces (`cat /etc/almalinux-release`, `python3 --version`, `ip -br addr`), and whether it has internet during setup. | User |

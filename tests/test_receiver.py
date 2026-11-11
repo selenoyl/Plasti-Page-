@@ -44,14 +44,14 @@ class Messages(unittest.TestCase):
             self.assertIn("desconocida", es)
             self.assertNotIn(" 0", en)
 
-    def test_wording_from_brief(self):
-        self.assertEqual(R.build_message(self.cfg, 2, 27)[0], "Maintenance needed at press 27.")
+    def test_wording_requested_to(self):
+        self.assertEqual(R.build_message(self.cfg, 2, 27)[0], "Maintenance requested to press 27.")
         self.assertEqual(R.build_message(self.cfg, 7, 5)[0],
-                         "Supervisor required at press 5 for audit check-in.")
+                         "Supervisor requested to press 5 for audit check-in.")
         self.assertEqual(R.build_message(self.cfg, 8, 5)[0],
-                         "Maintenance required at press 5 for camera fault.")
+                         "Maintenance requested to press 5 for camera fault.")
         self.assertEqual(R.build_message(self.cfg, 9, 5)[0],
-                         "Maintenance required at press 5 for Red Rabbit failure.")
+                         "Maintenance requested to press 5 for Red Rabbit failure.")
 
     def test_check_call(self):
         ok = {"board": "RSP_LH", "seq": 1, "code": 2, "press": 27}
@@ -64,6 +64,38 @@ class Messages(unittest.TestCase):
     def test_pulses_match_spec(self):
         # Brief: Maintenance (code 2) at press 27 = 1500, 500, 700, 1200 ms.
         self.assertEqual(S.pulses(2, 27), [1500, 500, 700, 1200])
+
+
+class ConfigUpdate(unittest.TestCase):
+    """install/migrate_config.py brings an old installed config up to date."""
+
+    def test_old_wording_replaced_own_edits_kept(self):
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        try:
+            with open(CONFIG, encoding="utf-8") as f:
+                cfg = json.load(f)
+            # Make it look like a 0.1.0 install with one hand edit.
+            cfg["codes"]["2"]["en"] = "Maintenance needed at press {press}."
+            cfg["codes"]["8"]["es"] = "Se requiere mantenimiento en la prensa {press} por falla de cámara."
+            cfg["codes"]["3"]["en"] = "Tech to press {press} please."
+            del cfg["codes"]["7"]["why"]
+            cfg["zones"]["floor"]["dial"] = "##61"
+            path = os.path.join(tmp, "config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+            script = os.path.join(ROOT, "install", "migrate_config.py")
+            subprocess.check_output([sys.executable, script, path, CONFIG])
+            new = R.load_config(path)
+            self.assertEqual(new["codes"][2]["en"], "Maintenance requested to press {press}.")
+            self.assertEqual(new["codes"][8]["es"], "Se solicita mantenimiento en la prensa {press} por falla de cámara.")
+            self.assertEqual(new["codes"][3]["en"], "Tech to press {press} please.")
+            self.assertEqual(new["codes"][7]["why"], "audit check-in")
+            self.assertEqual(new["zones"]["floor"]["dial"], "##61")
+            out = subprocess.check_output([sys.executable, script, path, CONFIG]).decode()
+            self.assertIn("already up to date", out)
+        finally:
+            shutil.rmtree(tmp)
 
 
 class Server(unittest.TestCase):
@@ -120,8 +152,8 @@ class Server(unittest.TestCase):
         st, txt = self.post("/call", {"board": "RSP_LH", "boot": "b1", "seq": 5, "code": 2, "press": 27})
         self.assertEqual(st, 200, txt)
         self.wait_pages(1)
-        self.assertEqual(self.pager.sent, [("floor", "TO-VERIFY", "Maintenance needed at press 27.",
-                                            "Se necesita mantenimiento en la prensa 27.")])
+        self.assertEqual(self.pager.sent, [("floor", "TO-VERIFY", "Maintenance requested to press 27.",
+                                            "Se solicita mantenimiento en la prensa 27.")])
         row = self.log_rows()[-1]
         self.assertEqual((row["cell"], row["press"], row["code"], row["result"]),
                          ("RSP LH", "27", "2", "sent"))
@@ -252,7 +284,7 @@ class Server(unittest.TestCase):
         st, loc, _ = self.admin("/admin/test", {"board": "FSP_RH", "code": "8", "press": "12"})
         self.assertEqual(st, 303)
         self.wait_pages(1)
-        self.assertEqual(self.pager.sent[0][2], "Maintenance required at press 12 for camera fault.")
+        self.assertEqual(self.pager.sent[0][2], "Maintenance requested to press 12 for camera fault.")
         row = self.wait_row()
         self.assertEqual((row["cell"], row["code"], row["result"]), ("FSP RH", "8", "sent"))
         self.assertIn("admin page test", row["detail"])

@@ -30,7 +30,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -674,8 +674,8 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <div class=card><h2>Send a custom page</h2>%s
 <form method=post action='/admin/custom'>
 <label>Zone <select name=zone>%s</select></label><br>
-<label>English <input name=en required maxlength=200 size=60 placeholder='Test page. Maintenance needed at press 12.'></label><br>
-<label>Spanish <input name=es maxlength=200 size=60 placeholder='Prueba. Se necesita mantenimiento en la prensa 12.'></label><br>
+<label>English <input name=en required maxlength=200 size=60 placeholder='Test page. Maintenance requested to press 12.'></label><br>
+<label>Spanish <input name=es maxlength=200 size=60 placeholder='Prueba. Se solicita mantenimiento en la prensa 12.'></label><br>
 <button>Send custom page</button></form>
 <p class=small>Your own wording, read English then Spanish (leave Spanish empty for English only). Logged as code "custom".</p></div>
 """ % (switch, live_warn, board_opts, code_opts, live_warn, zone_opts)

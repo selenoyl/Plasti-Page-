@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.2.0:** receiving, checking, logging, dry-run paging and the
+**Status, version 0.2.1:** receiving, checking, logging, dry-run paging and the
 admin page work and are tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
 No real page can go out.
@@ -196,6 +196,7 @@ The laptop replies `200 {"ok": true, ...}`. The board resends the **same** body 
 | `tools/p833_test_sender.py` | Test sender that plays a board. |
 | `install/install.sh` | First setup, or reinstall from this folder. Safe to run again. |
 | `install/update.sh` | Fetch the newest version from GitHub and run the installer. |
+| `install/migrate_config.py` | Run by the installer: updates default wording in an installed config, keeping your own edits. |
 | `install/p833-receiver.service` | systemd unit. |
 | `install/laptop-stay-awake.sh` | Lid and sleep settings. |
 | `tests/test_receiver.py` | Unit tests: `python3 -m unittest discover -s tests -v` |
