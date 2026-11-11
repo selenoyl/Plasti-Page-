@@ -8,8 +8,9 @@
 #
 #   <out>/<lang>/c<code>_post.wav    "for camera fault."  (codes with a reason)
 #   <out>/<lang>/c<code>_nopress.wav the whole press-0 message
-#   <out>/<lang>/n/<lead>/<1..100>.wav  "Maintenance requested to press 27", one
-#                                    folder per distinct start of the message
+#   <out>/<lang>/lead/<start>.wav    "Maintenance requested to press number", one per
+#                                    department (distinct start of the message)
+#   <out>/<lang>/n/<1..100>.wav      the press number, shared by all departments
 #                                    (--max-press; higher presses say "unknown")
 #   <out>/chime.wav                  attention chime played before a page
 #   <out>/manifest.json              the text of every clip, so the receiver can
@@ -59,25 +60,28 @@ def spoken(lang, text):
 
 # The receiver's own splitting rules, so the clips always match how it joins them.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "receiver"))
-from p833_audio import number_key, number_text, parts, split_text  # noqa: E402,F401
+from p833_audio import lead_key, number_key, parts, split_text  # noqa: E402,F401
 
 
 def clip_plan(cfg, max_press=MAX_PRESS):
     """Every clip to make: {relative path: (lang, text)}.
 
-    'Maintenance requested to press 27 for camera fault.' is recorded as
-    'Maintenance requested to press 27' + 'for camera fault.' The first part is
-    one phrase per department and number, shared by codes with the same start."""
+    'Maintenance requested to press number 27 for camera fault.' is played as
+    'Maintenance requested to press number' + '27' + 'for camera fault.'
+    The first part is one recording per department (codes with the same start
+    share it); the numbers are shared by every department."""
     cfg = dict(cfg, codes={int(k): v for k, v in cfg["codes"].items()})
     plan = {}
     for code, c in sorted(cfg["codes"].items()):
         for lang in ("en", "es"):
             lead, post = parts(cfg, code, lang)
+            plan[lead_key(lang, lead)] = (lang, lead)
             if post:
                 plan["%s/c%d_post.wav" % (lang, code)] = (lang, post)
             plan["%s/c%d_nopress.wav" % (lang, code)] = (lang, c.get(lang + "_no_press", c[lang]))
-            for n in range(1, max_press + 1):
-                plan[number_key(lang, lead, n)] = (lang, number_text(lead, n))
+    for lang in ("en", "es"):
+        for n in range(1, max_press + 1):
+            plan[number_key(lang, n)] = (lang, str(n))
     return plan
 
 
@@ -172,6 +176,11 @@ def main():
     for key in old.get("clips", {}):
         if key not in plan and os.path.exists(os.path.join(a.out, key)):
             os.remove(os.path.join(a.out, key))
+
+    # Remove folders left empty by an older clip layout (never the tones).
+    for root, dirs, files in os.walk(a.out, topdown=False):
+        if root != a.out and not os.listdir(root) and "tones" not in root:
+            os.rmdir(root)
 
     make_chime(os.path.join(a.out, "chime.wav"))
     manifest = {"_about": "P833 page audio. By Ethan Brady & Ryan Raikes. Made by tools/make_audio.py; "

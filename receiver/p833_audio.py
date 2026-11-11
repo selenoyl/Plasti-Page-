@@ -16,7 +16,8 @@ import wave
 
 RATE = 8000
 TONE_DIRS = {"once": "single", "twice": "twice"}
-PIECE_GAP_MS = 40    # pause between the pieces of one sentence
+PIECE_GAP_MS = 40    # pause before the reason ("for camera fault.")
+NUMBER_GAP_MS = 120  # pause between "...press number" and the number
 
 
 class AudioError(Exception):
@@ -37,19 +38,21 @@ def slug(text):
 
 
 def parts(cfg, code, lang):
-    """(lead, tail) around the press number. The lead and the number are recorded
-    together as one phrase ('Maintenance requested to press 27'), so the whole
-    start of the sentence is said naturally in one breath. Codes with the same
-    lead (2, 8 and 9; 4 and 7) share those recordings."""
+    """(lead, tail) around the press number.
+
+    'Maintenance requested to press number {press} for camera fault.' is played as
+    the lead 'Maintenance requested to press number' (recorded as one phrase, once
+    per department), a short pause, the number ('27', shared by all departments),
+    then the tail 'for camera fault.'"""
     return split_text(cfg["codes"][code][lang])
 
 
-def number_key(lang, lead, press):
-    return "%s/n/%s/%d.wav" % (lang, slug(lead), press)
+def lead_key(lang, lead):
+    return "%s/lead/%s.wav" % (lang, slug(lead))
 
 
-def number_text(lead, press):
-    return ("%s %d" % (lead, press)).strip()
+def number_key(lang, press):
+    return "%s/n/%d.wav" % (lang, press)
 
 
 def silence(ms):
@@ -130,8 +133,8 @@ class AudioLibrary:
                 warn.append(key)
             return keys, warn
         lead, post = parts(cfg, code, lang)
-        keys = [number_key(lang, lead, press)]
-        expect = {keys[0]: number_text(lead, press)}
+        keys = [lead_key(lang, lead), number_key(lang, press)]
+        expect = {keys[0]: lead, keys[1]: str(press)}
         if post:
             keys.append("%s/c%d_post.wav" % (lang, code))
             expect[keys[-1]] = post
@@ -157,7 +160,7 @@ class AudioLibrary:
                 body += silence(700)
             for j, k in enumerate(keys):
                 if j:
-                    body += silence(PIECE_GAP_MS)
+                    body += silence(NUMBER_GAP_MS if "/n/" in k else PIECE_GAP_MS)
                 body += self._frames(k)
         lead, tone_notes = self.lead_in(cfg, code)
         return self._wrap(lead, body, opts), notes + tone_notes

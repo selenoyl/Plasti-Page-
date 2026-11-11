@@ -60,8 +60,8 @@
       "who": "Maintenance",
       "zone": "floor",
       "tone": "1_maintenance_bell",
-      "en": "Maintenance requested to press {press}.",
-      "es": "Se solicita mantenimiento en la prensa {press}.",
+      "en": "Maintenance requested to press number {press}.",
+      "es": "Se solicita mantenimiento en la prensa número {press}.",
       "en_no_press": "Maintenance requested. Press number unknown.",
       "es_no_press": "Se solicita mantenimiento. Prensa desconocida."
     },
@@ -69,8 +69,8 @@
       "who": "Technician",
       "zone": "floor",
       "tone": "2_technician_wood",
-      "en": "Technician requested to press {press}.",
-      "es": "Se solicita un técnico en la prensa {press}.",
+      "en": "Technician requested to press number {press}.",
+      "es": "Se solicita un técnico en la prensa número {press}.",
       "en_no_press": "Technician requested. Press number unknown.",
       "es_no_press": "Se solicita un técnico. Prensa desconocida."
     },
@@ -78,8 +78,8 @@
       "who": "Supervisor",
       "zone": "floor",
       "tone": "3_supervisor_glide",
-      "en": "Supervisor requested to press {press}.",
-      "es": "Se solicita un supervisor en la prensa {press}.",
+      "en": "Supervisor requested to press number {press}.",
+      "es": "Se solicita un supervisor en la prensa número {press}.",
       "en_no_press": "Supervisor requested. Press number unknown.",
       "es_no_press": "Se solicita un supervisor. Prensa desconocida."
     },
@@ -87,8 +87,8 @@
       "who": "Quality",
       "zone": "floor",
       "tone": "4_quality_flute",
-      "en": "Quality requested to press {press}.",
-      "es": "Se solicita calidad en la prensa {press}.",
+      "en": "Quality requested to press number {press}.",
+      "es": "Se solicita calidad en la prensa número {press}.",
       "en_no_press": "Quality requested. Press number unknown.",
       "es_no_press": "Se solicita calidad. Prensa desconocida."
     },
@@ -96,8 +96,8 @@
       "who": "Packaging",
       "zone": "floor",
       "tone": "5_packaging_pluck",
-      "en": "Packaging requested to press {press}.",
-      "es": "Se solicita empaque en la prensa {press}.",
+      "en": "Packaging requested to press number {press}.",
+      "es": "Se solicita empaque en la prensa número {press}.",
       "en_no_press": "Packaging requested. Press number unknown.",
       "es_no_press": "Se solicita empaque. Prensa desconocida."
     },
@@ -106,8 +106,8 @@
       "why": "audit check-in",
       "zone": "floor",
       "tone": "3_supervisor_glide",
-      "en": "Supervisor requested to press {press} for audit check-in.",
-      "es": "Se solicita un supervisor en la prensa {press} para la revisión de auditoría.",
+      "en": "Supervisor requested to press number {press} for audit check-in.",
+      "es": "Se solicita un supervisor en la prensa número {press} para la revisión de auditoría.",
       "en_no_press": "Supervisor requested for audit check-in. Press number unknown.",
       "es_no_press": "Se solicita un supervisor para la revisión de auditoría. Prensa desconocida."
     },
@@ -116,8 +116,8 @@
       "why": "camera fault",
       "zone": "floor",
       "tone": "1_maintenance_bell",
-      "en": "Maintenance requested to press {press} for camera fault.",
-      "es": "Se solicita mantenimiento en la prensa {press} por falla de cámara.",
+      "en": "Maintenance requested to press number {press} for camera fault.",
+      "es": "Se solicita mantenimiento en la prensa número {press} por falla de cámara.",
       "en_no_press": "Maintenance requested for camera fault. Press number unknown.",
       "es_no_press": "Se solicita mantenimiento por falla de cámara. Prensa desconocida."
     },
@@ -126,8 +126,8 @@
       "why": "Red Rabbit failure",
       "zone": "floor",
       "tone": "1_maintenance_bell",
-      "en": "Maintenance requested to press {press} for Red Rabbit failure.",
-      "es": "Se solicita mantenimiento en la prensa {press} por falla de Red Rabbit.",
+      "en": "Maintenance requested to press number {press} for Red Rabbit failure.",
+      "es": "Se solicita mantenimiento en la prensa número {press} por falla de Red Rabbit.",
       "en_no_press": "Maintenance requested for Red Rabbit failure. Press number unknown.",
       "es_no_press": "Se solicita mantenimiento por falla de Red Rabbit. Prensa desconocida."
     }

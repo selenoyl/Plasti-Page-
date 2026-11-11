@@ -11,7 +11,8 @@ import json
 import sys
 from collections import OrderedDict
 
-# Old default page texts: (code, field, text). Version 0.1.0 / 0.2.0 wording.
+# Old default page texts: (code, field, text). Versions 0.1.0 to 0.2.0
+# ("needed at press") and 0.2.1 to 0.4.1 ("requested to press").
 OLD_DEFAULTS = [
     ("2", "en", "Maintenance needed at press {press}."),
     ("2", "es", "Se necesita mantenimiento en la prensa {press}."),
@@ -45,6 +46,22 @@ OLD_DEFAULTS = [
     ("9", "es", "Se requiere mantenimiento en la prensa {press} por falla de Red Rabbit."),
     ("9", "en_no_press", "Maintenance required for Red Rabbit failure. Press number unknown."),
     ("9", "es_no_press", "Se requiere mantenimiento por falla de Red Rabbit. Prensa desconocida."),
+    ("2", "en", "Maintenance requested to press {press}."),
+    ("2", "es", "Se solicita mantenimiento en la prensa {press}."),
+    ("3", "en", "Technician requested to press {press}."),
+    ("3", "es", "Se solicita un técnico en la prensa {press}."),
+    ("4", "en", "Supervisor requested to press {press}."),
+    ("4", "es", "Se solicita un supervisor en la prensa {press}."),
+    ("5", "en", "Quality requested to press {press}."),
+    ("5", "es", "Se solicita calidad en la prensa {press}."),
+    ("6", "en", "Packaging requested to press {press}."),
+    ("6", "es", "Se solicita empaque en la prensa {press}."),
+    ("7", "en", "Supervisor requested to press {press} for audit check-in."),
+    ("7", "es", "Se solicita un supervisor en la prensa {press} para la revisión de auditoría."),
+    ("8", "en", "Maintenance requested to press {press} for camera fault."),
+    ("8", "es", "Se solicita mantenimiento en la prensa {press} por falla de cámara."),
+    ("9", "en", "Maintenance requested to press {press} for Red Rabbit failure."),
+    ("9", "es", "Se solicita mantenimiento en la prensa {press} por falla de Red Rabbit."),
 ]
 
 
@@ -53,7 +70,7 @@ def main(installed, example):
         cfg = json.load(f, object_pairs_hook=OrderedDict)
     with open(example, encoding="utf-8") as f:
         new = json.load(f, object_pairs_hook=OrderedDict)
-    old = {(c, k): t for c, k, t in OLD_DEFAULTS}
+    old = set(OLD_DEFAULTS)
     changes = []
 
     for code, ncode in new.get("codes", {}).items():
@@ -62,7 +79,7 @@ def main(installed, example):
             if field not in icode:
                 icode[field] = value
                 changes.append("code %s: added %s" % (code, field))
-            elif icode[field] != value and old.get((code, field)) == icode[field]:
+            elif icode[field] != value and (code, field, icode[field]) in old:
                 icode[field] = value
                 changes.append("code %s %s: now \"%s\"" % (code, field, value))
 

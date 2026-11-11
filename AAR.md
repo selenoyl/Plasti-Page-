@@ -38,6 +38,7 @@ By Ethan Brady & Ryan Raikes
 | D30 | 11 Nov 2026 | Preview on the admin page shows the exact words and plays the exact audio of a test call before it is sent; it sends and logs nothing. | User request: hear the message before sending it. |
 | D31 | 11 Nov 2026 | Every page starts with 2.5 s of silence (adjustable 0 to 10 s on the admin page). | User request: the paging system must not miss the beginning of the message. |
 | D32 | 11 Nov 2026 | The start of the message and the press number are recorded as one phrase per department ("Maintenance requested to press 27"): 1,000 clips for presses 1 to 100 in two languages, 1,033 files and 45 MB in total. Supersedes the shared number clips of D24. | The user heard "Maintenance" as a different voice: recorded alone, the word was said as a finished statement, about 10% lower in pitch. The user chose this over the smaller set. |
+| D33 | 11 Nov 2026 | Pages say "press number N": "Maintenance requested to press number 27." / "Se solicita mantenimiento en la prensa número 27." The department phrase ending in "press number" is one recording per department; the number (1 to 100) is a separate recording shared by all departments, after a 120 ms pause. 243 files, 5 MB. Supersedes D32. The installer updates the old "requested to press" wording in the laptop's config. | User's design. In the machine check every press 1 to 100 came out right in English; in Spanish, 78 was once heard as 68 (correct on re-test). In English the number starts higher in pitch than the end of "press number", so it sounds like a separate announcement. |
 
 ## Open points
 
@@ -54,6 +55,7 @@ By Ethan Brady & Ryan Raikes
 | O9 | IoT network: Wi-Fi name and password for the boards, fixed addresses (proposed 192.168.83.x), and whether the laptop is wired or on Wi-Fi. | User / IT |
 | O11 | The admin password travels as plain HTTP on the IoT network. Acceptable while the network stays isolated; revisit if the laptop ever joins the plant LAN. | Later |
 | O12 | Custom pages (free text) have no audio. Needs Piper installed on the laptop to speak them live. | Later, if wanted |
+| O15 | Listen on the PA for Spanish 60s vs 70s ("sesenta" / "setenta"): the machine check once heard 78 as 68. If it's a problem, re-record those numbers slower (`--length-scale`). | User, on the floor |
 | O14 | In the machine check, the Spanish "prensa" was sometimes heard as "pensa" when said with the number. Listen on the PA; if it's a problem, try another Spanish voice or a slower pace (`--length-scale`). | User, on the floor |
 | O13 | Spanish voice: kept Mexican Spanish (es_MX-claude-high), user's choice. | Closed |
 | O10 | calls.csv grows slowly (a few lines per call). A yearly archive is enough; no rotation is set up yet. | Later |

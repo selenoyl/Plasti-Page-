@@ -86,38 +86,48 @@ class Audio(unittest.TestCase):
                          ("Maintenance requested to press", "for camera fault."))
 
     def test_split_and_plan(self):
-        self.assertEqual(A.parts(self.cfg, 8, "en"), ("Maintenance requested to press", "for camera fault."))
-        self.assertEqual(A.parts(self.cfg, 4, "es"), ("Se solicita un supervisor en la prensa", ""))
-        self.assertEqual(A.slug("Se solicita un técnico en la prensa"), "se_solicita_un_tecnico_en_la_prensa")
+        self.assertEqual(A.parts(self.cfg, 8, "en"), ("Maintenance requested to press number", "for camera fault."))
+        self.assertEqual(A.parts(self.cfg, 4, "es"), ("Se solicita un supervisor en la prensa número", ""))
+        self.assertEqual(A.slug("Se solicita un técnico en la prensa número"), "se_solicita_un_tecnico_en_la_prensa_numero")
         plan = M.clip_plan(json.load(open(CONFIG, encoding="utf-8")))
-        self.assertEqual(plan["en/n/maintenance_requested_to_press/27.wav"], ("en", "Maintenance requested to press 27"))
-        self.assertEqual(plan["es/n/se_solicita_un_tecnico_en_la_prensa/5.wav"], ("es", "Se solicita un técnico en la prensa 5"))
+        self.assertEqual(plan["en/lead/maintenance_requested_to_press_number.wav"],
+                         ("en", "Maintenance requested to press number"))
+        self.assertEqual(plan["es/lead/se_solicita_un_tecnico_en_la_prensa_numero.wav"],
+                         ("es", "Se solicita un técnico en la prensa número"))
+        self.assertEqual(plan["en/n/27.wav"], ("en", "27"))
         self.assertEqual(plan["en/c8_post.wav"], ("en", "for camera fault."))
-        self.assertNotIn("en/c2_pre.wav", plan)
-        # 5 department starts x 100 numbers x 2 languages, + 6 reasons + 16 press-unknown messages
-        self.assertEqual(len(plan), 1022)
-        self.assertEqual(len(M.clip_plan(json.load(open(CONFIG, encoding="utf-8")), 10)), 122)
+        # 5 department phrases + 100 numbers per language, + 6 reasons + 16 press-unknown messages
+        self.assertEqual(len(plan), 232)
+        self.assertEqual(len(M.clip_plan(json.load(open(CONFIG, encoding="utf-8")), 10)), 52)
 
     def test_pieces(self):
         keys, warn = self.lib.pieces(self.cfg, 8, 27, "en")
-        self.assertEqual(keys, ["en/n/maintenance_requested_to_press/27.wav", "en/c8_post.wav"])
-        self.assertEqual(self.lib.pieces(self.cfg, 2, 27, "es")[0], ["es/n/se_solicita_mantenimiento_en_la_prensa/27.wav"])
+        self.assertEqual(keys, ["en/lead/maintenance_requested_to_press_number.wav", "en/n/27.wav", "en/c8_post.wav"])
+        self.assertEqual(self.lib.pieces(self.cfg, 2, 27, "es")[0],
+                         ["es/lead/se_solicita_mantenimiento_en_la_prensa_numero.wav", "es/n/27.wav"])
         self.assertEqual(self.lib.pieces(self.cfg, 2, 0, "en")[0], ["en/c2_nopress.wav"])
         self.assertEqual(warn, [])
+
+    def test_wording_press_number(self):
+        self.assertEqual(R.build_message(self.cfg, 2, 27),
+                         ("Maintenance requested to press number 27.", "Se solicita mantenimiento en la prensa número 27."))
+        self.assertEqual(R.build_message(self.cfg, 2, 0)[0], "Maintenance requested. Press number unknown.")
 
     def test_build_lengths(self):
         cfg = json.loads(json.dumps(self.cfg, default=str))
         cfg["codes"] = self.cfg["codes"]
-        gap = 8 * A.PIECE_GAP_MS
+        ngap, pgap = 8 * A.NUMBER_GAP_MS, 8 * A.PIECE_GAP_MS
         lead = 2500 * 8            # default 2.5 s of silence first
-        # tone 100 frames + 0.3 s, en 2 clips + 1 gap, 0.7 s, es 2 clips + 1 gap; 0.3 s tail
-        once = 100 + 2400 + (2 * 80 + gap) + 5600 + (2 * 80 + gap)
+        # tone 100 frames + 0.3 s; per language: lead, number gap, number, piece gap, reason; 0.7 s between
+        lang = 80 + ngap + 80 + pgap + 80
+        once = 100 + 2400 + lang + 5600 + lang
         cfg["audio"] = dict(self.cfg["audio"], repeat=1)
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=2)
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + 9600 + once + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=0, tones="off", languages=["en"])
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
+        self.assertEqual(self.frames(self.lib.build(cfg, 2, 5)[0]), 80 + ngap + 80 + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=3000, tones="twice", languages=["en"])
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 24000 + 200 + 2400 + 80 + 2400)
         # older config: "chime": false means no tone; no lead silence set = 2.5 s
@@ -161,14 +171,13 @@ class Audio(unittest.TestCase):
         self.assertEqual(self.lib.check(self.cfg), [])
         tmp = tempfile.mkdtemp()
         try:
-            lib = A.AudioLibrary(make_fake_audio(tmp, drop=("es/n/se_solicita_mantenimiento_en_la_prensa/1.wav",),
-                                                 change={"en/n/maintenance_requested_to_press/5.wav":
-                                                         "Maintenance needed at press 5"}))
+            lib = A.AudioLibrary(make_fake_audio(tmp, drop=("es/n/1.wav",),
+                                                 change={"en/lead/maintenance_requested_to_press_number.wav":
+                                                         "Maintenance needed at press"}))
             probs = lib.check(self.cfg)
-            self.assertTrue(any("missing clip es/n/se_solicita_mantenimiento_en_la_prensa/1.wav" in p
-                                for p in probs), probs)
+            self.assertTrue(any("missing clip es/n/1.wav" in p for p in probs), probs)
             wav, notes = lib.build(self.cfg, 2, 5)
-            self.assertEqual(notes, ["clip en/n/maintenance_requested_to_press/5.wav no longer matches the config wording"])
+            self.assertEqual(notes, ["clip en/lead/maintenance_requested_to_press_number.wav no longer matches the config wording"])
             with self.assertRaises(A.AudioError):
                 lib.build(self.cfg, 2, 1)          # the Spanish press-1 clip is missing
         finally:
@@ -204,13 +213,13 @@ class Messages(unittest.TestCase):
             self.assertNotIn(" 0", en)
 
     def test_wording_requested_to(self):
-        self.assertEqual(R.build_message(self.cfg, 2, 27)[0], "Maintenance requested to press 27.")
+        self.assertEqual(R.build_message(self.cfg, 2, 27)[0], "Maintenance requested to press number 27.")
         self.assertEqual(R.build_message(self.cfg, 7, 5)[0],
-                         "Supervisor requested to press 5 for audit check-in.")
+                         "Supervisor requested to press number 5 for audit check-in.")
         self.assertEqual(R.build_message(self.cfg, 8, 5)[0],
-                         "Maintenance requested to press 5 for camera fault.")
+                         "Maintenance requested to press number 5 for camera fault.")
         self.assertEqual(R.build_message(self.cfg, 9, 5)[0],
-                         "Maintenance requested to press 5 for Red Rabbit failure.")
+                         "Maintenance requested to press number 5 for Red Rabbit failure.")
 
     def test_check_call(self):
         ok = {"board": "RSP_LH", "seq": 1, "code": 2, "press": 27}
@@ -238,6 +247,7 @@ class ConfigUpdate(unittest.TestCase):
             cfg["codes"]["2"]["en"] = "Maintenance needed at press {press}."
             cfg["codes"]["8"]["es"] = "Se requiere mantenimiento en la prensa {press} por falla de cámara."
             cfg["codes"]["3"]["en"] = "Tech to press {press} please."
+            cfg["codes"]["4"]["es"] = "Se solicita un supervisor en la prensa {press}."   # 0.4.1 wording
             del cfg["codes"]["7"]["why"]
             cfg["zones"]["floor"]["dial"] = "##61"
             path = os.path.join(tmp, "config.json")
@@ -246,9 +256,10 @@ class ConfigUpdate(unittest.TestCase):
             script = os.path.join(ROOT, "install", "migrate_config.py")
             subprocess.check_output([sys.executable, script, path, CONFIG])
             new = R.load_config(path)
-            self.assertEqual(new["codes"][2]["en"], "Maintenance requested to press {press}.")
-            self.assertEqual(new["codes"][8]["es"], "Se solicita mantenimiento en la prensa {press} por falla de cámara.")
+            self.assertEqual(new["codes"][2]["en"], "Maintenance requested to press number {press}.")
+            self.assertEqual(new["codes"][8]["es"], "Se solicita mantenimiento en la prensa número {press} por falla de cámara.")
             self.assertEqual(new["codes"][3]["en"], "Tech to press {press} please.")
+            self.assertEqual(new["codes"][4]["es"], "Se solicita un supervisor en la prensa número {press}.")
             self.assertEqual(new["codes"][7]["why"], "audit check-in")
             self.assertEqual(new["zones"]["floor"]["dial"], "##61")
             out = subprocess.check_output([sys.executable, script, path, CONFIG]).decode()
@@ -314,8 +325,8 @@ class Server(unittest.TestCase):
         st, txt = self.post("/call", {"board": "RSP_LH", "boot": "b1", "seq": 5, "code": 2, "press": 27})
         self.assertEqual(st, 200, txt)
         self.wait_pages(1)
-        self.assertEqual(self.pager.sent, [("floor", "", "Maintenance requested to press 27.",
-                                            "Se solicita mantenimiento en la prensa 27.")])
+        self.assertEqual(self.pager.sent, [("floor", "", "Maintenance requested to press number 27.",
+                                            "Se solicita mantenimiento en la prensa número 27.")])
         row = self.log_rows()[-1]
         self.assertEqual((row["cell"], row["press"], row["code"], row["result"]),
                          ("RSP LH", "27", "2", "sent"))
@@ -446,7 +457,7 @@ class Server(unittest.TestCase):
         st, loc, _ = self.admin("/admin/test", {"board": "FSP_RH", "code": "8", "press": "12"})
         self.assertEqual(st, 303)
         self.wait_pages(1)
-        self.assertEqual(self.pager.sent[0][2], "Maintenance requested to press 12 for camera fault.")
+        self.assertEqual(self.pager.sent[0][2], "Maintenance requested to press number 12 for camera fault.")
         row = self.wait_row()
         self.assertEqual((row["cell"], row["code"], row["result"]), ("FSP RH", "8", "sent"))
         self.assertIn("admin page test", row["detail"])
@@ -510,7 +521,7 @@ class Server(unittest.TestCase):
         self.assertIn("audio saved as", self.wait_row()["detail"])
 
     def test_missing_audio_fails_live_page(self):
-        os.remove(os.path.join(self.audio_dir, "en", "n", "maintenance_requested_to_press", "3.wav"))
+        os.remove(os.path.join(self.audio_dir, "en", "n", "3.wav"))
         self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 3})
         self.wait_pages()
         row = self.wait_row()
@@ -604,8 +615,8 @@ class Server(unittest.TestCase):
     def test_preview_test_call(self):
         p = self.preview("kind=test&board=RSP_LH&code=8&press=27")
         self.assertTrue(p["ok"])
-        self.assertEqual(p["en"], "Maintenance requested to press 27 for camera fault.")
-        self.assertEqual(p["es"], "Se solicita mantenimiento en la prensa 27 por falla de cámara.")
+        self.assertEqual(p["en"], "Maintenance requested to press number 27 for camera fault.")
+        self.assertEqual(p["es"], "Se solicita mantenimiento en la prensa número 27 por falla de cámara.")
         self.assertEqual((p["from"], p["zone"], p["tone"], p["plays"]), ("RSP LH (RSP_LH)", "floor", "maintenance bell", 2))
         self.assertEqual(p["audio"], "/admin/listen?code=8&press=27")
         self.assertEqual(p["notes"], [])
@@ -626,7 +637,7 @@ class Server(unittest.TestCase):
         self.assertFalse(self.preview("kind=custom&zone=floor&en=")["ok"])
 
     def test_preview_missing_audio(self):
-        os.remove(os.path.join(self.audio_dir, "es", "n", "se_solicita_mantenimiento_en_la_prensa", "5.wav"))
+        os.remove(os.path.join(self.audio_dir, "es", "n", "5.wav"))
         p = self.preview("kind=test&board=RSP_LH&code=2&press=5")
         self.assertIsNone(p["audio"])
         self.assertIn("would fail", p["notes"][0])
