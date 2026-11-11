@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
+from p833_sip import SipPager  # noqa: E402
 
 VERSION = "0.4.3"
 LOG = logging.getLogger("p833")
@@ -54,6 +55,7 @@ PHONE_DEFAULTS = {
     "dtmf_gap_ms": 120,
     "wait_after_dial_ms": 2000,
     "max_call_s": 90,
+    "ht813_user": "",      # SIP user to call; empty = call the HT813 by address (direct IP call)
 }
 # (key, label, low, high, help) for the number fields on the admin page.
 PHONE_NUMBERS = [
@@ -520,7 +522,7 @@ class NotBuiltPager:
 
 
 def make_live_pager(cfg):
-    return NotBuiltPager()
+    return SipPager(cfg, LOG.info)
 
 
 class PageWorker(threading.Thread):
@@ -755,6 +757,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/tuning/reset":
             st.reset_tuning(who)
             return self._back("Phone and paging settings reset to the config file's values.")
+
+        if path == "/admin/phonetest":
+            live = self.app["worker"].live
+            if not hasattr(live, "connection_test"):
+                return self._back("The phone pager isn't available.")
+            LOG.info("phone connection test from admin page (%s)", who)
+            ok, detail = live.connection_test()
+            LOG.info("phone connection test: %s", detail)
+            return self._back(("Phone test OK: " if ok else "Phone test FAILED: ") + detail)
 
         if path == "/admin/dryrun":
             on = form.get("dry_run") == "on"
@@ -1058,7 +1069,12 @@ until then the zones, codes, tones and plays already apply (see Listen and the l
 <button>Save phone and paging settings</button></form>
 <form method=post action='/admin/tuning/reset' style='margin-top:8px'
  onsubmit="return confirm('Throw away the saved phone and paging settings and use the config file values?')">
-<button>Reset to config file values</button></form></div>
+<button>Reset to config file values</button></form>
+<h3>Test the connection to the HT813</h3>
+<form method=post action='/admin/phonetest' onsubmit="return confirm('Call the HT813 now? It takes the ATA2 line off-hook for about 3 seconds and dials NOTHING, so nobody is paged. This works with dry run on.')">
+<button>Call the HT813 (no dialing)</button></form>
+<p class=small>Uses the saved address and SIP port above. OK means the laptop reached the HT813 and it picked up
+the line. Save any changed settings first.</p></div>
 """ % ("<b>Saved settings in use.</b>" if tuned else "Now using the config file's values.", "\n".join(rows))
         admin_html = """
 <div class=card><h2>Settings</h2>%s

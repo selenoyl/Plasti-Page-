@@ -13,15 +13,15 @@
 #
 # Standard library only; Python 3.6+.
 
-import os
+import io
 import random
 import re
 import select
 import socket
 import struct
+import threading
 import time
 import wave
-import io
 
 RATE = 8000
 FRAME = 160                # 20 ms of audio at 8 kHz
@@ -129,9 +129,28 @@ class SipPager:
     def __init__(self, cfg, log=None):
         self.cfg = cfg
         self.log = log or (lambda *a: None)
+        self.line = threading.Lock()      # one phone line: one call at a time
 
     # -- the public entry point used by the receiver's page worker
     def page(self, zone, dial, en, es, audio=None):
+        with self.line:
+            return self._page(zone, dial, audio)
+
+    def connection_test(self, seconds=3):
+        """Call the HT813 and hold the line for a few seconds WITHOUT dialing
+        anything, so nobody is paged. Proves laptop -> HT813 -> line works."""
+        ph = self.cfg["phone"]
+        with self.line:
+            try:
+                secs = self.call(ph, "", b"\x00\x00" * int(RATE * seconds))
+                return True, ("HT813 %s:%s answered, held the line %.0f s and hung up. Nothing was dialed."
+                              % (ph["ht813_ip"], ph["sip_port"], secs))
+            except CallFailed as e:
+                return False, "phone: %s" % e
+            except OSError as e:
+                return False, "phone: network error: %s" % e
+
+    def _page(self, zone, dial, audio):
         ph = self.cfg["phone"]
         if not dial:
             return False, "zone %s has no dial digits set (admin page, Phone and paging setup)" % zone

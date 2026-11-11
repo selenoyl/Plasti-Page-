@@ -20,6 +20,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "receiver"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, os.path.join(ROOT, "install"))
+sys.path.insert(0, HERE)
 import p833_receiver as R          # noqa: E402
 import p833_test_sender as S       # noqa: E402
 import p833_audio as A             # noqa: E402
@@ -673,6 +674,57 @@ class Server(unittest.TestCase):
         body = self.admin("/admin")[2]
         self.assertIn("p833Preview('test')", body)
         self.assertIn("p833Preview('custom')", body)
+
+    # ---- the real phone pager against a fake HT813
+    def use_fake_ht813(self, **kw):
+        from fake_ht813 import FakeHT813
+        ht = FakeHT813(**kw)
+        self.addCleanup(ht.close)
+        self.cfg["phone"].update(ht813_ip="127.0.0.1", sip_port=ht.port, local_sip_port=0,
+                                 wait_after_answer_ms=60, dtmf_ms=60, dtmf_gap_ms=40, wait_after_dial_ms=60)
+        self.cfg["audio"].update(lead_silence_ms=0, repeat=1)
+        self.worker.live = R.SipPager(self.cfg)
+        return ht
+
+    def test_live_page_through_ht813(self):
+        ht = self.use_fake_ht813()
+        self.cfg["zones"]["floor"]["dial"] = "F61"
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        row = self.wait_row()
+        self.assertEqual(row["result"], "sent", row["detail"])
+        self.assertIn("dialed F61", row["detail"])
+        self.assertEqual(ht.digits, ["F", "6", "1"])
+        self.assertGreater(ht.audio_frames, 0)
+        self.assertTrue(ht.wait_bye())
+
+    def test_live_page_without_dial_digits_fails(self):
+        ht = self.use_fake_ht813()
+        self.cfg["zones"]["floor"]["dial"] = ""
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        row = self.wait_row()
+        self.assertEqual(row["result"], "FAILED")
+        self.assertIn("no dial digits", row["detail"])
+        self.assertEqual(ht.invites, [])
+
+    def test_phone_connection_test_button(self):
+        ht = self.use_fake_ht813()
+        self.state.dry_run = True                      # works with dry run on
+        _, loc, _ = self.admin("/admin/phonetest", {})
+        msg = urllib.parse.unquote(loc)
+        self.assertIn("Phone test OK", msg)
+        self.assertIn("Nothing was dialed", msg)
+        self.assertEqual(ht.digits, [])
+        self.assertTrue(ht.wait_bye())
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "calls.csv")))   # not a page, not logged
+
+    def test_phone_connection_test_reports_no_answer(self):
+        self.use_fake_ht813(mode="silent")
+        self.cfg["phone"]["max_call_s"] = 2
+        _, loc, _ = self.admin("/admin/phonetest", {})
+        self.assertIn("Phone test FAILED", urllib.parse.unquote(loc))
+        self.assertIn("did not answer", urllib.parse.unquote(loc))
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
