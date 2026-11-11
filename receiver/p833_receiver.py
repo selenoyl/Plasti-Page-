@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -536,6 +536,7 @@ class PageWorker(threading.Thread):
         self.live, self.dry = live_pager, dry_pager or DryRunPager()
         self.audio = audio or AudioLibrary(cfg["audio"]["dir"])
         self.jobs = queue.Queue()
+        self.state_dir = None      # where the last live page's line recording is kept
 
     def make_audio(self, rec):
         """Return (WAV bytes or None, note for the log)."""
@@ -571,6 +572,13 @@ class PageWorker(threading.Thread):
                 if n < tries:
                     time.sleep(self.cfg["page_retry_wait_s"])
             rec["attempts"] = n
+            heard = getattr(pager, "last_recording", b"") if not dry else b""
+            if heard and self.state_dir:
+                try:
+                    with open(os.path.join(self.state_dir, "last_page_line.wav"), "wb") as f:
+                        f.write(heard)
+                except OSError as e:
+                    LOG.warning("could not save the page's line recording: %s", e)
             if audio_note and audio_note not in detail:
                 detail = audio_note + "; " + detail
             rec["detail"] = (rec["note"] + "; " if rec.get("note") else "") + detail
@@ -763,18 +771,23 @@ class Handler(BaseHTTPRequestHandler):
             if not hasattr(live, "connection_test"):
                 return self._back("The phone pager isn't available.")
             digits = form.get("digits", "").replace(" ", "").upper()
-            wav = None
+            wav, what = None, "the bell"
             if digits:
-                # The trial plays the first code's department tone (the maintenance bell), twice.
                 lib = self.app["worker"].audio
-                tone = self.app["cfg"]["codes"][2].get("tone", "")
                 try:
-                    wav = lib._wrap(b"", lib._frames("tones/twice/%s.wav" % tone) if tone
-                                    else lib._frames("chime.wav"), {"repeat": 1, "lead_silence_ms": 0})
+                    if form.get("play") == "page":
+                        # Exactly what a real Maintenance call at press 27 would play.
+                        wav, _notes = lib.build(self.app["cfg"], 2, 27)
+                        what = "a full test page (Maintenance, press 27)"
+                    else:
+                        # The first code's department tone (the maintenance bell), twice.
+                        tone = self.app["cfg"]["codes"][2].get("tone", "")
+                        wav = lib._wrap(b"", lib._frames("tones/twice/%s.wav" % tone) if tone
+                                        else lib._frames("chime.wav"), {"repeat": 1, "lead_silence_ms": 0})
                 except AudioError as e:
-                    return self._back("Phone test not run: no tone to play (%s)" % e)
+                    return self._back("Phone test not run: no audio to play (%s)" % e)
             LOG.info("phone %s from admin page (%s)", "digit trial %s" % digits if digits else "connection test", who)
-            ok, detail = live.connection_test(digits=digits, wav=wav)
+            ok, detail = live.connection_test(digits=digits, wav=wav, what=what)
             LOG.info("phone connection test: %s", detail)
             rec = getattr(live, "last_recording", b"")
             note = ""
@@ -807,14 +820,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._ask_password()
             q = {k: v[0].strip() for k, v in parse_qs(parts.query).items()}
             return self._reply(200, preview_obj(self.app, q))
-        if parts.path == "/admin/last_phone_test.wav":
+        if parts.path in ("/admin/last_phone_test.wav", "/admin/last_page_line.wav"):
             if not self._admin_ok():
                 return self._ask_password()
             try:
-                with open(os.path.join(self.app["state_dir"], "last_phone_test.wav"), "rb") as f:
+                with open(os.path.join(self.app["state_dir"], parts.path.rsplit("/", 1)[1]), "rb") as f:
                     return self._reply(200, f.read(), "audio/wav")
             except OSError:
-                return self._reply(404, b"No phone test recorded yet.", "text/plain")
+                return self._reply(404, b"Nothing recorded yet.", "text/plain")
         if parts.path == "/admin/listen":
             if not self._admin_ok():
                 return self._ask_password()
@@ -1105,16 +1118,25 @@ until then the zones, codes, tones and plays already apply (see Listen and the l
 <p class=small>Uses the saved address and SIP port above. OK means the laptop reached the HT813 and it picked up
 the line. Save any changed settings first.</p>
 <h3>Try page digits</h3>
-<form method=post action='/admin/phonetest' onsubmit="return confirm('Dial these digits through the HT813 and play the maintenance bell tone for about 4 seconds? If the digits open a page zone, that zone hears the bell (no spoken message). This works with dry run on.')">
-<label>Digits <input name=digits required maxlength=32 size=12 placeholder='F,*62'></label>
-<button>Dial and play the bell</button></form>
+<form method=post action='/admin/phonetest' onsubmit="return confirm('Dial these digits through the HT813 and play the chosen sound? If the digits open a page zone, that zone hears it. This works with dry run on.')">
+<label>Digits <input name=digits required maxlength=32 size=12 value='%s'></label>
+<label>then play <select name=play><option value=bell>the bell (about 4 s)</option>
+<option value=page>a full test page (Maintenance, press 27)</option></select></label>
+<button>Dial and play</button></form>
 <h3>Last phone test</h3>
 <p>What the line sent back to the HT813 during the last test (dial tone, beeps, error tones, silence):<br>
 <audio controls preload=none src='/admin/last_phone_test.wav'></audio></p>
-<p class=small>To find the page code without paging a message. 0-9 * #, comma = half-second pause,
+<h3>Last live page</h3>
+<p>What the line sent back during the last real (not dry-run) page. Dial digits in use now:
+<b>%s</b>.<br><audio controls preload=none src='/admin/last_page_line.wav'></audio></p>
+<p class=small>If the bell pages but real calls don't: try "a full test page" here with the same digits.
+It works: the digits a real call dials are different (see "Dial digits in use now"). It fails: the difference
+is the audio; play "Last phone test" to hear what the line did. To find a page code without paging a message, use the bell. 0-9 * #, comma = half-second pause,
 F = hook flash (Link). On a Norstar desk phone the floor page is PAGE, SPEAKER, 1; from the ATA2 line try
 <b>F,*62</b>, then <b>F,*621</b>. When one works, put it in "Zone floor dial" above and Save.</p></div>
-""" % ("<b>Saved settings in use.</b>" if tuned else "Now using the config file's values.", "\n".join(rows))
+""" % ("<b>Saved settings in use.</b>" if tuned else "Now using the config file's values.", "\n".join(rows),
+       e(cfg["zones"].get("floor", {}).get("dial") or "F,*60,2,1"),
+       e(" / ".join("%s: %s" % (z, v.get("dial") or "not set") for z, v in cfg["zones"].items())))
         admin_html = """
 <div class=card><h2>Settings</h2>%s
 <p class=small>Saved on the laptop and kept through restarts. The config file's "dry_run" is only the default.</p></div>
@@ -1201,6 +1223,7 @@ def main(argv=None):
     if removed:
         LOG.info("removed %d saved dry-run audio file(s) (keeping %d)", removed, dry_pager.keep())
     worker = PageWorker(cfg, state, make_live_pager(cfg), dry_pager)
+    worker.state_dir = args.state_dir
     if worker.audio.load_error:
         LOG.warning("AUDIO: %s", worker.audio.load_error)
     else:

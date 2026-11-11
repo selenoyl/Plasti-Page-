@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.5.1:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.5.2:** receiving, checking, logging, dry-run paging, the
 admin page, the editable phone settings and the recorded page audio are in and
 tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").

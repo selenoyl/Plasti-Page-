@@ -154,7 +154,7 @@ class SipPager:
         with self.line:
             return self._page(zone, dial, audio)
 
-    def connection_test(self, seconds=3, digits="", wav=None):
+    def connection_test(self, seconds=3, digits="", wav=None, what="the bell"):
         """With no digits: call the HT813 and hold the line for a few seconds
         WITHOUT dialing, so nobody is paged (proves laptop -> HT813 -> line).
         With digits: dial them, then play `wav` (a short tone), to find the
@@ -171,8 +171,10 @@ class SipPager:
             try:
                 secs = self.call(ph, digits, pcm, record=True)
                 if digits:
-                    return True, ("dialed %s through HT813 %s:%s, then played the tone %.0f s and hung up. "
-                                  "Did the floor speakers play it?" % (digits, ph["ht813_ip"], ph["sip_port"], secs))
+                    return True, ("dialed %s through HT813 %s:%s, waited %.1f s, then played %s for %.0f s and "
+                                  "hung up. Did the floor speakers play it?"
+                                  % (digits, ph["ht813_ip"], ph["sip_port"],
+                                     int(ph["wait_after_dial_ms"]) / 1000.0, what, secs))
                 return True, ("HT813 %s:%s answered, held the line %.0f s and hung up. Nothing was dialed."
                               % (ph["ht813_ip"], ph["sip_port"], secs))
             except CallFailed as e:
@@ -190,8 +192,10 @@ class SipPager:
             return False, "no page audio"
         try:
             pcm = wav_to_pcm(audio)
-            secs = self.call(ph, dial, pcm)
-            return True, "dialed %s via HT813 %s, played %.0f s" % (dial, ph["ht813_ip"], secs)
+            self.last_recording = b""
+            secs = self.call(ph, dial, pcm, record=True)     # keep what the line sent back, for checking
+            return True, "dialed %s via HT813 %s, waited %.1f s, played %.0f s" % (
+                dial, ph["ht813_ip"], int(ph["wait_after_dial_ms"]) / 1000.0, secs)
         except CallFailed as e:
             return False, "phone: %s" % e
         except OSError as e:

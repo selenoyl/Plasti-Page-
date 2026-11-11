@@ -684,6 +684,7 @@ class Server(unittest.TestCase):
                                  wait_after_answer_ms=60, dtmf_ms=60, dtmf_gap_ms=40, wait_after_dial_ms=60)
         self.cfg["audio"].update(lead_silence_ms=0, repeat=1)
         self.worker.live = R.SipPager(self.cfg)
+        self.worker.state_dir = self.tmp
         return ht
 
     def test_live_page_through_ht813(self):
@@ -697,6 +698,10 @@ class Server(unittest.TestCase):
         self.assertEqual(ht.digits, ["F", "6", "1"])
         self.assertGreater(ht.audio_frames, 0)
         self.assertTrue(ht.wait_bye())
+        with open(os.path.join(self.tmp, "last_page_line.wav"), "rb") as f:   # what the line sent back
+            self.assertTrue(f.read().startswith(b"RIFF"))
+        self.assertIn("Dial digits in use now", self.admin("/admin")[2])
+        self.assertIn("floor: F61", self.admin("/admin")[2])
 
     def test_live_page_without_dial_digits_fails(self):
         ht = self.use_fake_ht813()
@@ -738,6 +743,14 @@ class Server(unittest.TestCase):
             self.assertTrue(r.read().startswith(b"RIFF"))
         self.assertEqual(ht.audio_frames, 2)           # the fake "twice" tone is 200 samples = 2 packets
         self.assertTrue(ht.wait_bye())
+        # the same trial, playing a full test page
+        _, loc, _ = self.admin("/admin/phonetest", {"digits": "F61", "play": "page"})
+        msg = urllib.parse.unquote(loc)
+        self.assertIn("a full test page", msg)
+        self.assertEqual(ht.digits[-3:], ["F", "6", "1"])
+        self.assertGreater(ht.audio_frames, 2)             # more than the bell alone (fake clips are tiny)
+        # the digits box is prefilled with the floor dial (or the known working code)
+        self.assertIn("name=digits required maxlength=32 size=12 value='F,*60,2,1'", self.admin("/admin")[2])
         _, loc, _ = self.admin("/admin/phonetest", {"digits": "PAGE1"})
         self.assertIn("FAILED", urllib.parse.unquote(loc))
         self.assertIn("Try page digits", self.admin("/admin")[2])
