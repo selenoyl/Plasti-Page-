@@ -202,6 +202,12 @@ then the **department tone**, English, Spanish, and the tone and message again
   Until the clips are re-made, the Audio box flags any that no longer match, and the old clips play. A page with a missing clip fails.
 - Custom pages from the admin page have no audio, because they are free text. In dry run they are logged; live, they fail.
 
+## Cell boards
+
+Each cell's Waveshare ESP32-S3-ETH-8DI-8RO runs the firmware in `firmware/`.
+That covers wiring, flashing with the Arduino IDE, and setup over USB; see
+[firmware/README.md](firmware/README.md).
+
 ## Board to laptop message (for the board firmware)
 
 Over Wi-Fi, by HTTP POST to `http://192.168.83.10:8833`, with the header
@@ -255,5 +261,8 @@ The laptop replies `200 {"ok": true, ...}`. The board resends the **same** body 
 | `install/p833-receiver.service` | systemd unit. |
 | `install/laptop-stay-awake.sh` | Lid and sleep settings. |
 | `tests/test_receiver.py` | Unit tests: `python3 -m unittest discover -s tests -v` |
+| `firmware/p833_board/` | Cell board firmware (Arduino sketch and pulse decoder). |
+| `firmware/README.md` | Board wiring, flashing and setup. |
+| `firmware/test/` | Decoder test and the end-to-end firmware simulation (PC, no hardware). |
 | `FLOOR_TEST.md` | Floor-test checklist. |
 | `AAR.md` | Decisions and open points. |

@@ -34,13 +34,15 @@ result for each step.
 
 | # | Step | Expected | Pass |
 |---|---|---|---|
-| B1 | Board powered on | shows OK on the status page within 60 s | ☐ |
+| B0 | Each board, on the bench: flash, set up over USB (firmware/README.md), `watch` with the PLC output forced on and off | `input ON` / `input off` follow the output; `test 2 27` shows on the laptop from that board | ☐ |
+| B1 | Board powered on | shows OK on the status page within 60 s, LED green | ☐ |
 | B2 | A call from each cell's panel: RSP LH, RSP RH, then FSP LH, FSP RH | right cell, code and press logged | ☐ |
-| B3 | A call with the e-stop pressed | logged as normal | ☐ |
+| B3 | A call with the e-stop pressed | logged as normal (the board's 24 V must stay on through the e-stop) | ☐ |
 | B4 | Press set to 0 on the panel, then a call | "Press number unknown" | ☐ |
 | B5 | Codes 7, 8 and 9 (audit notice, camera fail, Red Rabbit fail) | right text, and 9 before 8 before 7 if they queue | ☐ |
 | B6 | Restart the receiver mid-day, and make a call while it is down | the board resends and the call arrives once it is back | ☐ |
 | B7 | Unplug a board | SILENT on the status page after 3 min, and a warning in the log | ☐ |
+| B9 | Turn the IoT Wi-Fi access point off, make a call, turn it back on | board LED yellow while waiting; the call arrives once, after Wi-Fi returns | ☐ |
 | B8 | PLC to program mode mid-message | nothing logged (the board discards a partial message) | ☐ |
 
 ## C. Phone (after the phone step is built and you approve live pages)
