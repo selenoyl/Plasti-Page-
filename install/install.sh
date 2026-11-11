@@ -51,7 +51,8 @@ fi
 
 # --- Program files.
 install -d -m 755 "$APP"
-install -m 644 receiver/p833_receiver.py receiver/p833_audio.py "$APP"/
+# Every receiver module (p833_receiver.py, p833_audio.py, p833_sip.py, ...).
+install -m 644 receiver/*.py "$APP"/
 install -m 755 tools/p833_test_sender.py "$APP"/
 install -m 644 receiver/config.example.json "$APP"/
 # Recorded page audio (made by tools/make_audio.py). Replaced as a whole.
@@ -98,8 +99,14 @@ chown root:root "$ETC/secrets.env"
 chmod 600 "$ETC/secrets.env"
 
 # --- Check the config loads before switching over.
-"$PY" -c "import sys; sys.path.insert(0, '$APP'); import p833_receiver as r; r.load_config('$ETC/config.json')" \
-    || { echo "config.json has an error; fix it and run again"; exit 1; }
+# Check the program loads and the config is valid before switching over. The
+# Python error is shown as it is, so a missing file isn't mistaken for a bad config.
+if ! "$PY" -c "import sys; sys.path.insert(0, '$APP'); import p833_receiver as r; r.load_config('$ETC/config.json')"; then
+    echo
+    echo "STOPPED: the receiver program or $ETC/config.json did not load (error above)."
+    echo "The service was not restarted, so the version already running keeps running."
+    exit 1
+fi
 
 # --- systemd service.
 sed "s#@PYTHON@#$PY#" install/p833-receiver.service > "$UNIT"
