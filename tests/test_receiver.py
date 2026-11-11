@@ -254,7 +254,7 @@ class Server(unittest.TestCase):
         st, txt = self.post("/call", {"board": "RSP_LH", "boot": "b1", "seq": 5, "code": 2, "press": 27})
         self.assertEqual(st, 200, txt)
         self.wait_pages(1)
-        self.assertEqual(self.pager.sent, [("floor", "TO-VERIFY", "Maintenance requested to press 27.",
+        self.assertEqual(self.pager.sent, [("floor", "", "Maintenance requested to press 27.",
                                             "Se solicita mantenimiento en la prensa 27.")])
         row = self.log_rows()[-1]
         self.assertEqual((row["cell"], row["press"], row["code"], row["result"]),
@@ -475,6 +475,59 @@ class Server(unittest.TestCase):
         self.assertEqual(self.admin("/admin/listen?code=1&press=27")[0], 400)
         self.assertEqual(self.pager.sent, [])          # listening never pages
         self.assertIn("all messages recorded", self.admin("/admin")[2])
+
+    def tuning_form(self, **over):
+        f = {"ht813_ip": "192.168.83.21", "dial_method": "2-stage", "sip_port": "5062",
+             "local_sip_port": "5070", "wait_after_answer_ms": "1000", "dtmf_ms": "100",
+             "dtmf_gap_ms": "100", "wait_after_dial_ms": "2500", "max_call_s": "60",
+             "dial_floor": "F*61", "dial_office": "", "repeat": "3", "chime": "on"}
+        for c in range(2, 10):
+            f["zone_%d" % c] = "floor"
+        f.update(over)
+        return f
+
+    def test_tuning_saved_used_kept_and_reset(self):
+        st, loc, _ = self.admin("/admin/tuning", self.tuning_form(zone_4="office"))
+        self.assertIn("saved", urllib.parse.unquote(loc))
+        self.assertEqual(self.cfg["phone"]["ht813_ip"], "192.168.83.21")
+        self.assertEqual(self.cfg["zones"]["floor"]["dial"], "F*61")
+        self.assertEqual(self.cfg["codes"][4]["zone"], "office")
+        self.assertEqual(self.cfg["audio"]["repeat"], 3)
+        # the next page uses the new zone and dial digits
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 7})
+        self.wait_pages()
+        self.assertEqual(self.pager.sent[-1][:2], ("floor", "F*61"))
+        # kept through a restart
+        cfg2 = R.load_config(CONFIG)
+        R.State(cfg2, self.tmp, self.tmp)
+        self.assertEqual((cfg2["zones"]["floor"]["dial"], cfg2["phone"]["dtmf_ms"], cfg2["codes"][4]["zone"]),
+                         ("F*61", 100, "office"))
+        # the admin page shows the saved values
+        self.assertIn("value='F*61'", self.admin("/admin")[2])
+        # reset
+        self.admin("/admin/tuning/reset", {})
+        self.assertEqual((self.cfg["zones"]["floor"]["dial"], self.cfg["codes"][4]["zone"],
+                          self.cfg["phone"]["ht813_ip"]), ("", "floor", "192.168.83.20"))
+        cfg3 = R.load_config(CONFIG)
+        R.State(cfg3, self.tmp, self.tmp)
+        self.assertEqual(cfg3["zones"]["floor"]["dial"], "")
+
+    def test_tuning_bad_values_not_saved(self):
+        for bad in ({"ht813_ip": "300.1.1.1"}, {"dial_floor": "PAGE1"}, {"dtmf_ms": "5"},
+                    {"zone_3": "nowhere"}, {"repeat": "9"}, {"dial_method": "3-stage"}):
+            _, loc, _ = self.admin("/admin/tuning", self.tuning_form(**bad))
+            self.assertIn("Not saved", urllib.parse.unquote(loc), bad)
+        self.assertEqual(self.cfg["phone"]["ht813_ip"], "192.168.83.20")
+        self.assertNotIn("tuning", self.state.settings)
+
+    def test_dial_lowercase_f_and_spaces_accepted(self):
+        self.admin("/admin/tuning", self.tuning_form(dial_floor="f * 6 1"))
+        self.assertEqual(self.cfg["zones"]["floor"]["dial"], "F*61")
+
+    def test_dry_run_switch_keeps_tuning(self):
+        self.admin("/admin/tuning", self.tuning_form())
+        self.admin("/admin/dryrun", {"dry_run": "on"})
+        self.assertIn("tuning", R.State(self.cfg, self.tmp, self.tmp).settings)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

@@ -18,6 +18,18 @@
     ],
     "keep_dry_run_pages": 20
   },
+  "phone": {
+    "_note": "HT813 phone step settings. Easier to tune on the admin page, which saves its own values on top of these.",
+    "ht813_ip": "192.168.83.20",
+    "sip_port": 5062,
+    "local_sip_port": 5070,
+    "dial_method": "2-stage",
+    "wait_after_answer_ms": 1500,
+    "dtmf_ms": 120,
+    "dtmf_gap_ms": 120,
+    "wait_after_dial_ms": 2000,
+    "max_call_s": 90
+  },
   "boards": {
     "RSP_LH": {
       "cell": "RSP LH"
@@ -34,11 +46,11 @@
   },
   "zones": {
     "floor": {
-      "dial": "TO-VERIFY",
-      "_note": "Digits the HT813 dials on the ATA2 line to page the factory floor. Verify with an analog phone on the ATA2."
+      "dial": "",
+      "_note": "Digits the HT813 dials on the ATA2 line to page the factory floor. Empty = not set yet. Easier to set on the admin page."
     },
     "office": {
-      "dial": "TO-VERIFY",
+      "dial": "",
       "_note": "Not used by any code yet."
     }
   },

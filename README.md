@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.3.0:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.3.1:** receiving, checking, logging, dry-run paging, the
 admin page and joining the recorded audio into a page work and are tested.
 The recorded clips themselves are not in the repository yet (see "Page audio"). The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
@@ -99,6 +99,7 @@ Open `http://<laptop IP>:8833/admin`. The browser asks for a user name and passw
 
 | Section | What it does |
 |---|---|
+| **Phone and paging setup** | HT813 address and ports, 1-stage or 2-stage dialing, the timing waits, each zone's **dial digits** (0-9 * #, comma = half-second pause, F = hook flash), which zone each code pages, the chime, and how many times the message plays. Saved on the laptop on top of the config file's values; **Reset** goes back to the config. |
 | **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
 | **Send a test call** | Pick a board, a call type (2 to 9) and a press. It goes through exactly the same path as a real call from that board, and is logged with the detail "admin page test". |
 | **Add or rename a board** | Enter the board ID (it must match the ID in that board's firmware) and a cell name. Using an existing ID renames its cell. |
@@ -143,7 +144,9 @@ Other uses:
 |---|---|
 | `dry_run` | The first-time default only. After that, the switch on the admin page decides. |
 | `boards` | The **starting** board list, used only on the very first start. After that, boards are added and removed on the admin page; the list is kept in `/var/lib/p833-receiver/board_list.json`. A call from a board that isn't on the list is still paged, with a warning. |
-| `zones` | The digits the HT813 dials for each zone. **`TO-VERIFY`** until checked on the ATA2. |
+| `zones` | The digits dialed for each zone; empty = not set. Easier to set on the admin page. |
+| `phone` | HT813 address, ports, dial method and timings. Easier to tune on the admin page. |
+| `audio` | Chime, times played, languages, and how many dry-run pages' audio to keep. |
 | `codes` | For each code: who is called, its zone (all `floor` now), an optional `why` shown on the admin page, and the English and Spanish text. `{press}` is replaced by the press number. `_no_press` text is used for press 0. |
 | `repeat_window_s`, `same_call_window_s` | Repeat-drop windows, 600 s and 15 s. |
 | `board_silent_after_s` | How long a board can be silent before it is flagged, 180 s. |

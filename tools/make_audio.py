@@ -38,9 +38,22 @@ import wave
 
 RATE = 8000
 DEFAULT_VOICES = {"en": "en_US-lessac-medium", "es": "es_MX-claude-high"}
-FILTER = ("silenceremove=start_periods=1:start_threshold=-50dB,areverse,"
-          "silenceremove=start_periods=1:start_threshold=-50dB,areverse,"
+# Trim silence gently: -60 dB and keep 60 ms before the first sound, so soft
+# starts ("five", "six", "seis") are not clipped.
+FILTER = ("silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.06,areverse,"
+          "silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.06,areverse,"
           "highpass=f=200,lowpass=f=3400")
+# How a voice should SAY a word it would otherwise mispronounce. Only the
+# recording changes; the page text stays as written.
+PRONOUNCE = {
+    "es": {"Red Rabbit": "Red Rábit"},
+}
+
+
+def spoken(lang, text):
+    for word, say in PRONOUNCE.get(lang, {}).items():
+        text = text.replace(word, say)
+    return text
 
 
 def split_text(text):
@@ -118,7 +131,8 @@ def main():
             old = json.load(f)
     except (OSError, ValueError):
         old = {}
-    same_voices = old.get("voices") == voices and old.get("length_scale") == a.length_scale
+    same_voices = (old.get("voices") == voices and old.get("length_scale") == a.length_scale
+                   and old.get("filter") == FILTER and old.get("pronounce") == PRONOUNCE)
     old_clips = old.get("clips", {}) if same_voices and not a.all else {}
 
     todo = [k for k, (lang, text) in plan.items()
@@ -141,7 +155,7 @@ def main():
             lang, text = plan[key]
             raw = os.path.join(tmpdir, "raw.wav")
             with wave.open(raw, "wb") as w:
-                loaded[lang].synthesize_wav(text, w, syn_config=syn)
+                loaded[lang].synthesize_wav(spoken(lang, text), w, syn_config=syn)
             dest = os.path.join(a.out, key)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", raw, "-af", FILTER,
@@ -161,6 +175,7 @@ def main():
     manifest = {"_about": "P833 page audio. By Ethan Brady & Ryan Raikes. Made by tools/make_audio.py; "
                           "do not edit by hand.",
                 "rate": RATE, "voices": voices, "length_scale": a.length_scale,
+                "filter": FILTER, "pronounce": PRONOUNCE,
                 "clips": {k: t for k, (_, t) in sorted(plan.items())}}
     with open(man_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1, ensure_ascii=False)

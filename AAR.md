@@ -27,12 +27,14 @@ By Ethan Brady & Ryan Raikes
 | D19 | 11 Nov 2026 | Page audio is recorded ahead of time with the Piper offline voices (en_US-lessac-medium, es_MX-claude-high), in pieces plus the numbers 1 to 999, and joined at page time: chime, English, Spanish, played twice. | No speech program or internet needed on the laptop; natural voice. |
 | D20 | 11 Nov 2026 | The clips are made in the build session and pushed to the repository (user's choice). | User's choice. |
 | D21 | 11 Nov 2026 | A live page with a missing clip fails (FAILED, "no audio"); a clip whose text no longer matches the config still plays, with a warning on the admin page. | A silent page is useless and must show as failed; old wording is better than none. |
+| D22 | 11 Nov 2026 | The phone settings are editable on the admin page: HT813 address and ports, dial method, waits, tone timing, each zone's dial digits, code-to-zone, chime and times played. They are saved in `/var/lib/p833-receiver/settings.json` on top of the config, with a Reset button. | User request: tune the dial code and timing on site without editing files. |
+| D23 | 11 Nov 2026 | Dial digits use 0-9 * #, a comma for a half-second pause and F for a hook flash (the ATA2's Link). Default dial method is 2-stage: the HT813 picks up and the laptop sends the digits as tones. | An analog line on an ATA2 likely needs a flash or a feature code; 2-stage lets us send pauses and flashes. |
 
 ## Open points
 
 | # | Point | Who |
 |---|---|---|
-| O1 | Digits that page zone 1 from the ATA2 line. "PAGE then 1" is the desk-phone way; an analog line on an ATA2 likely needs a feature code. Test with an analog phone on the ATA2. | User / phone admin |
+| O1 | Digits that page zone 1 from the ATA2 line (now set on the admin page, Phone and paging setup). "PAGE then 1" is the desk-phone way; an analog line on an ATA2 likely needs a feature code. Test with an analog phone on the ATA2. | User / phone admin |
 | O2 | The phone step: the laptop calls the HT813, which dials the page and plays the audio. Includes the HT813 settings. | Next build step |
 | O3 | Spoken audio: the receiver side is built (v0.3.0); the clips are not yet recorded. Pre-recorded clips (each message, 0 to 999, "unknown") in English and Spanish, about 16 MB. The Piper voice files can't be downloaded from this build session (huggingface.co is blocked), so they would be made on the laptop, which has internet, or the session's network must allow huggingface.co. | Next build step |
 | O4 | Spanish wording to be checked by a Spanish-speaking lead, especially "Se solicita calidad / empaque". | User |

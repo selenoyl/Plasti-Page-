@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary  # noqa: E402
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -42,6 +42,104 @@ BOARD_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
 # ---------------------------------------------------------------- config ---
+
+# Phone settings, used by the HT813 phone step. Editable on the admin page.
+PHONE_DEFAULTS = {
+    "ht813_ip": "192.168.83.20",
+    "sip_port": 5062,
+    "local_sip_port": 5070,
+    "dial_method": "2-stage",
+    "wait_after_answer_ms": 1500,
+    "dtmf_ms": 120,
+    "dtmf_gap_ms": 120,
+    "wait_after_dial_ms": 2000,
+    "max_call_s": 90,
+}
+# (key, label, low, high, help) for the number fields on the admin page.
+PHONE_NUMBERS = [
+    ("sip_port", "HT813 FXO SIP port", 1, 65535,
+     "The HT813's SIP port for its FXO (line) port. Often 5062; check the HT813's FXO settings page."),
+    ("local_sip_port", "Laptop SIP port", 1024, 65535, "The port the laptop calls from."),
+    ("wait_after_answer_ms", "Wait after the HT813 answers (ms)", 0, 10000,
+     "Time for the Norstar dial tone before dialing (2-stage)."),
+    ("dtmf_ms", "Tone length (ms)", 40, 1000, "How long each dialed digit is held."),
+    ("dtmf_gap_ms", "Gap between tones (ms)", 40, 1000, "Silence between dialed digits."),
+    ("wait_after_dial_ms", "Wait after dialing before speaking (ms)", 0, 15000,
+     "Time for the page zone to open (the paging beep) before the message plays."),
+    ("max_call_s", "Longest call (s)", 10, 300, "Hang up after this, whatever happens."),
+]
+DIAL_RE = re.compile(r"^[0-9*#,F]{0,32}$")
+IP_RE = re.compile(r"^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$")
+
+
+def tuning_of(cfg):
+    """The settings the admin page can change, as they are in cfg now."""
+    return {"phone": dict(cfg["phone"]),
+            "zone_dial": {z: v.get("dial", "") for z, v in cfg["zones"].items()},
+            "code_zone": {str(c): cfg["codes"][c]["zone"] for c in range(2, 10)},
+            "audio": {"repeat": cfg["audio"]["repeat"], "chime": cfg["audio"]["chime"]}}
+
+
+def apply_tuning(cfg, t):
+    for k, v in t.get("phone", {}).items():
+        if k in PHONE_DEFAULTS:
+            cfg["phone"][k] = v
+    for z, d in t.get("zone_dial", {}).items():
+        if z in cfg["zones"]:
+            cfg["zones"][z]["dial"] = d
+    for c, z in t.get("code_zone", {}).items():
+        if c.isdigit() and int(c) in cfg["codes"] and z in cfg["zones"]:
+            cfg["codes"][int(c)]["zone"] = z
+    for k in ("repeat", "chime"):
+        if k in t.get("audio", {}):
+            cfg["audio"][k] = t["audio"][k]
+
+
+def parse_tuning(form, cfg):
+    """Check the admin page's phone form. Return (tuning, list of errors)."""
+    errs = []
+    phone = {}
+    ip = form.get("ht813_ip", "")
+    if IP_RE.match(ip):
+        phone["ht813_ip"] = ip
+    else:
+        errs.append("HT813 address must be an IP address like 192.168.83.20")
+    method = form.get("dial_method", "")
+    if method in ("1-stage", "2-stage"):
+        phone["dial_method"] = method
+    else:
+        errs.append("dial method must be 1-stage or 2-stage")
+    for key, label, lo, hi, _ in PHONE_NUMBERS:
+        try:
+            v = int(form.get(key, ""))
+            if not lo <= v <= hi:
+                raise ValueError
+            phone[key] = v
+        except ValueError:
+            errs.append("%s must be a whole number %d to %d" % (label, lo, hi))
+    dials = {}
+    for z in cfg["zones"]:
+        d = form.get("dial_" + z, "").replace(" ", "").upper()
+        if DIAL_RE.match(d):
+            dials[z] = d
+        else:
+            errs.append("zone %s dial: only 0-9 * # , F, up to 32" % z)
+    zones = {}
+    for c in range(2, 10):
+        z = form.get("zone_%d" % c, "")
+        if z in cfg["zones"]:
+            zones[str(c)] = z
+        else:
+            errs.append("code %d: pick a zone" % c)
+    audio = {"chime": form.get("chime") == "on"}
+    try:
+        audio["repeat"] = int(form.get("repeat", ""))
+        if not 1 <= audio["repeat"] <= 5:
+            raise ValueError
+    except ValueError:
+        errs.append("plays must be 1 to 5")
+    return {"phone": phone, "zone_dial": dials, "code_zone": zones, "audio": audio}, errs
+
 
 def load_config(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -73,6 +171,12 @@ def load_config(path):
     audio.setdefault("repeat", 2)
     audio.setdefault("languages", ["en", "es"])
     audio.setdefault("keep_dry_run_pages", 20)
+    phone = cfg.setdefault("phone", {})
+    for k, v in PHONE_DEFAULTS.items():
+        phone.setdefault(k, v)
+    for z in cfg["zones"].values():
+        if z.get("dial") == "TO-VERIFY":      # placeholder in older configs = not set
+            z["dial"] = ""
     return cfg
 
 
@@ -136,17 +240,27 @@ class State:
         self.csv_file = os.path.join(log_dir, "calls.csv")
         self._load()
 
+    def _save_settings(self):
+        self._write_json(self.settings_file, self.settings)
+
     def set_dry_run(self, on, who=""):
         with self.lock:
             self.dry_run = bool(on)
-            self._write_json(self.settings_file, {"dry_run": self.dry_run})
+            self.settings["dry_run"] = self.dry_run
+            self._save_settings()
         LOG.warning("dry run turned %s on the admin page (%s)%s", "ON" if on else "OFF", who,
                     "" if on else ": PAGES WILL BE DIALED")
 
     def _load(self):
         # Dry run: the admin page's choice wins; the config value is the default.
-        settings = self._read_json(self.settings_file) or {}
-        self.dry_run = bool(settings.get("dry_run", self.cfg["dry_run"]))
+        self.settings = self._read_json(self.settings_file) or {}
+        self.dry_run = bool(self.settings.get("dry_run", self.cfg["dry_run"]))
+        # Phone and paging settings: config values are the defaults; the admin
+        # page's saved values (if any) go on top.
+        self.defaults = json.loads(json.dumps(tuning_of(self.cfg)))
+        if isinstance(self.settings.get("tuning"), dict):
+            apply_tuning(self.cfg, self.settings["tuning"])
+
         self.heard_info = self._read_json(self.heard_file) or {}
         for b in self.heard_info.values():
             b["silent_logged"] = False
@@ -163,6 +277,20 @@ class State:
                 self.calls = list(csv.DictReader(f))[-50:]
         except OSError:
             self.calls = []
+
+    def set_tuning(self, t, who=""):
+        with self.lock:
+            apply_tuning(self.cfg, t)
+            self.settings["tuning"] = t
+            self._save_settings()
+        LOG.info("phone and paging settings saved on the admin page (%s): %s", who, json.dumps(t))
+
+    def reset_tuning(self, who=""):
+        with self.lock:
+            apply_tuning(self.cfg, self.defaults)
+            self.settings.pop("tuning", None)
+            self._save_settings()
+        LOG.info("phone and paging settings reset to the config defaults (%s)", who)
 
     @staticmethod
     def _read_json(path):
@@ -558,6 +686,17 @@ class Handler(BaseHTTPRequestHandler):
             self.app["worker"].jobs.put(rec)
             return self._back("Custom page sent to zone %s: %s" % (zone, en))
 
+        if path == "/admin/tuning":
+            t, errs = parse_tuning(form, self.app["cfg"])
+            if errs:
+                return self._back("Not saved: " + "; ".join(errs) + ".")
+            st.set_tuning(t, who)
+            return self._back("Phone and paging settings saved.")
+
+        if path == "/admin/tuning/reset":
+            st.reset_tuning(who)
+            return self._back("Phone and paging settings reset to the config file's values.")
+
         if path == "/admin/dryrun":
             on = form.get("dry_run") == "on"
             st.set_dry_run(on, who)
@@ -638,6 +777,7 @@ th{background:var(--head)} tr.bad td{background:var(--bad)} td.ok{color:var(--go
 .mode{padding:6px 10px;display:inline-block;color:#fff;font-weight:bold}
 .card{background:var(--card);border:1px solid var(--line);padding:12px 16px;margin-bottom:20px;max-width:820px}
 .card label{display:inline-block;margin:4px 12px 4px 0}
+.card table td{vertical-align:top}
 input,select,button{font-size:15px;padding:4px 6px}
 button{cursor:pointer} .msg{padding:8px 12px;border:2px solid var(--good);margin-bottom:16px;max-width:820px}
 .small{font-size:13px;opacity:.8} form.inline{display:inline;margin:0}
@@ -725,6 +865,47 @@ def page_html(app, admin, msg=""):
                 ", ".join("%s %s" % (k, v) for k, v in sorted(s["audio_voices"].items())))
         audio_html += "<p class=small>Page = %schime, English, Spanish, played %d time(s).</p>" % (
             "" if cfg["audio"].get("chime", True) else "no ", int(cfg["audio"].get("repeat", 2)))
+        ph = cfg["phone"]
+        rows = ["<tr><td>HT813 address</td><td><input name=ht813_ip value='%s' required size=15></td>"
+                "<td class=small>The HT813's fixed IP address on the IoT network.</td></tr>" % e(ph["ht813_ip"])]
+        rows.append("<tr><td>Dial method</td><td><select name=dial_method>%s</select></td><td class=small>"
+                    "2-stage: the HT813 picks up the ATA2 line, the laptop hears dial tone and sends the "
+                    "digits as tones (pauses and flash work). 1-stage: the digits go inside the call and the "
+                    "HT813 dials them itself.</td></tr>" % "".join(
+                        "<option%s>%s</option>" % (" selected" if ph["dial_method"] == m else "", m)
+                        for m in ("2-stage", "1-stage")))
+        for key, label, lo, hi, help_ in PHONE_NUMBERS:
+            rows.append("<tr><td>%s</td><td><input name=%s type=number min=%d max=%d value='%s' required "
+                        "style='width:7em'></td><td class=small>%s</td></tr>" % (
+                            e(label), key, lo, hi, e(str(ph[key])), e(help_)))
+        for z, v in cfg["zones"].items():
+            rows.append("<tr><td>Zone <b>%s</b> dial</td><td><input name='dial_%s' value='%s' maxlength=32 "
+                        "size=12 placeholder='not set'></td><td class=small>What is dialed on the ATA2 line to "
+                        "page this zone. 0-9 * #, a comma = half-second pause, F = hook flash (Link).%s</td></tr>"
+                        % (e(z), e(z), e(v.get("dial", "")), " <b>Not set yet.</b>" if not v.get("dial") else ""))
+        zone_names = list(cfg["zones"])
+        for c in range(2, 10):
+            rows.append("<tr><td>Code %d %s goes to</td><td><select name=zone_%d>%s</select></td><td></td></tr>" % (
+                c, e(cfg["codes"][c]["who"]), c, "".join(
+                    "<option%s>%s</option>" % (" selected" if cfg["codes"][c]["zone"] == z else "", e(z))
+                    for z in zone_names)))
+        rows.append("<tr><td>Chime before the message</td><td><input type=checkbox name=chime%s></td><td></td></tr>"
+                    % (" checked" if cfg["audio"]["chime"] else ""))
+        rows.append("<tr><td>Times the message plays</td><td><input name=repeat type=number min=1 max=5 value='%d' "
+                    "style='width:5em'></td><td class=small>Each time: chime, English, Spanish.</td></tr>"
+                    % int(cfg["audio"]["repeat"]))
+        tuned = "tuning" in app["state"].settings
+        phone_html = """
+<div class=card><h2>Phone and paging setup</h2>
+<p class=small>Change these here while tuning the phone side. They're saved on the laptop, kept through restarts
+and updates, and replace the config file's values. %s The HT813 call itself is the next build step;
+until then the zones, codes, chime and plays already apply (see Listen and the log).</p>
+<form method=post action='/admin/tuning'><div class=w><table>%s</table></div>
+<button>Save phone and paging settings</button></form>
+<form method=post action='/admin/tuning/reset' style='margin-top:8px'
+ onsubmit="return confirm('Throw away the saved phone and paging settings and use the config file values?')">
+<button>Reset to config file values</button></form></div>
+""" % ("<b>Saved settings in use.</b>" if tuned else "Now using the config file's values.", "\n".join(rows))
         admin_html = """
 <div class=card><h2>Settings</h2>%s
 <p class=small>Saved on the laptop and kept through restarts. The config file's "dry_run" is only the default.</p></div>
@@ -753,7 +934,7 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <button>Send custom page</button></form>
 <p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
 Custom text has no recorded audio yet, so with dry run off a custom page fails until on-laptop speech is added.</p></div>
-""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts)
+""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html
 
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
