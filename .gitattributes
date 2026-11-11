@@ -1,0 +1,5 @@
+# Keep Linux line endings on scripts even if edited on Windows
+*.sh text eol=lf
+*.py text eol=lf
+*.service text eol=lf
+*.json text eol=lf

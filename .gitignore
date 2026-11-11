@@ -1,0 +1,7 @@
+# P833 Call Receiver. By Ethan Brady & Ryan Raikes
+__pycache__/
+*.pyc
+*.zip
+# Never commit the board key or any secrets
+secrets.env
+*.env

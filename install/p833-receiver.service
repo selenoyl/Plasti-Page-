@@ -1,0 +1,27 @@
+# P833 Call Receiver - systemd service
+# By Ethan Brady & Ryan Raikes
+[Unit]
+Description=P833 call receiver (cell call-for-help pages)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=p833
+Group=p833
+# Root-only file with the board key. systemd reads it as root before starting.
+EnvironmentFile=-/etc/p833-receiver/secrets.env
+ExecStart=@PYTHON@ /opt/p833-receiver/p833_receiver.py --config /etc/p833-receiver/config.json
+Restart=always
+RestartSec=5
+# /var/lib/p833-receiver (board state) and /var/log/p833-receiver (calls.csv)
+StateDirectory=p833-receiver
+LogsDirectory=p833-receiver
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

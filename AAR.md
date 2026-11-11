@@ -1,0 +1,34 @@
+# P833 Call Receiver: After-Action Record
+
+By Ethan Brady & Ryan Raikes
+
+## Decisions
+
+| # | Date | Decision | Why |
+|---|---|---|---|
+| D1 | 11 Nov 2026 | The receiver runs on an AlmaLinux laptop, not the Pi. | User's choice. |
+| D2 | 11 Nov 2026 | Each cell has a Waveshare ESP32-S3-ETH-8DI-8RO board, connected over Wi-Fi to an isolated IoT network. | User's choice. The board's Ethernet is unused. |
+| D3 | 11 Nov 2026 | Board to laptop is HTTP POST with JSON and a shared key. The board resends until it gets "OK", and the laptop drops repeats. | Simple to build and test. Wi-Fi can drop a message, so the reply tells the board the call landed. |
+| D4 | 11 Nov 2026 | Repeats are dropped by board, boot and sequence number (10 min), and by board, code and press (15 s). | Board retries and board restarts must never double-page. |
+| D5 | 11 Nov 2026 | Pages are spoken on the Norstar through laptop, SIP, Grandstream HT813 FXO port, Nortel ATA2, Norstar. | User's phone path. The ATA2 expects a phone, so it needs the HT813's FXO port. |
+| D6 | 11 Nov 2026 | All codes page the floor zone. The office zone is set up but unused. | User's choice. |
+| D7 | 11 Nov 2026 | Pages play English, then Spanish. Codes 2 to 6 say "<Who> needed at press N." Press 0 says "Press number unknown." | User's choice. Codes 7 to 9 use the wording from the PLC brief. |
+| D8 | 11 Nov 2026 | Python using only its standard library (3.6+), as a systemd service with restart. Only port 8833/tcp is opened, and SELinux stays on. | Nothing to download on an isolated laptop. Follows the standing rules. |
+| D9 | 11 Nov 2026 | Dry run is on by default. The receiver refuses to start with dry run off until the phone step exists. | No real page goes out before the user says so. |
+| D10 | 11 Nov 2026 | Calls from an unknown board ID are still paged, with a warning. | A misconfigured board must not lose a real call. The key still blocks strangers. |
+| D11 | 11 Nov 2026 | No change on the PLC side. | The receiver only uses what the board sends. |
+
+## Open points
+
+| # | Point | Who |
+|---|---|---|
+| O1 | Digits that page zone 1 from the ATA2 line. "PAGE then 1" is the desk-phone way; an analog line on an ATA2 likely needs a feature code. Test with an analog phone on the ATA2. | User / phone admin |
+| O2 | The phone step: the laptop calls the HT813, which dials the page and plays the audio. Includes the HT813 settings. | Next build step |
+| O3 | Spoken audio: proposed pre-recorded clips (each message, 0 to 999, "unknown") in English and Spanish, about 16 MB. | Next build step |
+| O4 | Spanish wording to be checked by a Spanish-speaking lead, especially "Se necesita calidad / empaque". | User |
+| O5 | Board firmware (Arduino sketch). Needs the Waveshare pin list and the input wiring; waveshare.com is blocked in this session, so the board's wiki page or schematic is needed. | User to supply, then build |
+| O6 | Input wiring: PLC 24 V sourcing output into the board's isolated input. Confirm the input's voltage range and common terminal before wiring. | Confirm from the datasheet |
+| O7 | Laptop details: AlmaLinux version, Python version and network interfaces (`cat /etc/almalinux-release`, `python3 --version`, `ip -br addr`), and whether it has internet during setup. | User |
+| O8 | Who maintains the laptop. | User |
+| O9 | IoT network: Wi-Fi name and password for the boards, fixed addresses (proposed 192.168.83.x), and whether the laptop is wired or on Wi-Fi. | User / IT |
+| O10 | calls.csv grows slowly (a few lines per call). A yearly archive is enough; no rotation is set up yet. | Later |
