@@ -146,13 +146,18 @@ class IPAddress {
 class SimWiFi {
  public:
   std::atomic<bool> up{true};
-  void mode(int) {}
+  bool started = false;   // like the ESP32: the network stack exists only after WiFi.mode()
+  void mode(int) { started = true; }
   void setSleep(bool) {}
   void setAutoReconnect(bool) {}
   void config(IPAddress, IPAddress, IPAddress, IPAddress) {}
   void begin(const char*, const char*) {}
   void disconnect() {}
-  void macAddress(uint8_t* m) { uint8_t v[6] = {0x24, 0x58, 0x7c, 0xab, 0xcd, 0xef}; memcpy(m, v, 6); }
+  void macAddress(uint8_t* m) {
+    uint8_t v[6] = {0x24, 0x58, 0x7c, 0xab, 0xcd, 0xef};
+    if (!started) memset(v, 0, 6);        // the real chip reads zeros before WiFi.mode()
+    memcpy(m, v, 6);
+  }
   int status() { return up ? WL_CONNECTED : WL_DISCONNECTED; }
   IPAddress localIP() { IPAddress a; a.fromString("127.0.0.1"); return a; }
   int RSSI() { return -61; }
@@ -243,7 +248,7 @@ class WebServer {
   void on(const char*, HTTPMethod, std::function<void()>) {}
   void on(const char*, HTTPMethod, std::function<void()>, std::function<void()>) {}
   void onNotFound(std::function<void()>) {}
-  void begin() {}
+  void begin();   // defined after WiFi below: aborts if the network stack isn't up, as on the board
   void handleClient() {}
   void send(int, const char*, const String&) {}
   bool authenticate(const char*, const char*) { return false; }
@@ -262,3 +267,7 @@ class UpdateClass {
   const char* errorString() { return "sim"; }
 };
 extern UpdateClass Update;
+
+inline void WebServer::begin() {
+  if (!WiFi.started) { std::printf("[sim] CRASH: web server started before WiFi.mode() (the board resets here)\n"); std::fflush(stdout); std::abort(); }
+}

@@ -26,7 +26,7 @@
 #error "Needs the esp32 board package 3.0.0 or newer (Arduino IDE: Tools > Board > Boards Manager > esp32)"
 #endif
 
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.1.1"
 
 // ---- Board pins (Waveshare wiki and demo code for the ESP32-S3-ETH-8DI-8RO):
 //   DI1..DI8 = GPIO4..GPIO11, optocoupler inputs read with the pull-up on;
@@ -269,7 +269,6 @@ void updateStatus() {
 
 void startWifi() {
   if (!cfg.ssid.length()) { Serial.println("Wi-Fi not set: use 'ssid' and 'pass', then 'reboot'"); return; }
-  WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);              // lower latency, steadier link
   WiFi.setAutoReconnect(true);
   if (cfg.ip != "dhcp") {
@@ -482,6 +481,10 @@ String serialLine;
 void setup() {
   Serial.begin(115200);
   delay(1500);
+  // Start the Wi-Fi radio first, even with no network set: it brings up the
+  // network stack the web server needs, and the MAC address used for the
+  // default board ID. (Without it the web server crashes the board.)
+  WiFi.mode(WIFI_STA);
   snprintf(bootId, sizeof(bootId), "%08lx", (unsigned long)esp_random());
   loadSettings();
   pinMode(cfg.diPin, INPUT_PULLUP);
