@@ -15,6 +15,8 @@
 
 #include <HTTPClient.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <esp_system.h>
 
@@ -24,7 +26,7 @@
 #error "Needs the esp32 board package 3.0.0 or newer (Arduino IDE: Tools > Board > Boards Manager > esp32)"
 #endif
 
-#define FW_VERSION "1.0.0"
+#define FW_VERSION "1.1.0"
 
 // ---- Board pins (Waveshare wiki and demo code for the ESP32-S3-ETH-8DI-8RO):
 //   DI1..DI8 = GPIO4..GPIO11, optocoupler inputs read with the pull-up on;
@@ -42,7 +44,7 @@ Preferences prefs;
 p833::Decoder decoder;
 
 struct Settings {
-  String id, ssid, pass, server, key, ip, gw, mask, dns, active, beep;
+  String id, ssid, pass, server, key, ip, gw, mask, dns, active, beep, otapass;
   int diPin;
 } cfg;
 
@@ -99,6 +101,7 @@ void loadSettings() {
   cfg.dns = getS("dns", "");
   cfg.active = getS("active", "low");
   cfg.beep = getS("beep", "on");
+  cfg.otapass = getS("otapass", "");
   cfg.diPin = prefs.getInt("dipin", DEFAULT_DI_PIN);
 }
 
@@ -113,6 +116,7 @@ void showSettings() {
                 cfg.dns.c_str());
   Serial.printf("  dipin   GPIO %d   active %s (now using: on = %s)   beep %s\n", cfg.diPin,
                 cfg.active.c_str(), activeHigh ? "HIGH" : "LOW", cfg.beep.c_str());
+  Serial.printf("  update  %s\n", cfg.otapass.length() ? "on (http://<board IP>/update)" : "off (set otapass)");
   Serial.printf("  wifi    %s", WiFi.status() == WL_CONNECTED ? "connected" : "NOT connected");
   if (WiFi.status() == WL_CONNECTED)
     Serial.printf(", %s, %d dBm", WiFi.localIP().toString().c_str(), WiFi.RSSI());
@@ -134,6 +138,7 @@ void printHelp() {
       "  dipin <gpio>          GPIO of the input the PLC is wired to (DI1)\n"
       "  active low|high|auto  input level that means PLC output ON (this board: low)\n"
       "  beep on|off           chirp when a call is decoded\n"
+      "  otapass <password>    password for http://<board IP>/update (empty = updates off)\n"
       "  watch                 show the input live (any key to stop)\n"
       "  test <code> <press>   send a test call, e.g. test 2 27\n"
       "  heartbeat             send a heartbeat now\n"
@@ -177,6 +182,9 @@ void handleCommand(String line) {
   } else if (cmd == "active") {
     if (arg == "auto" || arg == "high" || arg == "low") { saveS("active", cfg.active, arg); Serial.println("reboot to use it"); }
     else Serial.println("active: auto, high or low");
+  } else if (cmd == "otapass") {
+    if (arg.length() == 0 || arg.length() >= 8) saveS("otapass", cfg.otapass, arg);
+    else Serial.println("otapass: at least 8 characters (or nothing to turn updates off)");
   } else if (cmd == "beep") {
     if (arg == "on" || arg == "off") saveS("beep", cfg.beep, arg);
     else Serial.println("beep: on or off");
@@ -356,6 +364,119 @@ void heartbeat() {
 
 // ----------------------------------------------------------- setup / loop ---
 
+// ------------------------------------------------- web: status and update ---
+// http://<board IP>/        status (no secrets)
+// http://<board IP>/update  upload new firmware (.bin from Arduino IDE:
+//                           Sketch > Export Compiled Binary). Password = otapass;
+//                           any user name.
+
+WebServer web(80);
+String updateError;
+bool updateRefused = false;
+
+String htmlEscape(const String& in) {
+  String out;
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '<') out += "&lt;"; else if (c == '>') out += "&gt;"; else if (c == '&') out += "&amp;";
+    else out += c;
+  }
+  return out;
+}
+
+String page(const String& title, const String& body) {
+  return "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,"
+         "initial-scale=1'><title>" + title + "</title><style>body{font-family:sans-serif;margin:16px;"
+         "max-width:640px}td{padding:3px 10px 3px 0}</style></head><body><h1>" + title + "</h1>" + body +
+         "</body></html>";
+}
+
+bool updateAllowed() {
+  if (!cfg.otapass.length()) {
+    web.send(403, "text/html", page("Update", "<p>Updates are off. Set a password over USB: "
+                                               "<code>otapass &lt;password&gt;</code></p>"));
+    return false;
+  }
+  if (!web.authenticate("p833", cfg.otapass.c_str())) {
+    web.requestAuthentication(BASIC_AUTH, "P833 board update");
+    return false;
+  }
+  return true;
+}
+
+void webStatus() {
+  char up[32];
+  snprintf(up, sizeof(up), "%lu min", (unsigned long)(millis() / 60000));
+  String b = "<table>";
+  b += "<tr><td>Board ID</td><td><b>" + htmlEscape(cfg.id) + "</b></td></tr>";
+  b += "<tr><td>Firmware</td><td>" FW_VERSION "</td></tr>";
+  b += "<tr><td>Receiver</td><td>" + htmlEscape(cfg.server) + "</td></tr>";
+  b += "<tr><td>Wi-Fi</td><td>" + String(WiFi.RSSI()) + " dBm</td></tr>";
+  b += "<tr><td>Up</td><td>" + String(up) + "</td></tr>";
+  b += "<tr><td>Calls waiting</td><td>" + String(pendingCount) + "</td></tr>";
+  b += "<tr><td>Last error</td><td>" + htmlEscape(lastError.length() ? lastError : String("none")) + "</td></tr>";
+  b += "</table><p><a href='/update'>Update firmware</a></p>";
+  web.send(200, "text/html", page("P833 board " + htmlEscape(cfg.id), b));
+}
+
+void webUpdateForm() {
+  if (!updateAllowed()) return;
+  web.send(200, "text/html", page("Update " + htmlEscape(cfg.id),
+      "<p>Now running " FW_VERSION ". Choose the <b>.bin</b> made by Arduino IDE "
+      "<i>Sketch &gt; Export Compiled Binary</i> (the file named <code>p833_board.ino.bin</code>, "
+      "not the bootloader or merged one).</p>"
+      "<form method=post action='/update' enctype='multipart/form-data'>"
+      "<input type=file name=firmware accept='.bin' required> <button>Upload and restart</button></form>"
+      "<p>The board refuses the update while a call is waiting to be sent. Pulses arriving during the "
+      "upload are still decoded, but sent only after the restart if the upload is refused.</p>"));
+}
+
+void webUpdateUpload() {
+  HTTPUpload& up = web.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    updateError = "";
+    updateRefused = false;
+    if (!cfg.otapass.length() || !web.authenticate("p833", cfg.otapass.c_str())) {
+      updateRefused = true; updateError = "wrong password"; return;
+    }
+    if (pendingCount) { updateRefused = true; updateError = "a call is waiting to be sent; try again shortly"; return; }
+    Serial.printf("UPDATE: receiving %s\n", up.filename.c_str());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) updateError = Update.errorString();
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (!updateRefused && !updateError.length() && Update.write(up.buf, up.currentSize) != up.currentSize)
+      updateError = Update.errorString();
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (!updateRefused && !updateError.length() && !Update.end(true)) updateError = Update.errorString();
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (!updateRefused) Update.abort();
+    updateError = "upload stopped part way";
+  }
+}
+
+void webUpdateDone() {
+  if (updateRefused || updateError.length()) {
+    if (!updateRefused) Update.abort();
+    Serial.printf("UPDATE failed: %s\n", updateError.c_str());
+    web.send(updateError == "wrong password" ? 401 : 400, "text/html",
+             page("Update failed", "<p>" + htmlEscape(updateError) + "</p><p>The board is still running "
+                  FW_VERSION ".</p><p><a href='/update'>Back</a></p>"));
+    return;
+  }
+  Serial.println("UPDATE: done, restarting");
+  web.send(200, "text/html", page("Update done", "<p>Restarting into the new firmware. "
+                                  "Check the version on the <a href='/'>status page</a> in about 15 s.</p>"));
+  delay(500);
+  ESP.restart();
+}
+
+void startWeb() {
+  web.on("/", HTTP_GET, webStatus);
+  web.on("/update", HTTP_GET, webUpdateForm);
+  web.on("/update", HTTP_POST, webUpdateDone, webUpdateUpload);
+  web.onNotFound([]() { web.send(404, "text/plain", "not found"); });
+  web.begin();
+}
+
 String serialLine;
 
 void setup() {
@@ -375,6 +496,7 @@ void setup() {
   showSettings();
   Serial.println("Type 'help' for setup commands.");
   startWifi();
+  startWeb();
 }
 
 void loop() {
@@ -402,6 +524,7 @@ void loop() {
                                            wifiLostAt = millis() | 1; }
     }
   }
+  web.handleClient();
   updateStatus();
   delay(5);
 }

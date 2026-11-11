@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -230,3 +231,34 @@ inline void vTaskDelayUntil(TickType_t* last, TickType_t inc) {
 inline void xTaskCreatePinnedToCore(void (*fn)(void*), const char*, int, void* arg, int, void*, int) {
   std::thread(fn, arg).detach();
 }
+
+// ---- WebServer and Update: compile-only stand-ins (the PC test doesn't serve pages)
+enum HTTPMethod { HTTP_GET, HTTP_POST };
+enum HTTPAuthMethod { BASIC_AUTH };
+enum HTTPUploadStatus { UPLOAD_FILE_START, UPLOAD_FILE_WRITE, UPLOAD_FILE_END, UPLOAD_FILE_ABORTED };
+struct HTTPUpload { HTTPUploadStatus status; String filename; uint8_t buf[1024]; size_t currentSize; };
+class WebServer {
+ public:
+  explicit WebServer(int) {}
+  void on(const char*, HTTPMethod, std::function<void()>) {}
+  void on(const char*, HTTPMethod, std::function<void()>, std::function<void()>) {}
+  void onNotFound(std::function<void()>) {}
+  void begin() {}
+  void handleClient() {}
+  void send(int, const char*, const String&) {}
+  bool authenticate(const char*, const char*) { return false; }
+  void requestAuthentication(HTTPAuthMethod, const char*) {}
+  HTTPUpload& upload() { return up_; }
+ private:
+  HTTPUpload up_{};
+};
+#define UPDATE_SIZE_UNKNOWN 0xFFFFFFFF
+class UpdateClass {
+ public:
+  bool begin(size_t) { return true; }
+  size_t write(uint8_t*, size_t n) { return n; }
+  bool end(bool) { return true; }
+  void abort() {}
+  const char* errorString() { return "sim"; }
+};
+extern UpdateClass Update;

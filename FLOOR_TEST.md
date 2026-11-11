@@ -35,6 +35,7 @@ result for each step.
 | # | Step | Expected | Pass |
 |---|---|---|---|
 | B0 | Each board, on the bench: flash, set up over USB (firmware/README.md), `watch` with the PLC output forced on and off | `input ON` / `input off` follow the output; `test 2 27` shows on the laptop from that board | ☐ |
+| B0b | Each board: set `otapass`, then upload the same firmware again through `http://<board IP>/update` | page says done; the board restarts on the same version with its settings kept; a wrong password is refused | ☐ |
 | B1 | Board powered on | shows OK on the status page within 60 s, LED green | ☐ |
 | B2 | A call from each cell's panel: RSP LH, RSP RH, then FSP LH, FSP RH | right cell, code and press logged | ☐ |
 | B3 | A call with the e-stop pressed | logged as normal (the board's 24 V must stay on through the e-stop) | ☐ |

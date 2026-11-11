@@ -10,12 +10,12 @@
 SimSerial Serial;
 SimEsp ESP;
 SimWiFi WiFi;
+UpdateClass Update;
 
 #include "../../p833_board/p833_board.ino"
 
 // The board's input reads HIGH when idle and LOW when the PLC output is on
-// (an opto input with a pull-up). The firmware has to work this out itself
-// ("active auto").
+// (an opto input with a pull-up), as on the Waveshare board ("active low").
 struct Pulse { uint32_t on, off; };
 static std::vector<Pulse> pulses;
 static std::mutex pulsesM;

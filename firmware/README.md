@@ -31,6 +31,9 @@ PLC slot 2 OUT14 (24 V sourcing) --> DI1 --> decode pulses --> Wi-Fi --> laptop 
   | red, blinking | no Wi-Fi, Wi-Fi not set, or an error (see `show`) |
 
 - **Buzzer:** a short chirp when a call is decoded. Turn it off with `beep off`.
+- **Web pages on the board** (port 80, over Wi-Fi):
+  - `http://<board IP>/` is a status page: ID, firmware, Wi-Fi signal, calls waiting and last error. No secrets are shown.
+  - `http://<board IP>/update` updates the firmware over the network (see "Update over the network").
 
 ## Board facts (from Waveshare's wiki and demo code)
 
@@ -64,6 +67,7 @@ PLC slot 2 OUT14 (24 V sourcing) --> DI1 --> decode pulses --> Wi-Fi --> laptop 
 4. Choose these settings under Tools:
    - Board: **ESP32S3 Dev Module**
    - **USB CDC On Boot: Enabled**. Without it, the setup console stays silent.
+   - **Partition Scheme: Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)**. This leaves room for network updates; use the same setting every time.
    - Port: the board's COM port
 5. Plug the board in by USB-C and click **Upload**.
    - If the upload fails, hold **BOOT**, press and release **RESET**, then release **BOOT**, and upload again (from Waveshare's FAQ).
@@ -96,6 +100,21 @@ reboot
    - Press any key to stop `watch`.
 6. **Test the path to the laptop** without the PLC: type `test 2 27`. The laptop's status page should show the call, from this board, as code 2, press 27.
 7. **Test from the PLC.** Make a call from the cell's panel. The LED turns blue during the pulses, the buzzer chirps, and `CALL code ... queued` then `sent` appear.
+8. **Set an update password:** `otapass <password>`, at least 8 characters. Keep it with the laptop's passwords. Until it's set, network updates are off.
+
+## Update over the network
+
+After the first USB upload, later versions can go in over Wi-Fi from any browser on the IoT network, for example on the laptop.
+
+1. Make the file. In the Arduino IDE, with the same Tools settings as above, choose **Sketch > Export Compiled Binary**.
+   - Use the file named `p833_board.ino.bin` in the sketch folder's `build` subfolder.
+   - Don't use the `.bootloader.bin` or `.merged.bin` files.
+2. Open `http://<board IP>/update` and log in. The user name is `p833` and the password is the board's `otapass`.
+3. Choose the `.bin` file and click **Upload and restart**. After about 15 s, check the version on `http://<board IP>/`.
+
+- If a call is waiting to be sent, the board refuses the update ("a call is waiting"). Try again a minute later.
+- A failed or wrong upload leaves the old firmware running.
+- Settings (ID, Wi-Fi, key and so on) are kept through an update.
 
 Settings stay in the board's flash through power cuts and reflashing. To start clean, erase the flash when uploading (Tools > Erase All Flash Before Sketch Upload > Enabled).
 
@@ -109,6 +128,7 @@ Settings stay in the board's flash through power cuts and reflashing. To start c
 | `dipin <gpio>` | Input pin (default 4 = DI1) |
 | `active low` / `high` / `auto` | Which level means "PLC output on" (default low, as on this board) |
 | `beep on` / `off` | Chirp when a call is decoded |
+| `otapass <password>` | Password for the update page; `otapass` with nothing turns updates off |
 | `watch` | Show the input live |
 | `test <code> <press>` | Send a test call |
 | `heartbeat` | Send a heartbeat now |
@@ -136,4 +156,6 @@ Without the real board (the ESP32 build tools can't be downloaded in the build s
   python3 firmware/test/run_sim_test.py
   ```
 
-**Not yet done:** compiling with the real ESP32 tools, and running on the board. The first Arduino IDE upload and the bench steps above (5 to 7) are that check.
+**Not yet done:**
+- Compiling with the real ESP32 tools, and running on the board. The first Arduino IDE upload and the bench steps above (5 to 8) are that check.
+- The web status and update pages were compiled on the PC but not run there. Test the update page once on the bench by uploading the same version again.
