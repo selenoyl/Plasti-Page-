@@ -32,6 +32,10 @@ By Ethan Brady & Ryan Raikes
 | D24 | 11 Nov 2026 | Each number is recorded together with the words all messages share before it ("requested to press 27", "en la prensa 27"); the message clip is only the start ("Maintenance"). Pieces are joined with a 40 ms pause. | A machine check (Whisper) misheard numbers recorded on their own ("three", "seis", "seiscientos"); with this split every press number checked came out right. |
 | D25 | 11 Nov 2026 | Pronunciation fixes for the voices live in `tools/make_audio.py` (`PRONOUNCE`); the Spanish voice says "Red Rábit". | The Spanish voice read "Red Rabbit" as Spanish words. |
 | D26 | 11 Nov 2026 | The 2,036 clips (about 66 MB, 8 kHz 16-bit WAV) are committed to the repository. | User's choice (D20). Every re-recording adds about 66 MB to the git history, so re-record only when wording changes. |
+| D27 | 11 Nov 2026 | Voices: English en_US-hfc_female-medium (sample D), Spanish es_MX-claude-high (kept). | User's choice from the samples. |
+| D28 | 11 Nov 2026 | Only presses 1 to 100 are recorded (about 250 files, 7 MB, down from 2,036 files, 66 MB). A press above 100 pages as "press number unknown", with a note. | User's choice. A page with the wrong number would be worse than one that says it's unknown. |
+| D29 | 11 Nov 2026 | Each department has its own tone, from the user's andon tones (phone versions): maintenance bell (2, 8, 9), technician wood (3), supervisor glide (4, 7), quality flute (5), packaging pluck (6). The tone plays before each play of the message; once, twice or off, and per-code choice, on the admin page. | User request. The tones are kept as supplied (about 4 dB quieter than the speech). |
+| D30 | 11 Nov 2026 | Preview on the admin page shows the exact words and plays the exact audio of a test call before it is sent; it sends and logs nothing. | User request: hear the message before sending it. |
 
 ## Open points
 
@@ -39,7 +43,7 @@ By Ethan Brady & Ryan Raikes
 |---|---|---|
 | O1 | Digits that page zone 1 from the ATA2 line (now set on the admin page, Phone and paging setup). "PAGE then 1" is the desk-phone way; an analog line on an ATA2 likely needs a feature code. Test with an analog phone on the ATA2. | User / phone admin |
 | O2 | The phone step: the laptop calls the HT813, which dials the page and plays the audio. Includes the HT813 settings. | Next build step |
-| O3 | Spoken audio: DONE, clips recorded and machine-checked (v0.3.2). Still to do: a person listens on the floor PA. Pre-recorded clips (each message, 0 to 999, "unknown") in English and Spanish, about 16 MB. The Piper voice files can't be downloaded from this build session (huggingface.co is blocked), so they would be made on the laptop, which has internet, or the session's network must allow huggingface.co. | Next build step |
+| O3 | Spoken audio: DONE (v0.4.0, hfc female + Mexican Spanish, presses 1-100, department tones). Still to do: a person listens on the floor PA. Pre-recorded clips (each message, 0 to 999, "unknown") in English and Spanish, about 16 MB. The Piper voice files can't be downloaded from this build session (huggingface.co is blocked), so they would be made on the laptop, which has internet, or the session's network must allow huggingface.co. | Next build step |
 | O4 | Spanish wording to be checked by a Spanish-speaking lead, especially "Se solicita calidad / empaque". | User |
 | O5 | Board firmware (Arduino sketch). Needs the Waveshare pin list and the input wiring; waveshare.com is blocked in this session, so the board's wiki page or schematic is needed. | User to supply, then build |
 | O6 | Input wiring: PLC 24 V sourcing output into the board's isolated input. Confirm the input's voltage range and common terminal before wiring. | Confirm from the datasheet |
@@ -49,5 +53,5 @@ By Ethan Brady & Ryan Raikes
 | O11 | The admin password travels as plain HTTP on the IoT network. Acceptable while the network stays isolated; revisit if the laptop ever joins the plant LAN. | Later |
 | O12 | Custom pages (free text) have no audio. Needs Piper installed on the laptop to speak them live. | Later, if wanted |
 | O14 | In the machine check, the Spanish "prensa" was sometimes heard as "pensa" when said with the number. Listen on the PA; if it's a problem, try another Spanish voice or a slower pace (`--length-scale`). | User, on the floor |
-| O13 | Spanish voice is Mexican Spanish (es_MX). Change it if the floor would rather hear Spain Spanish (es_ES). | User |
+| O13 | Spanish voice: kept Mexican Spanish (es_MX-claude-high), user's choice. | Closed |
 | O10 | calls.csv grows slowly (a few lines per call). A yearly archive is enough; no rotation is set up yet. | Later |

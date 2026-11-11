@@ -2,7 +2,9 @@
 # By Ethan Brady & Ryan Raikes
 #
 # The clips are made by tools/make_audio.py (see its header for the layout).
-# A page is: chime, English, pause, Spanish, and the whole thing repeated.
+# A page is: department tone, English, pause, Spanish, and the whole thing
+# repeated. Tones are in <audio>/tones/single (played once) and
+# <audio>/tones/twice (the tone played twice); a code with no tone gets the chime.
 # Standard library only; Python 3.6+.
 
 import io
@@ -11,6 +13,7 @@ import os
 import wave
 
 RATE = 8000
+TONE_DIRS = {"once": "single", "twice": "twice"}
 PIECE_GAP_MS = 40    # pause between the pieces of one sentence
 
 
@@ -84,10 +87,41 @@ class AudioLibrary:
             self.cache[key] = data
         return data
 
+    @property
+    def max_press(self):
+        return int(self.manifest.get("max_press", 999))
+
+    def tone_names(self):
+        """Tones available (file names without .wav)."""
+        try:
+            return sorted(n[:-4] for n in os.listdir(os.path.join(self.folder, "tones", "single"))
+                          if n.endswith(".wav"))
+        except OSError:
+            return []
+
+    def lead_in(self, cfg, code):
+        """The sound before each play: the code's department tone, or the chime.
+        Returns (frames, notes)."""
+        style = tone_style(cfg)
+        if style == "off":
+            return b"", []
+        name = cfg["codes"][code].get("tone", "") if code else ""
+        if name:
+            key = "tones/%s/%s.wav" % (TONE_DIRS[style], name)
+            try:
+                return self._frames(key) + silence(300), []
+            except AudioError:
+                note = "tone %s missing, chime used" % key
+        else:
+            note = ""
+        return self._frames("chime.wav") + silence(300), [note] if note else []
+
     def pieces(self, cfg, code, press, lang):
         """Clip keys for one language, plus any 'text changed' warnings."""
         c = cfg["codes"][code]
         warn = []
+        if press > self.max_press:
+            press = 0           # not recorded: say "press number unknown"
         if press == 0:
             key = "%s/c%d_nopress.wav" % (lang, code)
             want = c.get(lang + "_no_press", c[lang])
@@ -111,28 +145,32 @@ class AudioLibrary:
         return keys, warn
 
     def build(self, cfg, code, press):
-        """Return (WAV bytes, list of out-of-date clip names)."""
+        """Return (WAV bytes, list of notes: out-of-date clips, missing tone, ...)."""
         if self.load_error:
             raise AudioError(self.load_error)
         opts = cfg.get("audio", {})
         langs = [l for l in ("en", "es") if l in opts.get("languages", ["en", "es"])]
-        body, stale = b"", []
+        body, notes = b"", []
+        if press > self.max_press:
+            notes.append("press %d is above the recorded 1-%d, so the page says press number unknown"
+                         % (press, self.max_press))
         for i, lang in enumerate(langs):
             keys, warn = self.pieces(cfg, code, press, lang)
-            stale += warn
+            notes += ["clip %s no longer matches the config wording" % k for k in warn]
             if i:
                 body += silence(700)
             for j, k in enumerate(keys):
                 if j:
                     body += silence(PIECE_GAP_MS)
                 body += self._frames(k)
-        return self._wrap(body, opts), stale
+        lead, tone_notes = self.lead_in(cfg, code)
+        return self._wrap(lead, body, opts), notes + tone_notes
 
     def build_custom(self, cfg, en, es):
         raise AudioError("custom text can't be spoken yet: only the recorded messages exist")
 
-    def _wrap(self, body, opts):
-        once = (self._frames("chime.wav") + silence(300) if opts.get("chime", True) else b"") + body
+    def _wrap(self, lead, body, opts):
+        once = lead + body
         repeat = max(1, int(opts.get("repeat", 2)))
         frames = (once + silence(1200)) * (repeat - 1) + once + silence(300)
         out = io.BytesIO()
@@ -157,4 +195,19 @@ class AudioLibrary:
                             problems.append("missing clip %s" % k)
                     for k in warn:
                         problems.append("clip %s no longer matches the config wording" % k)
+            style = tone_style(cfg)
+            name = cfg["codes"][code].get("tone", "")
+            if style != "off" and name:
+                key = "tones/%s/%s.wav" % (TONE_DIRS[style], name)
+                if not os.path.exists(os.path.join(self.folder, key)):
+                    problems.append("code %d tone file %s is missing (the chime plays instead)" % (code, key))
         return sorted(set(problems))
+
+
+def tone_style(cfg):
+    """'once', 'twice' or 'off'. Older configs had "chime": false for off."""
+    opts = cfg.get("audio", {})
+    style = opts.get("tones")
+    if style not in ("once", "twice", "off"):
+        style = "once" if opts.get("chime", True) else "off"
+    return style

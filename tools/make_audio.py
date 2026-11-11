@@ -9,7 +9,8 @@
 #   <out>/<lang>/c<code>_pre.wav     "Maintenance requested to press"
 #   <out>/<lang>/c<code>_post.wav    "for camera fault."  (codes with a reason)
 #   <out>/<lang>/c<code>_nopress.wav the whole press-0 message
-#   <out>/<lang>/n/<1..999>.wav      the press number
+#   <out>/<lang>/n/<1..100>.wav      the press number with the words before it
+#                                    (--max-press; higher presses say "unknown")
 #   <out>/chime.wav                  attention chime played before a page
 #   <out>/manifest.json              the text of every clip, so the receiver can
 #                                    tell when the clips no longer match the config
@@ -36,7 +37,8 @@ import time
 import wave
 
 RATE = 8000
-DEFAULT_VOICES = {"en": "en_US-lessac-medium", "es": "es_MX-claude-high"}
+DEFAULT_VOICES = {"en": "en_US-hfc_female-medium", "es": "es_MX-claude-high"}
+MAX_PRESS = 100     # press numbers recorded: 1 to this; higher presses page as "press unknown"
 # Trim silence gently: -60 dB and keep 60 ms before the first sound, so soft
 # starts ("five", "six", "seis") are not clipped.
 FILTER = ("silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.06,areverse,"
@@ -60,7 +62,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from p833_audio import number_text, parts, split_text  # noqa: E402,F401
 
 
-def clip_plan(cfg):
+def clip_plan(cfg, max_press=MAX_PRESS):
     """Every clip to make: {relative path: (lang, text)}.
 
     'Maintenance requested to press 27 for camera fault.' is recorded as
@@ -77,7 +79,7 @@ def clip_plan(cfg):
             plan["%s/c%d_nopress.wav" % (lang, code)] = (lang, c.get(lang + "_no_press", c[lang]))
     for lang in ("en", "es"):
         lead = parts(cfg, min(cfg["codes"]), lang)[1]
-        for n in range(1, 1000):
+        for n in range(1, max_press + 1):
             plan["%s/n/%d.wav" % (lang, n)] = (lang, number_text(lead, n))
     return plan
 
@@ -107,6 +109,8 @@ def main():
     p.add_argument("--voice-es", default=DEFAULT_VOICES["es"])
     p.add_argument("--length-scale", type=float, default=1.05,
                    help="speaking pace; above 1 is slower (clearer on a PA)")
+    p.add_argument("--max-press", type=int, default=MAX_PRESS,
+                   help="record press numbers 1 to this (1-999); higher presses page as press unknown")
     p.add_argument("--all", action="store_true", help="re-make every clip, not just changed ones")
     a = p.parse_args()
 
@@ -120,7 +124,9 @@ def main():
 
     with open(a.config, encoding="utf-8") as f:
         cfg = json.load(f)
-    plan = clip_plan(cfg)
+    if not 1 <= a.max_press <= 999:
+        sys.exit("--max-press must be 1 to 999")
+    plan = clip_plan(cfg, a.max_press)
     voices = {"en": a.voice_en, "es": a.voice_es}
 
     os.makedirs(a.out, exist_ok=True)
@@ -173,7 +179,7 @@ def main():
     make_chime(os.path.join(a.out, "chime.wav"))
     manifest = {"_about": "P833 page audio. By Ethan Brady & Ryan Raikes. Made by tools/make_audio.py; "
                           "do not edit by hand.",
-                "rate": RATE, "voices": voices, "length_scale": a.length_scale,
+                "rate": RATE, "voices": voices, "length_scale": a.length_scale, "max_press": a.max_press,
                 "filter": FILTER, "pronounce": PRONOUNCE,
                 "clips": {k: t for k, (_, t) in sorted(plan.items())}}
     with open(man_path, "w", encoding="utf-8") as f:

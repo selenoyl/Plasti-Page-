@@ -44,6 +44,13 @@ def make_fake_audio(folder, cfg_path=None, drop=(), change=None):
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
             w.writeframes(b"\x10\x00" * 80)          # 10 ms
     M.make_chime(os.path.join(folder, "chime.wav"))
+    for code in cfg["codes"].values():            # fake department tones: 100 / 200 frames
+        for sub, n in (("single", 100), ("twice", 200)):
+            path = os.path.join(folder, "tones", sub, code["tone"] + ".wav")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with _w.open(path, "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+                w.writeframes(b"\x20\x00" * n)
     if change:
         clips.update(change)
     with open(os.path.join(folder, "manifest.json"), "w", encoding="utf-8") as f:
@@ -109,13 +116,45 @@ class Audio(unittest.TestCase):
         cfg["audio"] = dict(self.cfg["audio"], repeat=1)
         one = self.frames(self.lib.build(cfg, 8, 27)[0])
         gap = 8 * A.PIECE_GAP_MS
-        expect = 4000 + 2400 + (3 * 80 + 2 * gap) + 5600 + (3 * 80 + 2 * gap) + 2400
+        # tone 100 frames + 0.3 s, en 3 clips + 2 gaps, 0.7 s, es 3 clips + 2 gaps, 0.3 s tail
+        expect = 100 + 2400 + (3 * 80 + 2 * gap) + 5600 + (3 * 80 + 2 * gap) + 2400
         self.assertEqual(one, expect)
         cfg["audio"] = dict(self.cfg["audio"], repeat=2)
         two = self.frames(self.lib.build(cfg, 8, 27)[0])
         self.assertEqual(two, 2 * (expect - 2400) + 9600 + 2400)
-        cfg["audio"] = dict(self.cfg["audio"], repeat=1, chime=False, languages=["en"])
+        cfg["audio"] = dict(self.cfg["audio"], repeat=1, tones="off", languages=["en"])
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
+        cfg["audio"] = dict(self.cfg["audio"], repeat=1, tones="twice", languages=["en"])
+        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 200 + 2400 + 80 + 2400)
+        # older config: "chime": false means no tone
+        cfg["audio"] = {"repeat": 1, "chime": False, "languages": ["en"]}
+        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
+
+    def test_tones(self):
+        self.assertEqual(self.lib.tone_names(), ["1_maintenance_bell", "2_technician_wood",
+                                                 "3_supervisor_glide", "4_quality_flute", "5_packaging_pluck"])
+        self.assertEqual(self.cfg["codes"][8]["tone"], "1_maintenance_bell")
+        self.assertEqual(self.cfg["codes"][7]["tone"], "3_supervisor_glide")
+        # a missing tone falls back to the chime, with a note and a check problem
+        cfg = dict(self.cfg, codes={c: dict(v) for c, v in self.cfg["codes"].items()})
+        cfg["codes"][5]["tone"] = "nope"
+        wav, notes = self.lib.build(cfg, 5, 3)
+        self.assertTrue(any("tone" in n and "chime used" in n for n in notes), notes)
+        self.assertTrue(any("code 5 tone" in p for p in self.lib.check(cfg)))
+        cfg["codes"][5]["tone"] = ""           # no tone set: chime, no complaint
+        self.assertEqual(self.lib.build(cfg, 5, 3)[1], [])
+
+    def test_press_above_recorded_range(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            lib = A.AudioLibrary(make_fake_audio(tmp))
+            lib.manifest["max_press"] = 100
+            wav, notes = lib.build(self.cfg, 2, 345)
+            self.assertTrue(any("above the recorded 1-100" in n for n in notes), notes)
+            self.assertEqual(lib.pieces(self.cfg, 2, 345, "en")[0], ["en/c2_nopress.wav"])
+            self.assertEqual(lib.build(self.cfg, 2, 100)[1], [])
+        finally:
+            shutil.rmtree(tmp)
 
     def test_check_ok_and_stale(self):
         self.assertEqual(self.lib.check(self.cfg), [])
@@ -125,8 +164,8 @@ class Audio(unittest.TestCase):
                                                  change={"en/c2_pre.wav": "Maintenance needed at press"}))
             probs = lib.check(self.cfg)
             self.assertTrue(any("en/c2_pre.wav no longer matches" in p for p in probs), probs)
-            wav, stale = lib.build(self.cfg, 2, 5)
-            self.assertEqual(stale, ["en/c2_pre.wav"])
+            wav, notes = lib.build(self.cfg, 2, 5)
+            self.assertEqual(notes, ["clip en/c2_pre.wav no longer matches the config wording"])
             with self.assertRaises(A.AudioError):
                 lib.build(self.cfg, 2, 1)          # es/n/1.wav is missing
         finally:
@@ -498,9 +537,10 @@ class Server(unittest.TestCase):
         f = {"ht813_ip": "192.168.83.21", "dial_method": "2-stage", "sip_port": "5062",
              "local_sip_port": "5070", "wait_after_answer_ms": "1000", "dtmf_ms": "100",
              "dtmf_gap_ms": "100", "wait_after_dial_ms": "2500", "max_call_s": "60",
-             "dial_floor": "F*61", "dial_office": "", "repeat": "3", "chime": "on"}
+             "dial_floor": "F*61", "dial_office": "", "repeat": "3", "tones": "once"}
         for c in range(2, 10):
             f["zone_%d" % c] = "floor"
+            f["tone_%d" % c] = self.cfg["codes"][c]["tone"]
         f.update(over)
         return f
 
@@ -511,6 +551,9 @@ class Server(unittest.TestCase):
         self.assertEqual(self.cfg["zones"]["floor"]["dial"], "F*61")
         self.assertEqual(self.cfg["codes"][4]["zone"], "office")
         self.assertEqual(self.cfg["audio"]["repeat"], 3)
+        # change a tone and turn tones to twice
+        self.admin("/admin/tuning", self.tuning_form(zone_4="office", tone_6="1_maintenance_bell", tones="twice"))
+        self.assertEqual((self.cfg["codes"][6]["tone"], self.cfg["audio"]["tones"]), ("1_maintenance_bell", "twice"))
         # the next page uses the new zone and dial digits
         self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 7})
         self.wait_pages()
@@ -532,6 +575,7 @@ class Server(unittest.TestCase):
 
     def test_tuning_bad_values_not_saved(self):
         for bad in ({"ht813_ip": "300.1.1.1"}, {"dial_floor": "PAGE1"}, {"dtmf_ms": "5"},
+                    {"tone_2": "no_such_tone"}, {"tones": "loud"},
                     {"zone_3": "nowhere"}, {"repeat": "9"}, {"dial_method": "3-stage"}):
             _, loc, _ = self.admin("/admin/tuning", self.tuning_form(**bad))
             self.assertIn("Not saved", urllib.parse.unquote(loc), bad)
@@ -546,6 +590,46 @@ class Server(unittest.TestCase):
         self.admin("/admin/tuning", self.tuning_form())
         self.admin("/admin/dryrun", {"dry_run": "on"})
         self.assertIn("tuning", R.State(self.cfg, self.tmp, self.tmp).settings)
+
+    def preview(self, query):
+        st, _, body = self.admin("/admin/preview?" + query)
+        self.assertEqual(st, 200)
+        return json.loads(body)
+
+    def test_preview_test_call(self):
+        p = self.preview("kind=test&board=RSP_LH&code=8&press=27")
+        self.assertTrue(p["ok"])
+        self.assertEqual(p["en"], "Maintenance requested to press 27 for camera fault.")
+        self.assertEqual(p["es"], "Se solicita mantenimiento en la prensa 27 por falla de cámara.")
+        self.assertEqual((p["from"], p["zone"], p["tone"], p["plays"]), ("RSP LH (RSP_LH)", "floor", "maintenance bell", 2))
+        self.assertEqual(p["audio"], "/admin/listen?code=8&press=27")
+        self.assertEqual(p["notes"], [])
+        self.assertEqual(self.pager.sent, [])                 # previewing never pages
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "calls.csv")))   # nor logs a call
+        self.assertEqual(self.preview("kind=test&board=RSP_LH&code=4&press=3")["tone"], "supervisor glide")
+
+    def test_preview_bad_and_password(self):
+        self.assertFalse(self.preview("kind=test&board=RSP_LH&code=1&press=27")["ok"])
+        self.assertFalse(self.preview("kind=test&board=RSP_LH&code=2&press=x")["ok"])
+        self.assertEqual(self.admin("/admin/preview?kind=test&code=2&press=1", pw=None)[0], 401)
+
+    def test_preview_custom(self):
+        p = self.preview("kind=custom&zone=floor&en=Hello+there.&es=Hola.")
+        self.assertTrue(p["ok"])
+        self.assertEqual((p["en"], p["es"], p["audio"]), ("Hello there.", "Hola.", None))
+        self.assertTrue(p["notes"])
+        self.assertFalse(self.preview("kind=custom&zone=floor&en=")["ok"])
+
+    def test_preview_missing_audio(self):
+        os.remove(os.path.join(self.audio_dir, "es", "n", "5.wav"))
+        p = self.preview("kind=test&board=RSP_LH&code=2&press=5")
+        self.assertIsNone(p["audio"])
+        self.assertIn("would fail", p["notes"][0])
+
+    def test_admin_page_has_preview(self):
+        body = self.admin("/admin")[2]
+        self.assertIn("p833Preview('test')", body)
+        self.assertIn("p833Preview('custom')", body)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

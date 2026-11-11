@@ -31,9 +31,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from p833_audio import AudioError, AudioLibrary  # noqa: E402
+from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -77,7 +77,8 @@ def tuning_of(cfg):
     return {"phone": dict(cfg["phone"]),
             "zone_dial": {z: v.get("dial", "") for z, v in cfg["zones"].items()},
             "code_zone": {str(c): cfg["codes"][c]["zone"] for c in range(2, 10)},
-            "audio": {"repeat": cfg["audio"]["repeat"], "chime": cfg["audio"]["chime"]}}
+            "code_tone": {str(c): cfg["codes"][c].get("tone", "") for c in range(2, 10)},
+            "audio": {"repeat": cfg["audio"]["repeat"], "tones": tone_style(cfg)}}
 
 
 def apply_tuning(cfg, t):
@@ -90,12 +91,19 @@ def apply_tuning(cfg, t):
     for c, z in t.get("code_zone", {}).items():
         if c.isdigit() and int(c) in cfg["codes"] and z in cfg["zones"]:
             cfg["codes"][int(c)]["zone"] = z
-    for k in ("repeat", "chime"):
-        if k in t.get("audio", {}):
-            cfg["audio"][k] = t["audio"][k]
+    for c, name in t.get("code_tone", {}).items():
+        if c.isdigit() and int(c) in cfg["codes"]:
+            cfg["codes"][int(c)]["tone"] = name
+    a = t.get("audio", {})
+    if "repeat" in a:
+        cfg["audio"]["repeat"] = a["repeat"]
+    if a.get("tones") in ("once", "twice", "off"):
+        cfg["audio"]["tones"] = a["tones"]
+    elif "chime" in a:                        # settings saved by v0.3.x
+        cfg["audio"]["tones"] = "once" if a["chime"] else "off"
 
 
-def parse_tuning(form, cfg):
+def parse_tuning(form, cfg, tone_names=None):
     """Check the admin page's phone form. Return (tuning, list of errors)."""
     errs = []
     phone = {}
@@ -131,14 +139,24 @@ def parse_tuning(form, cfg):
             zones[str(c)] = z
         else:
             errs.append("code %d: pick a zone" % c)
-    audio = {"chime": form.get("chime") == "on"}
+    tones = {}
+    for c in range(2, 10):
+        name = form.get("tone_%d" % c, "")
+        if name == "" or (tone_names is not None and name in tone_names):
+            tones[str(c)] = name
+        else:
+            errs.append("code %d: unknown tone %s" % (c, name))
+    audio = {"tones": form.get("tones", "")}
+    if audio["tones"] not in ("once", "twice", "off"):
+        errs.append("tone must be once, twice or off")
     try:
         audio["repeat"] = int(form.get("repeat", ""))
         if not 1 <= audio["repeat"] <= 5:
             raise ValueError
     except ValueError:
         errs.append("plays must be 1 to 5")
-    return {"phone": phone, "zone_dial": dials, "code_zone": zones, "audio": audio}, errs
+    return {"phone": phone, "zone_dial": dials, "code_zone": zones, "code_tone": tones,
+            "audio": audio}, errs
 
 
 def load_config(path):
@@ -167,7 +185,7 @@ def load_config(path):
     # Installed: /opt/p833-receiver/audio. Run from the repo: <repo>/audio.
     audio.setdefault("dir", next((d for d in (os.path.join(here, "audio"), os.path.join(here, "..", "audio"))
                                   if os.path.isdir(d)), os.path.join(here, "audio")))
-    audio.setdefault("chime", True)
+    audio.setdefault("tones", "once" if audio.get("chime", True) else "off")
     audio.setdefault("repeat", 2)
     audio.setdefault("languages", ["en", "es"])
     audio.setdefault("keep_dry_run_pages", 20)
@@ -481,10 +499,10 @@ class PageWorker(threading.Thread):
         try:
             if rec["code"] == "custom":
                 return self.audio.build_custom(self.cfg, rec["en"], rec["es"]), ""
-            wav, stale = self.audio.build(self.cfg, int(rec["code"]), int(rec["press"]))
-            if stale:
-                LOG.warning("audio out of date for: %s", ", ".join(stale))
-                return wav, "audio does not match the config wording; run make_audio"
+            wav, notes = self.audio.build(self.cfg, int(rec["code"]), int(rec["press"]))
+            if notes:
+                LOG.warning("audio: %s", "; ".join(notes))
+                return wav, "audio: " + "; ".join(notes)
             return wav, ""
         except AudioError as e:
             return None, "no audio: %s" % e
@@ -687,7 +705,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._back("Custom page sent to zone %s: %s" % (zone, en))
 
         if path == "/admin/tuning":
-            t, errs = parse_tuning(form, self.app["cfg"])
+            t, errs = parse_tuning(form, self.app["cfg"], self.app["worker"].audio.tone_names())
             if errs:
                 return self._back("Not saved: " + "; ".join(errs) + ".")
             st.set_tuning(t, who)
@@ -711,6 +729,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(200, status_obj(self.app))
         if parts.path in ("/", "/index.html"):
             return self._reply(200, page_html(self.app, False).encode(), "text/html; charset=utf-8")
+        if parts.path == "/admin/preview":
+            if not self._admin_ok():
+                return self._ask_password()
+            q = {k: v[0].strip() for k, v in parse_qs(parts.query).items()}
+            return self._reply(200, preview_obj(self.app, q))
         if parts.path == "/admin/listen":
             if not self._admin_ok():
                 return self._ask_password()
@@ -722,7 +745,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._reply(400, b"code 2-9 and press 0-999 needed", "text/plain")
             try:
-                wav, stale = self.app["worker"].audio.build(self.app["cfg"], code, press)
+                wav, _notes = self.app["worker"].audio.build(self.app["cfg"], code, press)
             except AudioError as e:
                 return self._reply(404, ("No audio: %s" % e).encode(), "text/plain; charset=utf-8")
             return self._reply(200, wav, "audio/wav")
@@ -732,6 +755,49 @@ class Handler(BaseHTTPRequestHandler):
             msg = parse_qs(parts.query).get("msg", [""])[0]
             return self._reply(200, page_html(self.app, True, msg).encode(), "text/html; charset=utf-8")
         return self._reply(404, {"ok": False, "error": "not found"})
+
+
+def preview_obj(app, q):
+    """What a test call or custom page would say and play, without sending it."""
+    cfg, st, lib = app["cfg"], app["state"], app["worker"].audio
+    mode = ("dry run: will be logged, not dialed" if st.dry_run else "LIVE: will be dialed")
+    plays = int(cfg["audio"].get("repeat", 2))
+    if q.get("kind") == "custom":
+        zone, en, es = q.get("zone", ""), q.get("en", ""), q.get("es", "")
+        if zone not in cfg["zones"]:
+            return {"ok": False, "error": "pick a zone"}
+        if not en or len(en) > 200 or len(es) > 200:
+            return {"ok": False, "error": "English text is needed, each text up to 200 characters"}
+        return {"ok": True, "from": "Admin page", "en": en, "es": es, "zone": zone,
+                "dial": cfg["zones"][zone].get("dial", ""), "tone": "chime", "plays": plays, "mode": mode,
+                "audio": None, "notes": ["Custom text has no recorded audio, so there is nothing to hear. "
+                                         "In dry run it is logged; live, it fails until on-laptop speech is added."]}
+    try:
+        code, press = int(q.get("code", "")), int(q.get("press", ""))
+    except ValueError:
+        return {"ok": False, "error": "call and press must be numbers"}
+    board = q.get("board", "")
+    call, err = check_call({"board": board or "x", "seq": 0, "code": code, "press": press})
+    if err:
+        return {"ok": False, "error": err}
+    en, es = build_message(cfg, code, press)
+    c = cfg["codes"][code]
+    style = tone_style(cfg)
+    tone = "off" if style == "off" else (re.sub(r"^\d+_", "", c.get("tone", "")).replace("_", " ") or "chime")
+    if style == "twice" and tone != "chime":
+        tone += " (twice)"
+    notes, audio = [], "/admin/listen?code=%d&press=%d" % (code, press)
+    try:
+        _, notes = lib.build(cfg, code, press)
+    except AudioError as e:
+        notes, audio = ["No audio: %s. A live page would fail." % e], None
+    if press > lib.max_press:
+        en, es = build_message(cfg, code, 0)
+    langs = cfg["audio"].get("languages", ["en", "es"])
+    return {"ok": True, "from": "%s (%s)" % (st.cell_name(board), board) if board else "-",
+            "en": en if "en" in langs else "", "es": es if "es" in langs else "",
+            "zone": c["zone"], "dial": cfg["zones"][c["zone"]].get("dial", ""), "tone": tone,
+            "plays": plays, "mode": mode, "audio": audio, "notes": notes}
 
 
 class Server(socketserver.ThreadingMixIn, HTTPServer):
@@ -781,7 +847,29 @@ th{background:var(--head)} tr.bad td{background:var(--bad)} td.ok{color:var(--go
 input,select,button{font-size:15px;padding:4px 6px}
 button{cursor:pointer} .msg{padding:8px 12px;border:2px solid var(--good);margin-bottom:16px;max-width:820px}
 .small{font-size:13px;opacity:.8} form.inline{display:inline;margin:0}
+.preview{margin-top:10px;padding:8px 10px;border-left:4px solid var(--good)} .preview:empty{display:none}
+.preview audio{margin-top:8px;width:100%;max-width:520px}
 """
+
+PREVIEW_JS = """<script>
+function p833Esc(t){var d=document.createElement('div');d.textContent=t==null?'':String(t);return d.innerHTML;}
+function p833Preview(kind){
+  dirty=true;  // stop the page refreshing while you listen
+  var f=document.getElementById(kind+'form'), box=document.getElementById('prev-'+kind);
+  var q=new URLSearchParams(new FormData(f)); q.set('kind',kind);
+  box.innerHTML='Loading...';
+  fetch('/admin/preview?'+q.toString(),{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(p){
+    if(!p.ok){box.innerHTML='<b>Not valid:</b> '+p833Esc(p.error);return;}
+    var h='<b>This page will say:</b><br>English: &ldquo;'+p833Esc(p.en)+'&rdquo;';
+    if(p.es){h+='<br>Spanish: &ldquo;'+p833Esc(p.es)+'&rdquo;';}
+    h+='<br><span class=small>From: '+p833Esc(p.from)+' &middot; zone '+p833Esc(p.zone)+' (dial '+p833Esc(p.dial||'not set')+
+       ') &middot; tone: '+p833Esc(p.tone)+' &middot; plays '+p833Esc(p.plays)+' time(s) &middot; '+p833Esc(p.mode)+'</span>';
+    (p.notes||[]).forEach(function(n){h+='<br><b>Note:</b> '+p833Esc(n);});
+    if(p.audio){h+='<br><audio controls autoplay src="'+p.audio+'&t='+Date.now()+'"></audio>';}
+    box.innerHTML=h;
+  }).catch(function(e){box.innerHTML='Preview failed: '+p833Esc(e);});
+}
+</script>"""
 
 REFRESH_JS = """<script>
 var dirty=false;document.addEventListener('input',function(){dirty=true;});
@@ -863,8 +951,10 @@ def page_html(app, admin, msg=""):
         else:
             audio_html = "<p>OK: all messages recorded. Voices: %s.</p>" % e(
                 ", ".join("%s %s" % (k, v) for k, v in sorted(s["audio_voices"].items())))
-        audio_html += "<p class=small>Page = %schime, English, Spanish, played %d time(s).</p>" % (
-            "" if cfg["audio"].get("chime", True) else "no ", int(cfg["audio"].get("repeat", 2)))
+        style = tone_style(cfg)
+        audio_html += "<p class=small>Page = %s, English, Spanish, played %d time(s).</p>" % (
+            {"once": "department tone", "twice": "department tone twice", "off": "no tone"}[style],
+            int(cfg["audio"].get("repeat", 2)))
         ph = cfg["phone"]
         rows = ["<tr><td>HT813 address</td><td><input name=ht813_ip value='%s' required size=15></td>"
                 "<td class=small>The HT813's fixed IP address on the IoT network.</td></tr>" % e(ph["ht813_ip"])]
@@ -884,22 +974,35 @@ def page_html(app, admin, msg=""):
                         "page this zone. 0-9 * #, a comma = half-second pause, F = hook flash (Link).%s</td></tr>"
                         % (e(z), e(z), e(v.get("dial", "")), " <b>Not set yet.</b>" if not v.get("dial") else ""))
         zone_names = list(cfg["zones"])
+        tone_names = app["worker"].audio.tone_names()
         for c in range(2, 10):
-            rows.append("<tr><td>Code %d %s goes to</td><td><select name=zone_%d>%s</select></td><td></td></tr>" % (
-                c, e(cfg["codes"][c]["who"]), c, "".join(
-                    "<option%s>%s</option>" % (" selected" if cfg["codes"][c]["zone"] == z else "", e(z))
-                    for z in zone_names)))
-        rows.append("<tr><td>Chime before the message</td><td><input type=checkbox name=chime%s></td><td></td></tr>"
-                    % (" checked" if cfg["audio"]["chime"] else ""))
+            cur = cfg["codes"][c].get("tone", "")
+            names = tone_names + ([cur] if cur and cur not in tone_names else [])
+            tone_sel = "<option value=''%s>(chime)</option>" % (" selected" if not cur else "") + "".join(
+                "<option value='%s'%s>%s</option>" % (e(n), " selected" if n == cur else "",
+                                                      e(re.sub(r"^\d+_", "", n).replace("_", " ")))
+                for n in names)
+            why = cfg["codes"][c].get("why", "")
+            rows.append("<tr><td>Code %d %s%s</td><td>zone <select name=zone_%d>%s</select><br>"
+                        "tone <select name=tone_%d>%s</select></td><td></td></tr>" % (
+                            c, e(cfg["codes"][c]["who"]), " (%s)" % e(why) if why else "", c, "".join(
+                                "<option%s>%s</option>" % (" selected" if cfg["codes"][c]["zone"] == z else "", e(z))
+                                for z in zone_names), c, tone_sel))
+        style = tone_style(cfg)
+        rows.append("<tr><td>Department tone</td><td><select name=tones>%s</select></td><td class=small>"
+                    "Played before the message each time it plays. Twice = the tone file that plays the "
+                    "tone two times.</td></tr>" % "".join(
+                        "<option value='%s'%s>%s</option>" % (v, " selected" if style == v else "", label)
+                        for v, label in (("once", "once"), ("twice", "twice"), ("off", "off"))))
         rows.append("<tr><td>Times the message plays</td><td><input name=repeat type=number min=1 max=5 value='%d' "
-                    "style='width:5em'></td><td class=small>Each time: chime, English, Spanish.</td></tr>"
+                    "style='width:5em'></td><td class=small>Each time: tone, English, Spanish.</td></tr>"
                     % int(cfg["audio"]["repeat"]))
         tuned = "tuning" in app["state"].settings
         phone_html = """
 <div class=card><h2>Phone and paging setup</h2>
 <p class=small>Change these here while tuning the phone side. They're saved on the laptop, kept through restarts
 and updates, and replace the config file's values. %s The HT813 call itself is the next build step;
-until then the zones, codes, chime and plays already apply (see Listen and the log).</p>
+until then the zones, codes, tones and plays already apply (see Listen and the log).</p>
 <form method=post action='/admin/tuning'><div class=w><table>%s</table></div>
 <button>Save phone and paging settings</button></form>
 <form method=post action='/admin/tuning/reset' style='margin-top:8px'
@@ -910,14 +1013,16 @@ until then the zones, codes, chime and plays already apply (see Listen and the l
 <div class=card><h2>Settings</h2>%s
 <p class=small>Saved on the laptop and kept through restarts. The config file's "dry_run" is only the default.</p></div>
 <div class=card><h2>Send a test call</h2>%s
-<form method=post action='/admin/test'>
+<form method=post action='/admin/test' id=testform>
 <label>From board <select name=board required>%s</select></label>
 <label>Call <select name=code>%s</select></label>
-<label>Press <input name=press type=number min=0 max=999 value=0 required style='width:6em'></label>
-<button>Send test call</button>
-<button formaction='/admin/listen' formmethod=get formtarget=_blank>Listen (no page)</button></form>
-<p class=small>Goes through the same checks, repeat drop, log and pager as a real call from that board.
-Press 0 tests the "press number unknown" message. <b>Listen</b> plays the page in this browser without sending anything.</p></div>
+<label>Press <input name=press type=number min=0 max=999 value=0 required style='width:6em'></label><br>
+<button type=button onclick="p833Preview('test')">1. Preview (hear it, nothing is sent)</button>
+<button>2. Send test call</button></form>
+<div id=prev-test class=preview></div>
+<p class=small>Preview shows the exact words and plays the exact audio this call will page, in this browser only.
+Send goes through the same checks, repeat drop, log and pager as a real call from that board.
+Press 0 tests the "press number unknown" message.</p></div>
 <div class=card><h2>Audio</h2>%s</div>
 <div class=card><h2>Add or rename a board</h2>
 <form method=post action='/admin/board/add'>
@@ -927,14 +1032,16 @@ Press 0 tests the "press number unknown" message. <b>Listen</b> plays the page i
 <p class=small>The board ID must match the ID set in that board's firmware. Letters, numbers, _ and - only.
 Use an existing ID to rename its cell. Remove boards in the table below.</p></div>
 <div class=card><h2>Send a custom page</h2>%s
-<form method=post action='/admin/custom'>
+<form method=post action='/admin/custom' id=customform>
 <label>Zone <select name=zone>%s</select></label><br>
 <label>English <input name=en required maxlength=200 size=60 placeholder='Test page. Maintenance requested to press 12.'></label><br>
 <label>Spanish <input name=es maxlength=200 size=60 placeholder='Prueba. Se solicita mantenimiento en la prensa 12.'></label><br>
-<button>Send custom page</button></form>
+<button type=button onclick="p833Preview('custom')">1. Preview</button>
+<button>2. Send custom page</button></form>
+<div id=prev-custom class=preview></div>
 <p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
 Custom text has no recorded audio yet, so with dry run off a custom page fails until on-laptop speech is added.</p></div>
-""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html
+""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + PREVIEW_JS
 
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

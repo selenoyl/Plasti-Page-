@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.3.1:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.4.0:** receiving, checking, logging, dry-run paging, the
 admin page, the editable phone settings and the recorded page audio are in and
 tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
@@ -99,11 +99,11 @@ Open `http://<laptop IP>:8833/admin`. The browser asks for a user name and passw
 
 | Section | What it does |
 |---|---|
-| **Phone and paging setup** | HT813 address and ports, 1-stage or 2-stage dialing, the timing waits, each zone's **dial digits** (0-9 * #, comma = half-second pause, F = hook flash), which zone each code pages, the chime, and how many times the message plays. Saved on the laptop on top of the config file's values; **Reset** goes back to the config. |
+| **Phone and paging setup** | HT813 address and ports, 1-stage or 2-stage dialing, the timing waits, each zone's **dial digits** (0-9 * #, comma = half-second pause, F = hook flash), which zone each code pages, each code's department tone, the tone once, twice or off, and how many times the message plays. Saved on the laptop on top of the config file's values; **Reset** goes back to the config. |
 | **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
-| **Send a test call** | Pick a board, a call type (2 to 9) and a press. It goes through exactly the same path as a real call from that board, and is logged with the detail "admin page test". |
+| **Send a test call** | Pick a board, a call type (2 to 9) and a press. **1. Preview** shows the exact words and plays the exact audio, sending nothing. **2. Send** goes through exactly the same path as a real call from that board, and is logged with the detail "admin page test". |
 | **Add or rename a board** | Enter the board ID (it must match the ID in that board's firmware) and a cell name. Using an existing ID renames its cell. |
-| **Send a custom page** | Type your own English and, optionally, Spanish text and pick a zone. It is logged as code "custom". |
+| **Send a custom page** | Type your own English and, optionally, Spanish text and pick a zone. **Preview** shows it; there is no audio for free text. It is logged as code "custom". |
 | **Boards table** | **Remove** takes a board off the list. A board that calls in but isn't on the list shows an **Add** box in its row. |
 
 With dry run off, every test or custom page is really dialed (once the phone step exists).
@@ -157,33 +157,45 @@ Credentials never go in `config.json`. The board key and admin password are in `
 ## Page audio
 
 Every page is spoken from clips recorded ahead of time, so the laptop needs no
-speech program and no internet. A page plays: chime, English, Spanish, and the
-whole thing again (`audio.repeat`, default 2).
+speech program and no internet. A page plays: **department tone**, English,
+Spanish, and the whole thing again (`audio.repeat`, default 2).
 
-- The clips live in `audio/` in the repository and are installed to `/opt/p833-receiver/audio`.
-- They are made by `tools/make_audio.py` with the free offline Piper voices: `en_US-lessac-medium` (English) and `es_MX-claude-high` (Spanish).
-- Each message is recorded in pieces, and each press number 1 to 999 is recorded once per language. That's about 2,000 clips (about 66 MB), because the press number can be anything from 0 to 999.
-  - The number is recorded together with the words every message shares before it, which sounds natural: "Maintenance" + "requested to press 27" + "for camera fault.", or "Se solicita mantenimiento" + "en la prensa 27".
-  - A number recorded on its own ("three", "seis") was misheard in testing.
+- **Department tones** (`audio/tones/`, your andon tones, phone versions):
+
+  | Tone | Department | Codes |
+  |---|---|---|
+  | maintenance bell | Maintenance | 2, 8 (camera fault), 9 (Red Rabbit) |
+  | technician wood | Technician | 3 |
+  | supervisor glide | Supervisor | 4, 7 (audit check-in) |
+  | quality flute | Quality | 5 |
+  | packaging pluck | Packaging | 6 |
+
+  - On the admin page (Phone and paging setup) you can change each code's tone, and set the tone to play **once**, **twice** (the `twice` tone files) or **off**.
+  - A code with no tone, and custom pages, get a short chime instead.
+  - To add a tone, put an 8 kHz 16-bit mono WAV with the same name in both `audio/tones/single/` and `audio/tones/twice/`.
+- **Voices** (free, offline Piper voices): English `en_US-hfc_female-medium`, Spanish `es_MX-claude-high` (Mexican).
+- **Press numbers 1 to 100 are recorded.** A press above 100 still pages, but says "press number unknown". The log and the Preview note it.
+- The clips live in `audio/` in the repository (about 250 files, 7 MB) and are installed to `/opt/p833-receiver/audio`.
+  - Each message is recorded in pieces. The number is recorded together with the words every message shares before it, which sounds natural: "Maintenance" + "requested to press 27" + "for camera fault.", or "Se solicita mantenimiento" + "en la prensa 27".
   - Words a voice mispronounces get a spoken spelling in `tools/make_audio.py` (`PRONOUNCE`). For example, the Spanish voice says "Red Rábit"; the page text doesn't change.
-- **Checked by machine:** about 200 finished pages were transcribed with a speech recognizer (Whisper), and every press number came out right in both languages.
-- **Length:** a page is about 16 s with the message played twice, or 25 s for the longest (Red Rabbit). Set "Times the message plays" to 1 on the admin page to halve it.
+- **Checked by machine:** every press 1 to 100 and every message, in both languages, was transcribed with a speech recognizer (Whisper), and the numbers all came out right.
+- **Length:** a page is about 17 to 21 s with the message played twice, and 28 s for the longest (Red Rabbit). Set "Times the message plays" to 1 on the admin page to roughly halve it.
 - On the admin page:
+  - **Preview** (Send a test call) shows the exact words, tone and zone, and plays the exact audio in your browser. Nothing is sent or logged.
   - The **Audio** box shows whether every message is recorded and matches the config wording.
-  - **Listen** plays any call in the browser without paging.
 - In dry run, the audio of the last 20 pages is saved in `/var/lib/p833-receiver/last_pages/`.
-- If you change the wording in the config, re-make the clips. The Audio box flags clips that no longer match the wording. Until they're re-made, the old clips play. A page with a missing clip fails.
+- If you change the wording, the voices or the number range, re-make the clips on a PC with internet, Python 3.9+ and ffmpeg. Then commit the `audio/` folder and update the laptop.
 
   ```bash
   python3 -m pip install piper-tts
   ```
 
   ```bash
-  python3 tools/make_audio.py --config /etc/p833-receiver/config.json --out audio
+  python3 tools/make_audio.py --config receiver/config.example.json --out audio --max-press 100
   ```
 
-  Then run `sudo bash install/install.sh`. This needs Python 3.9 or newer, ffmpeg, and internet the first time, to download the voices.
-- Custom pages from the admin page have no audio yet, because they are free text. In dry run they are logged; live, they fail.
+  Until the clips are re-made, the Audio box flags any that no longer match, and the old clips play. A page with a missing clip fails.
+- Custom pages from the admin page have no audio, because they are free text. In dry run they are logged; live, they fail.
 
 ## Board to laptop message (for the board firmware)
 

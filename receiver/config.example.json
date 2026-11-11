@@ -9,8 +9,8 @@
   "page_retries": 3,
   "page_retry_wait_s": 10,
   "audio": {
-    "_note": "Page = chime, English, Spanish, played 'repeat' times. Clips are made by tools/make_audio.py.",
-    "chime": true,
+    "_note": "Page = department tone (per code, see codes.tone), English, Spanish, played 'repeat' times. tones: once, twice or off. Voice clips are made by tools/make_audio.py; tone files are in audio/tones.",
+    "tones": "once",
     "repeat": 2,
     "languages": [
       "en",
@@ -58,6 +58,7 @@
     "2": {
       "who": "Maintenance",
       "zone": "floor",
+      "tone": "1_maintenance_bell",
       "en": "Maintenance requested to press {press}.",
       "es": "Se solicita mantenimiento en la prensa {press}.",
       "en_no_press": "Maintenance requested. Press number unknown.",
@@ -66,6 +67,7 @@
     "3": {
       "who": "Technician",
       "zone": "floor",
+      "tone": "2_technician_wood",
       "en": "Technician requested to press {press}.",
       "es": "Se solicita un técnico en la prensa {press}.",
       "en_no_press": "Technician requested. Press number unknown.",
@@ -74,6 +76,7 @@
     "4": {
       "who": "Supervisor",
       "zone": "floor",
+      "tone": "3_supervisor_glide",
       "en": "Supervisor requested to press {press}.",
       "es": "Se solicita un supervisor en la prensa {press}.",
       "en_no_press": "Supervisor requested. Press number unknown.",
@@ -82,6 +85,7 @@
     "5": {
       "who": "Quality",
       "zone": "floor",
+      "tone": "4_quality_flute",
       "en": "Quality requested to press {press}.",
       "es": "Se solicita calidad en la prensa {press}.",
       "en_no_press": "Quality requested. Press number unknown.",
@@ -90,6 +94,7 @@
     "6": {
       "who": "Packaging",
       "zone": "floor",
+      "tone": "5_packaging_pluck",
       "en": "Packaging requested to press {press}.",
       "es": "Se solicita empaque en la prensa {press}.",
       "en_no_press": "Packaging requested. Press number unknown.",
@@ -99,6 +104,7 @@
       "who": "Supervisor",
       "why": "audit check-in",
       "zone": "floor",
+      "tone": "3_supervisor_glide",
       "en": "Supervisor requested to press {press} for audit check-in.",
       "es": "Se solicita un supervisor en la prensa {press} para la revisión de auditoría.",
       "en_no_press": "Supervisor requested for audit check-in. Press number unknown.",
@@ -108,6 +114,7 @@
       "who": "Maintenance",
       "why": "camera fault",
       "zone": "floor",
+      "tone": "1_maintenance_bell",
       "en": "Maintenance requested to press {press} for camera fault.",
       "es": "Se solicita mantenimiento en la prensa {press} por falla de cámara.",
       "en_no_press": "Maintenance requested for camera fault. Press number unknown.",
@@ -117,6 +124,7 @@
       "who": "Maintenance",
       "why": "Red Rabbit failure",
       "zone": "floor",
+      "tone": "1_maintenance_bell",
       "en": "Maintenance requested to press {press} for Red Rabbit failure.",
       "es": "Se solicita mantenimiento en la prensa {press} por falla de Red Rabbit.",
       "en_no_press": "Maintenance requested for Red Rabbit failure. Press number unknown.",
