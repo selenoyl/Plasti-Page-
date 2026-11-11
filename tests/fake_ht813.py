@@ -78,6 +78,12 @@ class FakeHT813:
                        "m=audio %d RTP/AVP 0 101\r\na=rtpmap:101 telephone-event/8000\r\n" % self.rtp_port)
                 self._reply(addr, 200, "OK", h, sdp, "Contact: <sip:fxo@127.0.0.1:%d>\r\n"
                             "Content-Type: application/sdp\r\n" % self.port)
+                far = None
+                for line in body.splitlines():
+                    if line.startswith("m=audio "):
+                        far = ("127.0.0.1", int(line.split()[1]))
+                if far:
+                    threading.Thread(target=self._send_tone_back, args=(far,), daemon=True).start()
                 if self.mode == "hangup":
                     threading.Timer(self.hangup_after, self._hang_up, args=(addr, h)).start()
             elif first.startswith("ACK "):
@@ -87,6 +93,20 @@ class FakeHT813:
                 self._reply(addr, 200, "OK", h)
             elif first.startswith("CANCEL "):
                 self._reply(addr, 200, "OK", h)
+
+    def _send_tone_back(self, far, frames=25):
+        """Send 0.5 s of 'dial tone' back, like the line would."""
+        import math
+        sys_path_payload = bytes((0x55 + int(20 * math.sin(i / 3.0))) & 0xFF for i in range(160))
+        for i in range(frames):
+            if self._stop:
+                return
+            pkt = struct.pack("!BBHII", 0x80, 0, i, i * 160, 0x1234) + sys_path_payload
+            try:
+                self.rtp.sendto(pkt, far)
+            except OSError:
+                return
+            time.sleep(0.02)
 
     def _hang_up(self, addr, h):
         msg = ("BYE sip:p833@%s SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:%d;branch=z9hG4bKfakebye\r\n"

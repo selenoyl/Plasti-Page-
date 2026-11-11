@@ -65,6 +65,23 @@ def ulaw_to_pcm16_sample(u):
     return -s if sign else s
 
 
+_ULAW_DECODE = [ulaw_to_pcm16_sample(u) for u in range(256)]
+
+
+def ulaw_to_pcm16(data):
+    return struct.pack("<%dh" % len(data), *[_ULAW_DECODE[b] for b in data])
+
+
+def pcm_to_wav(pcm):
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(pcm)
+    return out.getvalue()
+
+
 def wav_to_pcm(wav_bytes):
     with wave.open(io.BytesIO(wav_bytes)) as w:
         if (w.getframerate(), w.getsampwidth(), w.getnchannels()) != (RATE, 2, 1):
@@ -130,6 +147,7 @@ class SipPager:
         self.cfg = cfg
         self.log = log or (lambda *a: None)
         self.line = threading.Lock()      # one phone line: one call at a time
+        self.last_recording = b""         # what the line sent back during the last test (WAV)
 
     # -- the public entry point used by the receiver's page worker
     def page(self, zone, dial, en, es, audio=None):
@@ -149,8 +167,9 @@ class SipPager:
         except ValueError as e:
             return False, str(e)
         with self.line:
+            self.last_recording = b""
             try:
-                secs = self.call(ph, digits, pcm)
+                secs = self.call(ph, digits, pcm, record=True)
                 if digits:
                     return True, ("dialed %s through HT813 %s:%s, then played the tone %.0f s and hung up. "
                                   "Did the floor speakers play it?" % (digits, ph["ht813_ip"], ph["sip_port"], secs))
@@ -179,7 +198,7 @@ class SipPager:
             return False, "phone: network error: %s" % e
 
     # -- one call
-    def call(self, ph, dial, pcm):
+    def call(self, ph, dial, pcm, record=False):
         host, port = ph["ht813_ip"], int(ph["sip_port"])
         lport = int(ph["local_sip_port"])
         deadline = time.monotonic() + int(ph["max_call_s"])
@@ -201,7 +220,7 @@ class SipPager:
             far = d.invite(rport, deadline)
             self.log("phone: HT813 answered; audio to %s:%d" % far)
             try:
-                stream = RtpStream(rtp, far)
+                stream = RtpStream(rtp, far, record)
                 stream.silence(int(ph["wait_after_answer_ms"]), d)
                 if two_stage:
                     for ch in dial:
@@ -214,6 +233,8 @@ class SipPager:
                 played = stream.play(pcm, d, deadline)
             finally:
                 d.bye()
+                if record:
+                    self.last_recording = pcm_to_wav(stream.heard())
             return played
         finally:
             sip.close()
@@ -362,8 +383,10 @@ def _param(header, name):
 class RtpStream:
     """Sends 20 ms RTP packets, paced by the clock."""
 
-    def __init__(self, sock, far):
+    def __init__(self, sock, far, record=False):
         self.sock, self.far = sock, far
+        self.record = record
+        self.got = []              # PCMU payloads received from the HT813 (what the line sends back)
         self.seq = random.getrandbits(16)
         self.ts = random.getrandbits(32)
         self.ssrc = random.getrandbits(32)
@@ -383,6 +406,24 @@ class RtpStream:
         if delay > 0:
             time.sleep(delay)
         self.next_at += 0.020
+        self._drain()
+
+    def _drain(self):
+        """Read (and, when recording, keep) the audio the HT813 sends us."""
+        while True:
+            rd, _, _ = select.select([self.sock], [], [], 0)
+            if not rd:
+                return
+            try:
+                data, _ = self.sock.recvfrom(2048)
+            except OSError:
+                return
+            if self.record and len(data) > 12 and (data[1] & 0x7F) == PT_PCMU and len(self.got) < 3000:
+                cc = data[0] & 0x0F
+                self.got.append(data[12 + 4 * cc:])
+
+    def heard(self):
+        return ulaw_to_pcm16(b"".join(self.got))
 
     def _send_frame(self, ulaw, dialog):
         self._wait_slot()

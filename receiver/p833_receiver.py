@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -776,7 +776,17 @@ class Handler(BaseHTTPRequestHandler):
             LOG.info("phone %s from admin page (%s)", "digit trial %s" % digits if digits else "connection test", who)
             ok, detail = live.connection_test(digits=digits, wav=wav)
             LOG.info("phone connection test: %s", detail)
-            return self._back(("Phone test OK: " if ok else "Phone test FAILED: ") + detail)
+            rec = getattr(live, "last_recording", b"")
+            note = ""
+            if rec:
+                try:
+                    with open(os.path.join(self.app["state_dir"], "last_phone_test.wav"), "wb") as f:
+                        f.write(rec)
+                    note = (" Recorded %.1f s of what the line sent back: listen under 'Last phone test' below."
+                            % ((len(rec) - 44) / 16000.0))
+                except OSError as e:
+                    LOG.warning("could not save the phone test recording: %s", e)
+            return self._back(("Phone test OK: " if ok else "Phone test FAILED: ") + detail + note)
 
         if path == "/admin/dryrun":
             on = form.get("dry_run") == "on"
@@ -797,6 +807,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._ask_password()
             q = {k: v[0].strip() for k, v in parse_qs(parts.query).items()}
             return self._reply(200, preview_obj(self.app, q))
+        if parts.path == "/admin/last_phone_test.wav":
+            if not self._admin_ok():
+                return self._ask_password()
+            try:
+                with open(os.path.join(self.app["state_dir"], "last_phone_test.wav"), "rb") as f:
+                    return self._reply(200, f.read(), "audio/wav")
+            except OSError:
+                return self._reply(404, b"No phone test recorded yet.", "text/plain")
         if parts.path == "/admin/listen":
             if not self._admin_ok():
                 return self._ask_password()
@@ -1090,6 +1108,9 @@ the line. Save any changed settings first.</p>
 <form method=post action='/admin/phonetest' onsubmit="return confirm('Dial these digits through the HT813 and play the maintenance bell tone for about 4 seconds? If the digits open a page zone, that zone hears the bell (no spoken message). This works with dry run on.')">
 <label>Digits <input name=digits required maxlength=32 size=12 placeholder='F,*62'></label>
 <button>Dial and play the bell</button></form>
+<h3>Last phone test</h3>
+<p>What the line sent back to the HT813 during the last test (dial tone, beeps, error tones, silence):<br>
+<audio controls preload=none src='/admin/last_phone_test.wav'></audio></p>
 <p class=small>To find the page code without paging a message. 0-9 * #, comma = half-second pause,
 F = hook flash (Link). On a Norstar desk phone the floor page is PAGE, SPEAKER, 1; from the ATA2 line try
 <b>F,*62</b>, then <b>F,*621</b>. When one works, put it in "Zone floor dial" above and Save.</p></div>
@@ -1189,7 +1210,7 @@ def main(argv=None):
                  "; %d problem(s), see the admin page" % len(problems) if problems else "")
     worker.start()
     Handler.app = {"cfg": cfg, "state": state, "worker": worker, "key": key,
-                   "admin_password": admin_pw}
+                   "admin_password": admin_pw, "state_dir": args.state_dir}
 
     def watch():
         while True:

@@ -290,7 +290,7 @@ class Server(unittest.TestCase):
                                    audio=A.AudioLibrary(self.audio_dir))
         self.worker.start()
         R.Handler.app = {"cfg": cfg, "state": self.state, "worker": self.worker, "key": KEY,
-                         "admin_password": ADMIN_PW}
+                         "admin_password": ADMIN_PW, "state_dir": self.tmp}
         self.srv = R.Server(("127.0.0.1", 0), R.Handler)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -727,6 +727,15 @@ class Server(unittest.TestCase):
         self.assertIn("Phone test OK", msg)
         self.assertIn("dialed F,*62", msg)
         self.assertEqual(ht.digits, ["F", "*", "6", "2"])
+        self.assertIn("Recorded", msg)                   # what the line sent back was kept
+        with open(os.path.join(self.tmp, "last_phone_test.wav"), "rb") as f:
+            self.assertTrue(f.read().startswith(b"RIFF"))
+        req = urllib.request.Request("http://127.0.0.1:%d/admin/last_phone_test.wav" % self.port,
+                                     headers={"Authorization": "Basic " + base64.b64encode(
+                                         ("a:" + ADMIN_PW).encode()).decode()})
+        with urllib.request.urlopen(req) as r:
+            self.assertEqual(r.headers["Content-Type"], "audio/wav")
+            self.assertTrue(r.read().startswith(b"RIFF"))
         self.assertEqual(ht.audio_frames, 2)           # the fake "twice" tone is 200 samples = 2 packets
         self.assertTrue(ht.wait_bye())
         _, loc, _ = self.admin("/admin/phonetest", {"digits": "PAGE1"})
