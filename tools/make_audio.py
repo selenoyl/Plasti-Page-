@@ -27,7 +27,6 @@ import argparse
 import json
 import math
 import os
-import re
 import shutil
 import struct
 import subprocess
@@ -56,30 +55,30 @@ def spoken(lang, text):
     return text
 
 
-def split_text(text):
-    """'Maintenance requested to press {press} for camera fault.' ->
-    ('Maintenance requested to press', 'for camera fault.'). A tail of only
-    punctuation counts as no tail."""
-    if "{press}" not in text:
-        raise ValueError("text has no {press}: %r" % text)
-    pre, post = text.split("{press}", 1)
-    post = post.strip()
-    return pre.strip(), post if re.search(r"\w", post) else ""
+# The receiver's own splitting rules, so the clips always match how it joins them.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "receiver"))
+from p833_audio import number_text, parts, split_text  # noqa: E402,F401
 
 
 def clip_plan(cfg):
-    """Every clip to make: {relative path: (lang, text)}."""
+    """Every clip to make: {relative path: (lang, text)}.
+
+    'Maintenance requested to press 27 for camera fault.' is recorded as
+    'Maintenance' + 'requested to press 27' + 'for camera fault.'"""
+    cfg = dict(cfg, codes={int(k): v for k, v in cfg["codes"].items()})
     plan = {}
-    for code, c in sorted(cfg["codes"].items(), key=lambda kv: int(kv[0])):
+    for code, c in sorted(cfg["codes"].items()):
         for lang in ("en", "es"):
-            pre, post = split_text(c[lang])
-            plan["%s/c%s_pre.wav" % (lang, code)] = (lang, pre)
+            head, lead, post = parts(cfg, code, lang)
+            if head:
+                plan["%s/c%d_pre.wav" % (lang, code)] = (lang, head)
             if post:
-                plan["%s/c%s_post.wav" % (lang, code)] = (lang, post)
-            plan["%s/c%s_nopress.wav" % (lang, code)] = (lang, c.get(lang + "_no_press", c[lang]))
+                plan["%s/c%d_post.wav" % (lang, code)] = (lang, post)
+            plan["%s/c%d_nopress.wav" % (lang, code)] = (lang, c.get(lang + "_no_press", c[lang]))
     for lang in ("en", "es"):
+        lead = parts(cfg, min(cfg["codes"]), lang)[1]
         for n in range(1, 1000):
-            plan["%s/n/%d.wav" % (lang, n)] = (lang, str(n))
+            plan["%s/n/%d.wav" % (lang, n)] = (lang, number_text(lead, n))
     return plan
 
 

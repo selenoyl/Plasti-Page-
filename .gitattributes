@@ -3,3 +3,4 @@
 *.py text eol=lf
 *.service text eol=lf
 *.json text eol=lf
+*.wav binary

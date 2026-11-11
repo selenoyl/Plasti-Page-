@@ -16,8 +16,8 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
 ```
 
 **Status, version 0.3.1:** receiving, checking, logging, dry-run paging, the
-admin page and joining the recorded audio into a page work and are tested.
-The recorded clips themselves are not in the repository yet (see "Page audio"). The phone call to the HT813 is not built yet:
+admin page, the editable phone settings and the recorded page audio are in and
+tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
 No real page can go out.
 
@@ -162,7 +162,12 @@ whole thing again (`audio.repeat`, default 2).
 
 - The clips live in `audio/` in the repository and are installed to `/opt/p833-receiver/audio`.
 - They are made by `tools/make_audio.py` with the free offline Piper voices: `en_US-lessac-medium` (English) and `es_MX-claude-high` (Spanish).
-- Each message is recorded in pieces ("Maintenance requested to press", the number, "for camera fault."), and the numbers 1 to 999 are recorded once each. That's about 2,000 clips.
+- Each message is recorded in pieces, and each press number 1 to 999 is recorded once per language. That's about 2,000 clips (about 66 MB), because the press number can be anything from 0 to 999.
+  - The number is recorded together with the words every message shares before it, which sounds natural: "Maintenance" + "requested to press 27" + "for camera fault.", or "Se solicita mantenimiento" + "en la prensa 27".
+  - A number recorded on its own ("three", "seis") was misheard in testing.
+  - Words a voice mispronounces get a spoken spelling in `tools/make_audio.py` (`PRONOUNCE`). For example, the Spanish voice says "Red Rábit"; the page text doesn't change.
+- **Checked by machine:** about 200 finished pages were transcribed with a speech recognizer (Whisper), and every press number came out right in both languages.
+- **Length:** a page is about 16 s with the message played twice, or 25 s for the longest (Red Rabbit). Set "Times the message plays" to 1 on the admin page to halve it.
 - On the admin page:
   - The **Audio** box shows whether every message is recorded and matches the config wording.
   - **Listen** plays any call in the browser without paging.

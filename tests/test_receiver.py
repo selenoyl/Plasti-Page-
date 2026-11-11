@@ -78,6 +78,23 @@ class Audio(unittest.TestCase):
         self.assertEqual(A.split_text("Maintenance requested to press {press} for camera fault."),
                          ("Maintenance requested to press", "for camera fault."))
 
+    def test_shared_lead_split(self):
+        self.assertEqual(A.shared_lead(self.cfg, "en"), ["requested", "to", "press"])
+        self.assertEqual(A.shared_lead(self.cfg, "es"), ["en", "la", "prensa"])
+        self.assertEqual(A.parts(self.cfg, 8, "en"), ("Maintenance", "requested to press", "for camera fault."))
+        self.assertEqual(A.parts(self.cfg, 4, "es"), ("Se solicita un supervisor", "en la prensa", ""))
+        plan = M.clip_plan(json.load(open(CONFIG, encoding="utf-8")))
+        self.assertEqual(plan["en/n/27.wav"], ("en", "requested to press 27"))
+        self.assertEqual(plan["es/n/27.wav"], ("es", "en la prensa 27"))
+        self.assertEqual(plan["en/c2_pre.wav"], ("en", "Maintenance"))
+        # wording with nothing shared: the number is recorded on its own
+        cfg = json.loads(json.dumps(self.cfg, default=str))
+        cfg["codes"] = {c: dict(v) for c, v in self.cfg["codes"].items()}
+        cfg["codes"][3]["en"] = "Tech to line {press} now."
+        self.assertEqual(A.shared_lead(cfg, "en"), [])
+        self.assertEqual(A.parts(cfg, 3, "en"), ("Tech to line", "", "now."))
+        self.assertEqual(A.number_text("", 5), "5")
+
     def test_pieces(self):
         keys, warn = self.lib.pieces(self.cfg, 8, 27, "en")
         self.assertEqual(keys, ["en/c8_pre.wav", "en/n/27.wav", "en/c8_post.wav"])
@@ -91,7 +108,8 @@ class Audio(unittest.TestCase):
         # chime 0.5 s + 0.3 s gap, en 3 clips + 2 gaps, 0.7 s, es 3 clips + 2 gaps, tail
         cfg["audio"] = dict(self.cfg["audio"], repeat=1)
         one = self.frames(self.lib.build(cfg, 8, 27)[0])
-        expect = 4000 + 2400 + (3 * 80 + 2 * 720) + 5600 + (3 * 80 + 2 * 720) + 2400
+        gap = 8 * A.PIECE_GAP_MS
+        expect = 4000 + 2400 + (3 * 80 + 2 * gap) + 5600 + (3 * 80 + 2 * gap) + 2400
         self.assertEqual(one, expect)
         cfg["audio"] = dict(self.cfg["audio"], repeat=2)
         two = self.frames(self.lib.build(cfg, 8, 27)[0])

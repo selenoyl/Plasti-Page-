@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary  # noqa: E402
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",

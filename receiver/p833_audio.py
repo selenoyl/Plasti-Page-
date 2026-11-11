@@ -11,6 +11,7 @@ import os
 import wave
 
 RATE = 8000
+PIECE_GAP_MS = 40    # pause between the pieces of one sentence
 
 
 class AudioError(Exception):
@@ -22,6 +23,30 @@ def split_text(text):
     pre, post = text.split("{press}", 1)
     post = post.strip()
     return pre.strip(), post if any(ch.isalnum() for ch in post) else ""
+
+
+def shared_lead(cfg, lang):
+    """The words every message shares just before the press number, e.g.
+    'requested to press' or 'en la prensa'. They are recorded together with
+    each number ('requested to press 27'), which sounds far more natural than
+    a number said on its own. At least one word is left for each message."""
+    pres = [split_text(cfg["codes"][c][lang])[0].split() for c in sorted(cfg["codes"])]
+    k = 0
+    while all(len(p) > k + 1 for p in pres) and len({tuple(p[-(k + 1):]) for p in pres}) == 1:
+        k += 1
+    return pres[0][len(pres[0]) - k:] if k else []
+
+
+def parts(cfg, code, lang):
+    """(message start, shared lead before the number, tail after the number)."""
+    pre, post = split_text(cfg["codes"][code][lang])
+    lead = shared_lead(cfg, lang)
+    words = pre.split()
+    return " ".join(words[:len(words) - len(lead)]), " ".join(lead), post
+
+
+def number_text(lead, press):
+    return ("%s %d" % (lead, press)).strip()
 
 
 def silence(ms):
@@ -70,12 +95,16 @@ class AudioLibrary:
             if self.clips.get(key) not in (None, want):
                 warn.append(key)
             return keys, warn
-        pre, post = split_text(c[lang])
-        keys = ["%s/c%d_pre.wav" % (lang, code), "%s/n/%d.wav" % (lang, press)]
-        expect = {keys[0]: pre, keys[1]: str(press)}
+        head, lead, post = parts(cfg, code, lang)
+        keys, expect = [], {}
+        if head:
+            keys.append("%s/c%d_pre.wav" % (lang, code))
+            expect[keys[-1]] = head
+        keys.append("%s/n/%d.wav" % (lang, press))
+        expect[keys[-1]] = number_text(lead, press)
         if post:
             keys.append("%s/c%d_post.wav" % (lang, code))
-            expect[keys[2]] = post
+            expect[keys[-1]] = post
         for k, t in expect.items():
             if self.clips.get(k) not in (None, t):
                 warn.append(k)
@@ -95,7 +124,7 @@ class AudioLibrary:
                 body += silence(700)
             for j, k in enumerate(keys):
                 if j:
-                    body += silence(90)
+                    body += silence(PIECE_GAP_MS)
                 body += self._frames(k)
         return self._wrap(body, opts), stale
 
