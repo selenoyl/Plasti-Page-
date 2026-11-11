@@ -2,9 +2,12 @@
 # P833 Call Receiver - installer for AlmaLinux 8 or 9
 # By Ethan Brady & Ryan Raikes
 #
-# Run from the unzipped folder:   sudo bash install/install.sh
-# Safe to run again to update. It backs up the old install first, never
-# replaces your config.json or secrets.env, and never turns SELinux off.
+# First setup or update, from the downloaded folder:   sudo bash install/install.sh
+# To fetch the newest version from GitHub and install it: sudo bash install/update.sh
+#
+# Safe to run again any time. It backs up the old install first, never
+# replaces your config.json, keeps your secrets.env (only adding anything new
+# it needs), keeps the board list and call log, and never turns SELinux off.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -67,6 +70,15 @@ if [ ! -e "$ETC/secrets.env" ]; then
     ( umask 077; printf '# P833 receiver secrets. Root-only. By Ethan Brady & Ryan Raikes\nP833_BOARD_KEY=%s\n' "$KEY" > "$ETC/secrets.env" )
     echo "Made a new board key in $ETC/secrets.env (see it with: sudo cat $ETC/secrets.env)"
 fi
+# Admin page password (added on update if an older install has none).
+if ! grep -q '^P833_ADMIN_PASSWORD=' "$ETC/secrets.env"; then
+    PW=$($PY -c 'import secrets; print(secrets.token_urlsafe(9))')
+    printf 'P833_ADMIN_PASSWORD=%s\n' "$PW" >> "$ETC/secrets.env"
+    echo
+    echo "  Admin page password: $PW"
+    echo "  (user name: anything. See it again with: sudo grep ADMIN $ETC/secrets.env)"
+    echo
+fi
 chown root:root "$ETC/secrets.env"
 chmod 600 "$ETC/secrets.env"
 
@@ -99,4 +111,7 @@ systemctl restart p833-receiver
 sleep 2
 systemctl --no-pager --lines=5 status p833-receiver || true
 echo
-echo "Done. Status page: http://$(hostname -I | awk '{print $1}'):${PORT}/"
+IP=$(hostname -I | awk '{print $1}')
+echo "Done. Version $(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$APP/p833_receiver.py") installed."
+echo "  Status page: http://${IP}:${PORT}/"
+echo "  Admin page:  http://${IP}:${PORT}/admin"

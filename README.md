@@ -15,9 +15,10 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.1.0:** receiving, checking, logging and dry-run paging work
-and are tested. The phone call to the HT813 is not built yet, so the receiver
-refuses to start with dry run off. No real page can go out.
+**Status, version 0.2.0:** receiving, checking, logging, dry-run paging and the
+admin page work and are tested. The phone call to the HT813 is not built yet:
+with dry run off, every page is logged as FAILED ("phone pager not built yet").
+No real page can go out.
 
 ## What it does
 
@@ -30,6 +31,7 @@ refuses to start with dry run off. No real page can go out.
 - Sends pages one at a time, because there is one phone line. A failed page is retried 3 times, 10 s apart.
 - Logs every call and its result to `/var/log/p833-receiver/calls.csv`. Results are dry-run, sent, FAILED or repeat dropped.
 - Shows each board's last-heard time and the last 50 calls at `http://<laptop>:8833/`. It also logs a warning when a board has been silent for 3 minutes.
+- Has an admin page at `http://<laptop>:8833/admin`, behind a password, for test calls, custom pages, boards and the dry-run switch. See "The admin page" below.
 
 ## Install on the laptop (AlmaLinux 8 or 9)
 
@@ -41,7 +43,7 @@ refuses to start with dry run off. No real page can go out.
      git clone https://github.com/selenoyl/plasti-page- ~/plasti-page && cd ~/plasti-page
      ```
 
-     If `git` is missing, install it first with `sudo dnf install git`. To update later, run `cd ~/plasti-page && git pull`, then run the installer again.
+     If `git` is missing, install it first with `sudo dnf install git`.
    - **If it has no internet:** on another PC, open https://github.com/selenoyl/plasti-page-, click Code, then Download ZIP. Copy the zip to the laptop by USB, then unzip it into a new folder:
 
      ```bash
@@ -59,7 +61,7 @@ refuses to start with dry run off. No real page can go out.
    - Creates a service user, `p833`.
    - Copies the program to `/opt/p833-receiver`.
    - Writes `/etc/p833-receiver/config.json`, with dry run on. If one exists, it is kept and never overwritten.
-   - Creates `/etc/p833-receiver/secrets.env` with a random board key. Only root can read it.
+   - Creates `/etc/p833-receiver/secrets.env` with a random board key and admin page password, and prints the password. Only root can read the file. On an update it is kept, and anything new is added to it.
    - Installs and starts the systemd service `p833-receiver`, which restarts itself if it stops.
    - Opens only port 8833/tcp in firewalld.
    - Leaves SELinux on and just restores the normal file labels.
@@ -70,11 +72,39 @@ refuses to start with dry run off. No real page can go out.
    sudo bash install/laptop-stay-awake.sh
    ```
 
-4. Note the board key. Each board's firmware needs it:
+4. Note the board key, which each board's firmware needs, and the admin password:
 
    ```bash
    sudo cat /etc/p833-receiver/secrets.env
    ```
+
+   To change the admin password, edit that file, then restart the service with `sudo systemctl restart p833-receiver`.
+
+## Update to a new version
+
+If you installed with `git clone`:
+
+```bash
+cd ~/plasti-page && sudo bash install/update.sh
+```
+
+It fetches the newest version from GitHub, shows what changed and runs the installer. The installer backs up the old install first. Your config, secrets, board list, dry-run setting and call log are kept.
+
+Without internet: download the new zip on another PC, unzip it into a **new** folder on the laptop, and run `sudo bash install/install.sh` from there.
+
+## The admin page
+
+Open `http://<laptop IP>:8833/admin`. The browser asks for a user name and password: any user name works, and the password is `P833_ADMIN_PASSWORD` from `secrets.env`. The status page at `/` stays open and read-only.
+
+| Section | What it does |
+|---|---|
+| **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
+| **Send a test call** | Pick a board, a call type (2 to 9) and a press. It goes through exactly the same path as a real call from that board, and is logged with the detail "admin page test". |
+| **Add or rename a board** | Enter the board ID (it must match the ID in that board's firmware) and a cell name. Using an existing ID renames its cell. |
+| **Send a custom page** | Type your own English and, optionally, Spanish text and pick a zone. It is logged as code "custom". |
+| **Boards table** | **Remove** takes a board off the list. A board that calls in but isn't on the list shows an **Add** box in its row. |
+
+With dry run off, every test or custom page is really dialed (once the phone step exists).
 
 ## Everyday commands
 
@@ -88,10 +118,10 @@ refuses to start with dry run off. No real page can go out.
 
 ## Test it without a board
 
-The test sender plays a board. Run it on the laptop:
+The admin page's test call is the easy way. The command-line test sender also plays a board, and can test things the page can't, such as repeats and a wrong key. Run it on the laptop:
 
 ```bash
-export P833_BOARD_KEY=$(sudo sed -n 's/^P833_BOARD_KEY=//p' /etc/p833-receiver/secrets.env)
+export $(sudo grep P833_BOARD_KEY /etc/p833-receiver/secrets.env)
 ```
 
 ```bash
@@ -110,15 +140,15 @@ Other uses:
 
 | Setting | Meaning |
 |---|---|
-| `dry_run` | `true` = log the page, never dial. Leave it on until the phone step is built and approved. |
-| `boards` | Board ID to cell name, for example `"RSP_LH": {"cell": "RSP LH"}`. A call from an unknown board is still paged, with a warning. |
+| `dry_run` | The first-time default only. After that, the switch on the admin page decides. |
+| `boards` | The **starting** board list, used only on the very first start. After that, boards are added and removed on the admin page; the list is kept in `/var/lib/p833-receiver/board_list.json`. A call from a board that isn't on the list is still paged, with a warning. |
 | `zones` | The digits the HT813 dials for each zone. **`TO-VERIFY`** until checked on the ATA2. |
-| `codes` | For each code: who is called, its zone (all `floor` now), and the English and Spanish text. `{press}` is replaced by the press number. `_no_press` text is used for press 0. |
+| `codes` | For each code: who is called, its zone (all `floor` now), an optional `why` shown on the admin page, and the English and Spanish text. `{press}` is replaced by the press number. `_no_press` text is used for press 0. |
 | `repeat_window_s`, `same_call_window_s` | Repeat-drop windows, 600 s and 15 s. |
 | `board_silent_after_s` | How long a board can be silent before it is flagged, 180 s. |
 | `page_retries`, `page_retry_wait_s` | Page retries, 3 tries 10 s apart. |
 
-Credentials never go in `config.json`. The board key is in `secrets.env`, which only root can read.
+Credentials never go in `config.json`. The board key and admin password are in `secrets.env`, which only root can read.
 
 ## Board to laptop message (for the board firmware)
 
@@ -164,7 +194,8 @@ The laptop replies `200 {"ok": true, ...}`. The board resends the **same** body 
 | `receiver/p833_receiver.py` | The receiver. Python 3.6+, standard library only. |
 | `receiver/config.example.json` | Default config. |
 | `tools/p833_test_sender.py` | Test sender that plays a board. |
-| `install/install.sh` | Installer and updater. |
+| `install/install.sh` | First setup, or reinstall from this folder. Safe to run again. |
+| `install/update.sh` | Fetch the newest version from GitHub and run the installer. |
 | `install/p833-receiver.service` | systemd unit. |
 | `install/laptop-stay-awake.sh` | Lid and sleep settings. |
 | `tests/test_receiver.py` | Unit tests: `python3 -m unittest discover -s tests -v` |

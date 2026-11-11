@@ -20,6 +20,12 @@ result for each step.
 | A8 | `sudo systemctl kill p833-receiver` | it is running again within ~5 s | ☐ |
 | A9 | Reboot the laptop with the lid shut | it comes back, and the status page shows the old calls | ☐ |
 | A10 | From another PC on the IoT network, browse to the status page | page loads | ☐ |
+| A11 | Open `/admin` with a wrong password, then the right one | refused, then the admin page | ☐ |
+| A12 | Admin: send a test call from each board | each logged with its own cell, "admin page test" | ☐ |
+| A13 | Admin: add a board `TEST_1`, rename it, remove it | the list updates each time and stays the same after a restart | ☐ |
+| A14 | Admin: send a custom page | logged as code "custom", dry-run | ☐ |
+| A15 | Admin: turn dry run off, send one test call, then turn it back on | FAILED "phone pager not built yet" (until the phone step exists), then dry-run again | ☐ |
+| A16 | `sudo bash install/update.sh` | "Already the newest version", service running, boards and dry-run setting kept | ☐ |
 
 ## B. At the cell (needs the board firmware)
 

@@ -17,6 +17,11 @@ By Ethan Brady & Ryan Raikes
 | D9 | 11 Nov 2026 | Dry run is on by default. The receiver refuses to start with dry run off until the phone step exists. | No real page goes out before the user says so. |
 | D10 | 11 Nov 2026 | Calls from an unknown board ID are still paged, with a warning. | A misconfigured board must not lose a real call. The key still blocks strangers. |
 | D11 | 11 Nov 2026 | No change on the PLC side. | The receiver only uses what the board sends. |
+| D12 | 11 Nov 2026 | Admin page (`/admin`) for test calls, custom pages, adding, renaming and removing boards, and the dry-run switch. The status page stays open and read-only. | User request. |
+| D13 | 11 Nov 2026 | The admin page needs a password (HTTP Basic), kept in the root-only `secrets.env`. Forms posted from other web sites are refused. | Anyone on the IoT network could otherwise page the floor or change boards. Plain HTTP is acceptable on the isolated network only. |
+| D14 | 11 Nov 2026 | The board list and dry-run switch are saved in `/var/lib/p833-receiver`, not the config. The config gives first-time defaults only. | The service can't write `/etc`, and settings changed on the page must survive restarts and updates. |
+| D15 | 11 Nov 2026 | With dry run off and no phone step built, pages are logged FAILED instead of the receiver refusing to start. | The switch has to work from the page; failing loudly never hides a lost page. |
+| D16 | 11 Nov 2026 | `install.sh` handles both first setup and updates; `update.sh` pulls from GitHub and then runs it. | User request. Every run backs up first and keeps the config, secrets, board list and log. |
 
 ## Open points
 
@@ -31,4 +36,5 @@ By Ethan Brady & Ryan Raikes
 | O7 | Laptop details: AlmaLinux version, Python version and network interfaces (`cat /etc/almalinux-release`, `python3 --version`, `ip -br addr`), and whether it has internet during setup. | User |
 | O8 | Who maintains the laptop. | User |
 | O9 | IoT network: Wi-Fi name and password for the boards, fixed addresses (proposed 192.168.83.x), and whether the laptop is wired or on Wi-Fi. | User / IT |
+| O11 | The admin password travels as plain HTTP on the IoT network. Acceptable while the network stays isolated; revisit if the laptop ever joins the plant LAN. | Later |
 | O10 | calls.csv grows slowly (a few lines per call). A yearly archive is enough; no rotation is set up yet. | Later |
