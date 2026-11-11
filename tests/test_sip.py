@@ -1,0 +1,117 @@
+# Tests for the phone pager (receiver/p833_sip.py) against a fake HT813.
+# By Ethan Brady & Ryan Raikes
+
+import os
+import sys
+import time
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "receiver"))
+sys.path.insert(0, HERE)
+import p833_sip as S                # noqa: E402
+from fake_ht813 import FakeHT813    # noqa: E402
+
+
+def tone_wav(seconds):
+    import io, math, struct, wave
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+        w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(i / 5.0))) for i in range(int(8000 * seconds))))
+    return out.getvalue()
+
+
+def cfg_for(ht, **over):
+    ph = {"ht813_ip": "127.0.0.1", "sip_port": ht.port, "local_sip_port": 0, "dial_method": "2-stage",
+          "wait_after_answer_ms": 100, "dtmf_ms": 60, "dtmf_gap_ms": 40, "wait_after_dial_ms": 100,
+          "max_call_s": 10, "ht813_user": ""}
+    ph.update(over)
+    return {"phone": ph}
+
+
+class Pager(unittest.TestCase):
+    def setUp(self):
+        self.ht = None
+
+    def tearDown(self):
+        if self.ht:
+            self.ht.close()
+
+    def test_two_stage_page(self):
+        self.ht = FakeHT813()
+        t0 = time.monotonic()
+        ok, detail = S.SipPager(cfg_for(self.ht)).page("floor", "F*61,1", "en", "es", tone_wav(1.0))
+        took = time.monotonic() - t0
+        self.assertTrue(ok, detail)
+        self.assertTrue(self.ht.wait_bye())
+        self.assertTrue(self.ht.got_ack)
+        self.assertEqual(self.ht.digits, ["F", "*", "6", "1", "1"])
+        self.assertEqual(self.ht.audio_frames, 50)                 # 1 s of audio = 50 x 20 ms
+        first = self.ht.invites[0][0]
+        self.assertTrue(first.startswith("INVITE sip:127.0.0.1:%d SIP/2.0" % self.ht.port), first)
+        # paced in real time: 0.1 + 5 digits + 0.5 pause + 0.1 + 1 s of audio
+        self.assertGreater(took, 1.8)
+        # the digits all come before the audio
+        last_event = max(t for k, t in self.ht.timeline if k == "event")
+        first_audio = min(t for k, t in self.ht.timeline if k == "audio")
+        self.assertLess(last_event, first_audio)
+
+    def test_one_stage_puts_digits_in_the_address(self):
+        self.ht = FakeHT813()
+        ok, detail = S.SipPager(cfg_for(self.ht, dial_method="1-stage")).page("floor", "61", "en", "es",
+                                                                              tone_wav(0.2))
+        self.assertTrue(ok, detail)
+        self.assertTrue(self.ht.invites[0][0].startswith("INVITE sip:61@127.0.0.1:"))
+        self.assertEqual(self.ht.digits, [])
+
+    def test_busy(self):
+        self.ht = FakeHT813(mode="busy")
+        ok, detail = S.SipPager(cfg_for(self.ht)).page("floor", "61", "en", "es", tone_wav(0.2))
+        self.assertFalse(ok)
+        self.assertIn("486", detail)
+
+    def test_no_answer(self):
+        self.ht = FakeHT813(mode="silent")
+        t0 = time.monotonic()
+        ok, detail = S.SipPager(cfg_for(self.ht, max_call_s=2)).page("floor", "61", "en", "es", tone_wav(0.2))
+        self.assertFalse(ok)
+        self.assertIn("did not answer", detail)
+        self.assertLess(time.monotonic() - t0, 4)
+        self.assertGreater(len(self.ht.invites), 1)       # it retransmitted the INVITE
+        for _ in range(50):                               # the fake logs it a moment later
+            if any(r.startswith("CANCEL ") for r in self.ht.requests):
+                break
+            time.sleep(0.02)
+        self.assertTrue(any(r.startswith("CANCEL ") for r in self.ht.requests))
+
+    def test_ht813_hangs_up_mid_page(self):
+        self.ht = FakeHT813(mode="hangup", hangup_after=0.4)
+        ok, detail = S.SipPager(cfg_for(self.ht)).page("floor", "61", "en", "es", tone_wav(3))
+        self.assertFalse(ok)
+        self.assertIn("hung up", detail)
+
+    def test_page_longer_than_max_call_is_cut(self):
+        self.ht = FakeHT813()
+        ok, detail = S.SipPager(cfg_for(self.ht, max_call_s=1)).page("floor", "61", "en", "es", tone_wav(3))
+        self.assertFalse(ok)
+        self.assertIn("cut off", detail)
+        self.assertTrue(self.ht.wait_bye())               # still hangs up cleanly
+
+    def test_bad_settings_refused_without_calling(self):
+        self.ht = FakeHT813()
+        pager = S.SipPager(cfg_for(self.ht))
+        self.assertIn("no dial digits", pager.page("floor", "", "en", "es", tone_wav(0.2))[1])
+        self.assertIn("not valid", pager.page("floor", "PAGE1", "en", "es", tone_wav(0.2))[1])
+        self.assertEqual(self.ht.invites, [])
+
+    def test_ulaw(self):
+        self.assertEqual(S.pcm16_to_ulaw(b"\x00\x00"), b"\xff")
+        for v in (0, 100, -100, 5000, -5000, 32000, -32000):
+            u = S.pcm16_to_ulaw(v.to_bytes(2, "little", signed=True))[0]
+            back = S.ulaw_to_pcm16_sample(u)
+            self.assertLessEqual(abs(back - v), max(8, abs(v) // 16), (v, back))
+
+
+if __name__ == "__main__":
+    unittest.main()
