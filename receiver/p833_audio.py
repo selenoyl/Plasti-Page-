@@ -9,10 +9,13 @@
 
 import io
 import json
+import math
 import os
 import re
+import sys
 import unicodedata
 import wave
+from array import array
 
 RATE = 8000
 TONE_DIRS = {"once": "single", "twice": "twice"}
@@ -53,6 +56,42 @@ def lead_key(lang, lead):
 
 def number_key(lang, press):
     return "%s/n/%d.wav" % (lang, press)
+
+
+_GAIN_TABLES = {}
+
+
+def _gain_table(gain_db):
+    """Sample -> louder sample, with a soft limiter: below 60% of full scale the
+    gain is plain; above it, peaks are rounded off smoothly instead of clipping."""
+    key = round(float(gain_db), 1)
+    if key not in _GAIN_TABLES:
+        g = 10 ** (key / 20.0)
+        knee = 0.6
+        table = []
+        for s in range(-32768, 32768):
+            x = s / 32768.0 * g
+            ax = abs(x)
+            if ax > knee:
+                ax = knee + (1 - knee) * math.tanh((ax - knee) / (1 - knee))
+            table.append(int(max(-32767, min(32767, round(math.copysign(ax, x) * 32767)))))
+        _GAIN_TABLES[key] = table
+    return _GAIN_TABLES[key]
+
+
+def apply_gain(frames, gain_db):
+    """Make 16-bit audio louder (or quieter) by gain_db, without hard clipping."""
+    if not gain_db:
+        return frames
+    a = array("h")
+    a.frombytes(frames)
+    if sys.byteorder != "little":
+        a.byteswap()
+    table = _gain_table(gain_db)
+    out = array("h", [table[v + 32768] for v in a])
+    if sys.byteorder != "little":
+        out.byteswap()
+    return out.tobytes()
 
 
 def silence(ms):
@@ -174,6 +213,7 @@ class AudioLibrary:
         # Silence first, so the paging system is open before the tone starts.
         frames = (silence(int(opts.get("lead_silence_ms", 2500)))
                   + (once + silence(1200)) * (repeat - 1) + once + silence(300))
+        frames = apply_gain(frames, float(opts.get("gain_db", 0)))
         out = io.BytesIO()
         with wave.open(out, "wb") as w:
             w.setnchannels(1)

@@ -135,6 +135,34 @@ class Audio(unittest.TestCase):
         cfg["audio"] = {"repeat": 1, "chime": False, "languages": ["en"]}
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), lead + 80 + 2400)
 
+    def test_volume_gain_and_limiter(self):
+        import io, math, wave as _w
+        from array import array
+        self.assertEqual(A.apply_gain(b"\x10\x00\xf0\xff", 0), b"\x10\x00\xf0\xff")   # 0 dB = untouched
+        # a loud sine: +12 dB must get louder on average but never clip past full scale
+        loud = array("h", [int(30000 * math.sin(i / 3.0)) for i in range(8000)]).tobytes()
+        quiet = array("h", [int(3000 * math.sin(i / 3.0)) for i in range(8000)]).tobytes()
+        def rms(b):
+            a = array("h"); a.frombytes(b)
+            return math.sqrt(sum(x * x for x in a) / len(a))
+        up = A.apply_gain(loud, 12)
+        a = array("h"); a.frombytes(up)
+        self.assertLessEqual(max(abs(x) for x in a), 32767)
+        self.assertGreater(rms(up), rms(loud))
+        # quiet audio below the limiter's knee gets the plain gain: +6 dB = about x2
+        self.assertAlmostEqual(rms(A.apply_gain(quiet, 6)) / rms(quiet), 10 ** (6 / 20.0), delta=0.02)
+        self.assertLess(rms(A.apply_gain(quiet, -6)), rms(quiet))
+        # the page itself follows the setting
+        cfg = dict(self.cfg, audio=dict(self.cfg["audio"], gain_db=0, lead_silence_ms=0))
+        w0, _ = self.lib.build(cfg, 2, 27)
+        cfg["audio"]["gain_db"] = 6
+        w6, _ = self.lib.build(cfg, 2, 27)
+        def body(w):
+            with _w.open(io.BytesIO(w)) as f:
+                return f.readframes(f.getnframes())
+        self.assertEqual(len(w0), len(w6))
+        self.assertGreater(rms(body(w6)), rms(body(w0)))
+
     def test_lead_silence_is_silent(self):
         import io, wave as _w
         wav, _ = self.lib.build(self.cfg, 2, 5)
@@ -580,7 +608,7 @@ class Server(unittest.TestCase):
              "local_sip_port": "5070", "wait_after_answer_ms": "1000", "dtmf_ms": "100",
              "dtmf_gap_ms": "100", "wait_after_dial_ms": "2500", "max_call_s": "60",
              "dial_floor": "F*61", "dial_office": "", "repeat": "3", "tones": "once",
-             "lead_silence_ms": "3000"}
+             "lead_silence_ms": "3000", "gain_db": "6"}
         for c in range(2, 10):
             f["zone_%d" % c] = "floor"
             f["tone_%d" % c] = self.cfg["codes"][c]["tone"]
@@ -595,6 +623,7 @@ class Server(unittest.TestCase):
         self.assertEqual(self.cfg["codes"][4]["zone"], "office")
         self.assertEqual(self.cfg["audio"]["repeat"], 3)
         self.assertEqual(self.cfg["audio"]["lead_silence_ms"], 3000)
+        self.assertEqual(self.cfg["audio"]["gain_db"], 6)
         # change a tone and turn tones to twice
         self.admin("/admin/tuning", self.tuning_form(zone_4="office", tone_6="1_maintenance_bell", tones="twice"))
         self.assertEqual((self.cfg["codes"][6]["tone"], self.cfg["audio"]["tones"]), ("1_maintenance_bell", "twice"))
@@ -619,7 +648,7 @@ class Server(unittest.TestCase):
 
     def test_tuning_bad_values_not_saved(self):
         for bad in ({"ht813_ip": "300.1.1.1"}, {"dial_floor": "PAGE1"}, {"dtmf_ms": "5"},
-                    {"tone_2": "no_such_tone"}, {"tones": "loud"}, {"lead_silence_ms": "20000"},
+                    {"tone_2": "no_such_tone"}, {"tones": "loud"}, {"gain_db": "20"}, {"lead_silence_ms": "20000"},
                     {"zone_3": "nowhere"}, {"repeat": "9"}, {"dial_method": "3-stage"}):
             _, loc, _ = self.admin("/admin/tuning", self.tuning_form(**bad))
             self.assertIn("Not saved", urllib.parse.unquote(loc), bad)

@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -82,7 +82,8 @@ def tuning_of(cfg):
             "code_tone": {str(c): cfg["codes"][c].get("tone", "") for c in range(2, 10)},
             "audio": {"repeat": cfg["audio"]["repeat"], "tones": tone_style(cfg),
                       "lead_silence_ms": cfg["audio"]["lead_silence_ms"],
-                      "keep_dry_run_pages": cfg["audio"]["keep_dry_run_pages"]}}
+                      "keep_dry_run_pages": cfg["audio"]["keep_dry_run_pages"],
+                      "gain_db": cfg["audio"]["gain_db"]}}
 
 
 def apply_tuning(cfg, t):
@@ -105,6 +106,8 @@ def apply_tuning(cfg, t):
         cfg["audio"]["lead_silence_ms"] = a["lead_silence_ms"]
     if "keep_dry_run_pages" in a:
         cfg["audio"]["keep_dry_run_pages"] = a["keep_dry_run_pages"]
+    if "gain_db" in a:
+        cfg["audio"]["gain_db"] = a["gain_db"]
     if a.get("tones") in ("once", "twice", "off"):
         cfg["audio"]["tones"] = a["tones"]
     elif "chime" in a:                        # settings saved by v0.3.x
@@ -175,6 +178,12 @@ def parse_tuning(form, cfg, tone_names=None):
             raise ValueError
     except ValueError:
         errs.append("dry-run pages to keep must be 0 to 100")
+    try:
+        audio["gain_db"] = int(form.get("gain_db", "0") or "0")
+        if not -6 <= audio["gain_db"] <= 12:
+            raise ValueError
+    except ValueError:
+        errs.append("page volume must be -6 to 12 dB")
     return {"phone": phone, "zone_dial": dials, "code_zone": zones, "code_tone": tones,
             "audio": audio}, errs
 
@@ -210,6 +219,7 @@ def load_config(path):
     audio.setdefault("languages", ["en", "es"])
     audio.setdefault("keep_dry_run_pages", 0)
     audio.setdefault("lead_silence_ms", 2500)
+    audio.setdefault("gain_db", 0)
     phone = cfg.setdefault("phone", {})
     for k, v in PHONE_DEFAULTS.items():
         phone.setdefault(k, v)
@@ -1093,6 +1103,12 @@ def page_html(app, admin, msg=""):
                     "max=10000 step=100 value='%d' style='width:7em'></td><td class=small>Silence at the very "
                     "beginning of the page audio, so the paging system is open before the tone starts. "
                     "2000 to 3000 is usual.</td></tr>" % int(cfg["audio"]["lead_silence_ms"]))
+        rows.append("<tr><td>Page volume (dB)</td><td><input name=gain_db type=number min=-6 max=12 value='%d' "
+                    "style='width:5em'></td><td class=small>Makes the voice and tone louder before they go out. "
+                    "0 = as recorded. 6 is a good start; above that the loud parts are squeezed by a limiter, so "
+                    "if it sounds harsh or distorted on the floor, turn it down. Preview and Listen play at this "
+                    "volume. Other places to turn it up: the paging amplifier's own volume, and the HT813's FXO "
+                    "port <i>Gain TX</i>.</td></tr>" % int(cfg["audio"]["gain_db"]))
         rows.append("<tr><td>Keep audio of the last dry-run pages</td><td><input name=keep_dry_run_pages "
                     "type=number min=0 max=100 value='%d' style='width:5em'></td><td class=small>0 = off (normal). "
                     "Set it to, say, 20 to keep the audio of recent dry-run pages in "

@@ -12,6 +12,7 @@
     "_note": "Page = lead_silence_ms of silence, then department tone (per code, see codes.tone), English, Spanish, played 'repeat' times. tones: once, twice or off. Voice clips are made by tools/make_audio.py; tone files are in audio/tones.",
     "tones": "once",
     "lead_silence_ms": 2500,
+    "gain_db": 6,
     "repeat": 2,
     "languages": [
       "en",
