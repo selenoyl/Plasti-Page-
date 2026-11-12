@@ -1,4 +1,4 @@
-# P833 Call Receiver
+# PLASTI-PAGE Receiver (P833 call receiver)
 
 By Ethan Brady & Ryan Raikes
 
@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.12.2:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.13.0:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -31,7 +31,7 @@ in dry run: no real page goes out until dry run is turned off on the admin page.
 - Builds the message in English and Spanish. Press 0 reads as "Press number unknown".
 - Sends pages one at a time, because there is one phone line. A failed page is retried 3 times, 10 s apart.
 - Logs every call and its result to `/var/log/p833-receiver/calls.csv`. Results are dry-run, sent, FAILED or repeat dropped.
-- Shows each board's last-heard time and the last 50 calls at `http://<laptop>:8833/`. It also logs a warning when a board has been silent for 3 minutes.
+- Shows each board's last-heard time and the newest 20 calls at `http://<laptop>:8833/` (every call stays in the log file). It also logs a warning when a board has been silent for 3 minutes.
 - Has an admin page at `https://<laptop>:8833/admin` (HTTPS, same port), behind a password, for test calls, custom pages, boards and the dry-run switch. See "The admin page" below.
 
 ## Install on the laptop (AlmaLinux 8 or 9)
@@ -93,6 +93,40 @@ cd ~/plasti-page && sudo bash install/update.sh
 It fetches the newest version from GitHub, shows what changed, and **asks before installing** (`sudo bash install/update.sh -y` skips the question). The installer backs up the old install first and checks that the new version loads before replacing anything. Your config, secrets, board list, dry-run setting and call log are kept.
 
 Without internet: download the new zip on another PC, unzip it into a **new** folder on the laptop, and run `sudo bash install/install.sh` from there.
+
+**Weekly updates, by themselves.** From a git clone, the installer also sets up a timer that checks GitHub
+once a week (Sundays at about 3 am; if the laptop was off then, at the next start) and installs a new
+version if there is one, the same way as above. It installs nothing unless:
+- GitHub has something new,
+- the folder is exactly as GitHub has it (no file changed by hand) and still gets updates from the same
+  GitHub address as when it was set up, and
+- no page is waiting or going out (it waits up to 15 minutes; boards resend calls during the few seconds
+  the receiver restarts anyway).
+
+The backup and the "does the new version start" check happen as usual. See when it last ran and what it did:
+
+```bash
+systemctl list-timers p833-update.timer
+```
+
+```bash
+journalctl -u p833-update
+```
+
+Turn weekly updates off (the choice is kept), or on again:
+
+```bash
+sudo P833_AUTO_UPDATE=off bash install/install.sh
+```
+
+```bash
+sudo P833_AUTO_UPDATE=on bash install/install.sh
+```
+
+**Starting at boot.** The receiver is a system service: it starts by itself when the laptop starts, and
+restarts itself if it ever stops. Check with `systemctl is-enabled p833-receiver` (it says `enabled`). For
+the laptop to come back on by itself after a power cut, turn on "power on after AC loss" (or similar) in
+the laptop's BIOS setup, if it has it.
 
 ## The admin page
 

@@ -1,0 +1,12 @@
+# P833 Call Receiver - install the newest version from GitHub, if there is one.
+# Started once a week by p833-update.timer. By Ethan Brady & Ryan Raikes
+[Unit]
+Description=P833 receiver: install the newest version from GitHub (if there is one)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/p833-receiver/p833-update.sh --auto --repo @REPO@
+Nice=10
+TimeoutStartSec=3600

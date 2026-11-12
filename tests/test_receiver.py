@@ -306,6 +306,22 @@ class SavedTones(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+class RecentCalls(unittest.TestCase):
+    def test_pages_show_the_newest_20_and_the_log_keeps_all(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            st = R.State(R.load_config(CONFIG), tmp, tmp)
+            for i in range(25):
+                st.record({"time": "t%d" % i, "board": "B", "cell": "C", "press": i, "code": 2, "result": "sent"})
+            self.assertEqual(len(st.calls), 20)
+            self.assertEqual((st.calls[0]["time"], st.calls[-1]["time"]), ("t5", "t24"))
+            with open(os.path.join(tmp, "calls.csv"), encoding="utf-8") as f:
+                self.assertEqual(len(list(csv.DictReader(f))), 25)                # nothing lost
+            self.assertEqual(len(R.State(R.load_config(CONFIG), tmp, tmp).calls), 20)   # after a restart too
+        finally:
+            shutil.rmtree(tmp)
+
+
 class ConfigUpdate(unittest.TestCase):
     """install/migrate_config.py brings an old installed config up to date."""
 
@@ -470,7 +486,9 @@ class Server(unittest.TestCase):
         self.assertEqual(rh["cell"], "RSP RH")
         never = [b for b in s["boards"] if b["board"] == "FSP_LH"][0]
         self.assertEqual(never["last_heard"], "never")
-        self.assertIn("P833 Call Receiver", self.get("/"))
+        page = self.get("/")
+        self.assertIn("PLASTI-PAGE RECEIVER", page)
+        self.assertIn("ETHAN BRADY &amp; RYAN RAIKES", page)
 
     def test_board_goes_silent(self):
         self.post("/heartbeat", {"board": "RSP_RH"})
@@ -1193,6 +1211,7 @@ class Server(unittest.TestCase):
         self.assertIn("RSP LH", live["boards"])
         self.assertIn("DRY RUN" if self.state.dry_run else "LIVE", live["status"])
         self.assertIn("voicejob", live)
+        self.assertIs(json.loads(self.get("/status.json"))["busy"], False)   # the weekly updater waits on this
         self.assertEqual(self.admin("/admin/live", pw=None)[0], 401)
 
     def test_listen_and_preview_only_from_the_admin_page(self):

@@ -43,12 +43,13 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.12.2"
+VERSION = "0.13.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
               "result", "attempts", "detail"]
 BOARD_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+RECENT_CALLS = 20         # calls shown on the status and admin pages (calls.csv keeps them all)
 BOOT_ID = re.compile(r"^[A-Za-z0-9_-]{0,32}$")
 MAX_CONNECTIONS = 64      # open web connections at once; more are closed at once
 MAX_PER_ADDRESS = 8       # ...from any one address
@@ -353,7 +354,7 @@ class State:
         self.recent = {}      # (board, code, press) -> time last accepted
         self.heard_info = {}  # board -> last heard, ip, fw, rssi ...
         self.registry = {}    # board -> {"cell": name}
-        self.calls = []       # last 50 call records, newest last
+        self.calls = []       # the newest RECENT_CALLS call records, newest last
         self.ui_seq = 0
         self.ui_boot = "admin-%x" % int(time.time())   # admin test calls: unique per start
         self.boots = {}       # board -> [[boot, highest seq accepted], ...] newest last (kept across restarts)
@@ -440,7 +441,7 @@ class State:
             self.registry = reg
         try:
             with open(self.csv_file, "r", encoding="utf-8", newline="") as f:
-                self.calls = list(csv.DictReader(f))[-50:]
+                self.calls = list(csv.DictReader(f))[-RECENT_CALLS:]
         except OSError:
             self.calls = []
 
@@ -618,7 +619,7 @@ class State:
             except OSError as e:
                 LOG.error("could not write call log: %s", e)
             self.calls.append({k: str(rec.get(k, "")) for k in CSV_FIELDS})
-            self.calls = self.calls[-50:]
+            self.calls = self.calls[-RECENT_CALLS:]
 
     def check_silent(self):
         """Log once when a board goes quiet for too long."""
@@ -1665,6 +1666,7 @@ def status_obj(app, admin=False):
             "audio_voices": app["worker"].audio.manifest.get("voices", {}),
             "audio_problems": app["worker"].audio.check(cfg),
             "pages_waiting": app["worker"].jobs.qsize(),
+            "busy": app["worker"].jobs.unfinished_tasks > 0,     # a page waiting or going out now
             "boards": boards, "calls": calls}
 
 
@@ -1682,6 +1684,7 @@ th{background:var(--head)} tr.bad td{background:var(--bad)} td.ok{color:var(--go
 input,select,button{font-size:15px;padding:4px 6px}
 button{cursor:pointer} .msg{padding:8px 12px;border:2px solid var(--good);margin-bottom:16px;max-width:820px}
 .small{font-size:13px;opacity:.8} form.inline{display:inline;margin:0}
+footer.credit{margin:32px 0 8px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;letter-spacing:.08em;opacity:.7;text-align:center}
 .preview{margin-top:10px;padding:8px 10px;border-left:4px solid var(--good)} .preview:empty{display:none}
 .preview audio{margin-top:8px;width:100%;max-width:520px}
 """
@@ -2298,21 +2301,22 @@ Custom text is spoken by Piper with the page voice (Preview lets you hear it); w
 
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>P833 Call Receiver</title><style>%s</style></head><body>
-<h1>P833 Call Receiver%s</h1>
+<title>PLASTI-PAGE Receiver</title><style>%s</style></head><body>
+<h1>PLASTI-PAGE RECEIVER%s</h1>
 <p id=statusline>%s</p>
 %s%s
 <h2>Boards</h2>
 <div class=w><table><thead><tr><th>Cell</th><th>Board</th><th>Status</th><th>Last heard</th><th>Age</th><th>IP</th><th>Wi-Fi dBm</th>%s</tr></thead>
 <tbody id=boards>%s</tbody></table></div>
-<h2>Recent calls (newest first)</h2>
+<h2>Recent calls (the newest %d)</h2>
 <div class=w><table><thead><tr><th>Time</th><th>Cell</th><th>Press</th><th>Code</th><th>Who</th><th>Message</th><th>Result</th><th>Tries</th><th>Detail</th></tr></thead>
 <tbody id=calls>%s</tbody></table></div>
-<p class=small>%s Full log: /var/log/p833-receiver/calls.csv</p>
+<p class=small>%s The full log of every call is on the laptop: /var/log/p833-receiver/calls.csv</p>
+<footer class=credit>ETHAN BRADY &amp; RYAN RAIKES</footer>
 %s</body></html>""" % (
         PAGE_STYLE, " - Admin" if admin else "", live["status"],
         "<div class=msg>%s</div>" % e(msg) if msg else "", admin_html,
-        "<th></th>" if admin else "", live["boards"], live["calls"],
+        "<th></th>" if admin else "", live["boards"], RECENT_CALLS, live["calls"],
         "The boards and calls above update by themselves every 10 s; the rest of the page stays as you left it."
         if admin else "Refreshes every 10 s.",
         ADMIN_LIVE_JS if admin else REFRESH_JS)

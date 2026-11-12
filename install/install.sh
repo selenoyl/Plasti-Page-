@@ -9,6 +9,10 @@
 # replaces your config.json, keeps your secrets.env (only adding anything new
 # it needs), keeps the board list and call log, and never turns SELinux off.
 #
+# Weekly updates: from a git clone, a timer installs the newest version from GitHub once a
+# week (Sundays about 3 am), only if there is one. Turn them off (the choice is kept):
+#   sudo P833_AUTO_UPDATE=off bash install/install.sh      (on again: P833_AUTO_UPDATE=on)
+#
 # Optional: let only some networks reach the receiver's port (firewalld), e.g. the
 # IoT network the boards are on and the PC you use for the admin page:
 #   sudo P833_ALLOW_FROM="BOARDS_NETWORK ADMIN_PC" bash install/install.sh
@@ -226,14 +230,51 @@ else
     echo "  Turn it on and run this installer again: sudo systemctl enable --now firewalld"
 fi
 
+# --- Weekly updates from GitHub (only from a git clone). The timer runs a root-owned copy
+# of install/update.sh, which checks the clone matches GitHub before it installs anything.
+if [ -n "${P833_AUTO_UPDATE:-}" ]; then
+    case "$P833_AUTO_UPDATE" in on|off) echo "$P833_AUTO_UPDATE" > "$ETC/auto_update" ;;
+        *) echo "P833_AUTO_UPDATE must be on or off (ignored)" ;; esac
+fi
+AUTO=$(cat "$ETC/auto_update" 2>/dev/null || echo on)
+REPO=$PWD
+UPDATE_NOTE=""
+install -m 755 install/update.sh "$APP/p833-update.sh"
+chown root:root "$APP/p833-update.sh"
+if [ "$AUTO" != on ]; then
+    UPDATE_NOTE="off (turn on: sudo P833_AUTO_UPDATE=on bash install/install.sh)"
+elif [ ! -d .git ]; then
+    UPDATE_NOTE="off: this folder wasn't made with git clone, so there's nothing to update from"
+elif ! printf '%s' "$REPO" | grep -Eq '^/[A-Za-z0-9._/-]+$'; then
+    UPDATE_NOTE="off: the folder path '$REPO' has characters the timer can't use; clone it somewhere plainer"
+else
+    ORIGIN=$(git -c safe.directory="$REPO" -c core.fsmonitor= remote get-url origin 2>/dev/null || true)
+    printf '# Weekly updates (written by install.sh). By Ethan Brady & Ryan Raikes\nrepo=%s\norigin=%s\n' \
+        "$REPO" "$ORIGIN" > "$ETC/update.conf"
+    chmod 644 "$ETC/update.conf"
+    sed "s#@REPO@#$REPO#" install/p833-update.service > /etc/systemd/system/p833-update.service
+    install -m 644 install/p833-update.timer /etc/systemd/system/p833-update.timer
+    chmod 644 /etc/systemd/system/p833-update.service
+    command -v restorecon >/dev/null 2>&1 && restorecon /etc/systemd/system/p833-update.service \
+        /etc/systemd/system/p833-update.timer "$APP/p833-update.sh"
+    UPDATE_NOTE="on: Sundays about 3 am, from $ORIGIN (turn off: sudo P833_AUTO_UPDATE=off bash install/install.sh)"
+fi
+
 systemctl daemon-reload
 systemctl enable p833-receiver >/dev/null 2>&1
+if [ "$AUTO" = on ] && [ -e /etc/systemd/system/p833-update.timer ] && [ -d .git ]; then
+    systemctl enable --now p833-update.timer >/dev/null 2>&1
+else
+    systemctl disable --now p833-update.timer >/dev/null 2>&1 || true
+fi
 systemctl restart p833-receiver
 sleep 2
 systemctl --no-pager --lines=5 status p833-receiver || true
 echo
 IP=$(hostname -I | awk '{print $1}')
 echo "Done. Version $(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$APP/p833_receiver.py") installed."
+echo "  Starts by itself when the laptop starts: $(systemctl is-enabled p833-receiver 2>/dev/null || echo unknown)"
+echo "  Weekly updates from GitHub: $UPDATE_NOTE"
 echo "  Status page: http://${IP}:${PORT}/"
 echo "  Admin page:  https://${IP}:${PORT}/admin"
 echo "    The browser warns once about the certificate (it is made by this laptop, not bought)."

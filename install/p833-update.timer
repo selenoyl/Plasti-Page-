@@ -1,0 +1,14 @@
+# P833 Call Receiver - check GitHub for a new version once a week.
+# Sundays at about 3 am (a random 0-45 minutes later); if the laptop was off then, at the
+# next start. Change the day or time: sudo systemctl edit --full p833-update.timer
+# By Ethan Brady & Ryan Raikes
+[Unit]
+Description=P833 receiver: check GitHub for a new version once a week
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
