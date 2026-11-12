@@ -20,3 +20,5 @@ HandleLidSwitchDocked=ignore
 EOF
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
 echo "Done. Reboot once so the lid setting takes effect."
+echo "Closing the lid no longer locks the screen: log out (or lock the screen) before walking away,"
+echo "so nobody can use the open session. The receiver keeps running after you log out."

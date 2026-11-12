@@ -72,6 +72,7 @@ in dry run: no real page goes out until dry run is turned off on the admin page.
    ```bash
    sudo bash install/laptop-stay-awake.sh
    ```
+   Closing the lid then no longer locks the screen, so log out (or lock it) before walking away.
 
 4. Note the board key, which each board's firmware needs, and the admin password:
 
@@ -117,6 +118,7 @@ With dry run off, every test or custom page is really dialed (once the phone ste
 | Call log | `sudo less /var/log/p833-receiver/calls.csv` (only root and the service can read the logs) |
 | Status page | `http://<laptop IP>:8833/` |
 | After editing config.json | `sudo systemctl restart p833-receiver` |
+| Old install backups | `sudo ls -d /root/p833-backup-*`. Each holds an old copy of the secrets and logs; delete the old ones you don't need with `sudo rm -r /root/p833-backup-<date-time>`. |
 
 ## Test it without a board
 
