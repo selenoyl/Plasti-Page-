@@ -61,12 +61,16 @@ QueueHandle_t logQ;
 PendingCall pending[MAX_QUEUE];
 int pendingCount = 0;
 uint32_t droppedCalls = 0;       // calls lost because the queue was full (reported in heartbeats)
+volatile uint32_t samplerDrops = 0;   // ...or because the main loop didn't take them in time
 uint32_t nextSeq = 1;
 char bootId[9];
 uint32_t nextTryAt = 0, retryDelay = 2000, lastHeartbeat = 0, wifiLostAt = 0;
 bool activeHigh = false;
 volatile bool watching = false;
-String lastError = "";
+// The last send error. A fixed buffer, not a String: the web page (its own task) reads it
+// while the main loop writes it, and a String could be freed mid-read.
+char lastError[64] = "";
+void setError(const String& e) { strncpy(lastError, e.c_str(), sizeof(lastError) - 1); lastError[sizeof(lastError) - 1] = 0; }
 
 struct LogMsg { char text[96]; };
 
@@ -124,7 +128,7 @@ void showSettings() {
   if (WiFi.status() == WL_CONNECTED)
     Serial.printf(", %s, %d dBm", WiFi.localIP().toString().c_str(), WiFi.RSSI());
   Serial.printf("\n  queue   %d call(s) waiting   last error: %s\n\n", pendingCount,
-                lastError.length() ? lastError.c_str() : "none");
+                lastError[0] ? lastError : "none");
 }
 
 void printHelp() {
@@ -220,7 +224,7 @@ void samplerTask(void*) {
     p833::Result r = decoder.feed(on, millis(), &d);
     if (r == p833::CALL) {
       PendingCall c = {0, d.code, d.press, millis()};
-      xQueueSend(decodedQ, &c, 0);
+      if (xQueueSend(decodedQ, &c, 0) != pdTRUE) samplerDrops++;
     } else if (r == p833::BAD) {
       logEvent("ignored pulses: %s", d.why);
     }
@@ -264,7 +268,7 @@ void updateStatus() {
   bool blink = (millis() / 400) % 2;
   if (decoder.busy()) led(0, 0, 40);
   else if (pendingCount) led(blink ? 40 : 0, blink ? 25 : 0, 0);
-  else if (!cfg.ssid.length() || WiFi.status() != WL_CONNECTED || lastError.length()) led(blink ? 40 : 0, 0, 0);
+  else if (!cfg.ssid.length() || WiFi.status() != WL_CONNECTED || lastError[0]) led(blink ? 40 : 0, 0, 0);
   else led(0, 12, 0);
 }
 
@@ -330,21 +334,21 @@ void sendPending() {
     Serial.printf("sent: code %d press %d (seq %lu)\n", c.code, c.press, (unsigned long)c.seq);
     memmove(&pending[0], &pending[1], sizeof(PendingCall) * (pendingCount - 1));
     pendingCount--;
-    lastError = "";
+    setError("");
     retryDelay = 2000;
     nextTryAt = 0;
     return;
   }
   if (st == 400) {   // the receiver says the message itself is wrong: resending won't help
-    lastError = "receiver refused the call (400)";
+    setError("receiver refused the call (400)");
     Serial.printf("DROPPED: receiver refused code %d press %d (400)\n", c.code, c.press);
     memmove(&pending[0], &pending[1], sizeof(PendingCall) * (pendingCount - 1));
     pendingCount--;
     return;
   }
-  lastError = st == 403 ? "wrong board key (403)" : st == NO_WIFI ? "no Wi-Fi"
-                                                  : "receiver not reachable (" + String(st) + ")";
-  Serial.printf("send failed: %s; will retry in %lu s (%d waiting)\n", lastError.c_str(),
+  setError(st == 403 ? String("wrong board key (403)") : st == NO_WIFI ? String("no Wi-Fi")
+           : st == 503 ? String("receiver busy (503)") : "receiver not reachable (" + String(st) + ")");
+  Serial.printf("send failed: %s; will retry in %lu s (%d waiting)\n", lastError,
                 (unsigned long)(retryDelay / 1000), pendingCount);
   nextTryAt = millis() + retryDelay;
   retryDelay = min<uint32_t>(retryDelay * 2, st == 403 ? 60000 : 10000);
@@ -359,7 +363,7 @@ void heartbeat() {
            "{\"board\":\"%s\",\"boot\":\"%s\",\"fw\":\"%s\",\"rssi\":%d,\"uptime_s\":%lu,\"pending\":%d,"
            "\"dropped\":%lu}",
            cfg.id.c_str(), bootId, FW_VERSION, WiFi.RSSI(), (unsigned long)(millis() / 1000), pendingCount,
-           (unsigned long)droppedCalls);
+           (unsigned long)(droppedCalls + samplerDrops));
   int st = post("/heartbeat", String(body));
   if (st != 200) {
     Serial.printf("heartbeat failed (%d); trying again in 10 s\n", st);
@@ -447,7 +451,7 @@ void webStatus() {
   b += "<tr><td>Wi-Fi</td><td>" + String(WiFi.RSSI()) + " dBm</td></tr>";
   b += "<tr><td>Up</td><td>" + String(up) + "</td></tr>";
   b += "<tr><td>Calls waiting</td><td>" + String(pendingCount) + "</td></tr>";
-  b += "<tr><td>Last error</td><td>" + htmlEscape(lastError.length() ? lastError : String("none")) + "</td></tr>";
+  b += "<tr><td>Last error</td><td>" + htmlEscape(String(lastError[0] ? lastError : "none")) + "</td></tr>";
   b += "</table><p><a href='/update'>Update firmware</a></p>";
   web.send(200, "text/html", page("P833 board " + htmlEscape(cfg.id), b));
 }
@@ -514,6 +518,15 @@ void webUpdateDone() {
   ESP.restart();
 }
 
+// The web pages run in their own task: a slow or stuck web client then holds up only the
+// web pages, never the sending of calls in loop().
+void webTask(void*) {
+  for (;;) {
+    web.handleClient();
+    delay(2);
+  }
+}
+
 void startWeb() {
   static const char* headers[] = {"Origin"};
   web.collectHeaders(headers, 1);      // Authorization is always collected too
@@ -548,6 +561,7 @@ void setup() {
   Serial.println("Type 'help' for setup commands.");
   startWifi();
   startWeb();
+  xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, nullptr, 0);
 }
 
 void loop() {
@@ -575,7 +589,6 @@ void loop() {
                                            wifiLostAt = millis() | 1; }
     }
   }
-  web.handleClient();
-  updateStatus();
+  updateStatus();      // (the web pages are served by webTask)
   delay(5);
 }

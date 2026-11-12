@@ -240,19 +240,20 @@ class SmsSender(threading.Thread):
         if problem:
             self._record("-", text, "FAILED", problem)
             return False, problem
-        results, stop = [], ""
-        for i, dst in enumerate(dsts):
+        results, stop, tried = [], "", False
+        for dst in dsts:
             if stop:                                            # the account can't send: don't keep trying
                 self._record(dst, text, "SKIPPED", "skipped: " + stop)
                 results.append((dst, False, "skipped"))
                 continue
-            if i:
-                time.sleep(self.pause_s(s))                     # spread texts out, at random
-            if not self._under_cap(int(s["max_per_hour"])):
+            if not self._under_cap(int(s["max_per_hour"])):         # checked first: no pause for a skip
                 detail = "skipped: hourly limit of %s texts reached" % s["max_per_hour"]
                 self._record(dst, text, "SKIPPED", detail)
                 results.append((dst, False, detail))
                 continue
+            if tried:
+                time.sleep(self.pause_s(s))                     # spread texts out, at random
+            tried = True
             ok, detail, stop_all = self._send_one(s, user, pw, did, dst, text)
             if ok:
                 with self.lock:

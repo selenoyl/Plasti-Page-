@@ -1102,6 +1102,14 @@ sys.stdout.buffer.write(b.getvalue())
         time.sleep(0.3)
         self.assertEqual(len(fake.requests), 1)
 
+    def test_unknown_board_pages_but_does_not_text(self):
+        sender, fake = self.use_sms()
+        self.assertEqual(self.post("/call", {"board": "NEW_1", "boot": "b", "seq": 1, "code": 2, "press": 5})[0], 200)
+        self.wait_pages()
+        time.sleep(0.3)
+        self.assertEqual(len(self.pager.sent), 1)              # paged...
+        self.assertEqual(fake.requests, [])                    # ...but no text until it's on the list
+
     def test_texts_off_or_admin_tests(self):
         sender, fake = self.use_sms(enabled=False)
         self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 5})

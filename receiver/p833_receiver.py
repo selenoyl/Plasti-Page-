@@ -611,7 +611,10 @@ def accept_call(app, call, ip, note=""):
              call["code"], call["press"], en, " [%s]" % note if note else "")
     app["worker"].jobs.put(rec)
     if app.get("sms"):
-        app["sms"].text_for_call(rec, test_call=bool(note))
+        if call["board"] in st.registry or note:
+            app["sms"].text_for_call(rec, test_call=bool(note))
+        else:   # only listed boards text the crew: a made-up board ID can't spend the texts
+            LOG.warning("no text for the call from unknown board %s (add it on the admin page)", call["board"])
     return False, en
 
 
