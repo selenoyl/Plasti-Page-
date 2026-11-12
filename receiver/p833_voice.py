@@ -7,14 +7,18 @@
 #   source "piper":    each sentence is spoken by Piper with the saved settings,
 #                      kept in <state dir>/voice_cache, and reused after that.
 #
-# A page never fails because of Piper: if it isn't installed, stops, or takes too
-# long, that sentence comes from the recorded clips instead (and the log says so).
+# A page never fails because of Piper: a page spends at most PAGE_BUDGET_S on it in
+# all; if Piper isn't installed, stops, or is too slow, that sentence comes from the
+# recorded clips instead (and the log says so). After Piper hangs or crashes on a page,
+# pages skip it for COOL_OFF_S while it is restarted in the background.
 #
 # Piper runs as one helper process (receiver/p833_tts.py serve) in its own Python
 # environment, with the voices it uses kept loaded (loading one takes a second or
 # two; a sentence then takes a fraction of a second). It runs at a lower CPU
-# priority than the receiver, without the receiver's secrets. With the Piper
-# voice in use it stays running; otherwise it stops after 10 idle minutes.
+# priority than the receiver, with none of the receiver's secrets in its environment
+# (it runs as the same user, so Piper is pinned and its voices checksummed by
+# install_tts.sh). With the Piper voice in use it stays running; otherwise it stops
+# after 10 idle minutes. Pages go ahead of previews, the voice lab and Make all.
 #
 # Standard library only; Python 3.6+.
 
@@ -31,7 +35,7 @@ import threading
 import time
 import wave
 
-from p833_audio import DIGIT_WORDS, RATE, AudioError, read_wav
+from p833_audio import DIGIT_WORDS, RATE, AudioError, _ulaw_decode, read_wav
 
 LOG = logging.getLogger("p833")
 
@@ -48,32 +52,65 @@ PRONOUNCE = {
     "es": {"Red Rabbit": "Red Rábit"},
 }
 CACHE_FORMAT = 1          # change when the way sentences are made changes: old kept audio is then unused
-PAGE_TIMEOUT_S = 15       # a live page waits this long for a sentence, then uses the recorded clip
+PAGE_BUDGET_S = 10        # a live page spends at most this long on Piper in all, then uses the recorded clips
 SLOW_TIMEOUT_S = 60       # previews, the voice lab and "make all messages"
+COOL_OFF_S = 60           # after Piper hangs or crashes on a page, pages skip it this long while it recovers
+MAX_DIGIT_PAUSE_MS = 800  # longer silences can make the paging feedback eliminator end the page
+MAX_CACHE_MB = 300        # kept audio beyond this: the least recently used is removed
+MIN_ANSWER_S = 3          # a page asks Piper only with at least this long left (else: the recorded clip)
+PAGE_LOCK_WAIT_S = 3      # ...and waits at most this long for Piper to be free (a preview or the voice lab)
 IDLE_EXIT_S = 600         # the helper stops after this long unused (unless the Piper voice is in use)
 MAX_PREVIEW_DIRS = 8      # kept-audio folders for settings only previewed, not saved
 
 
 # ------------------------------------------------------------- settings ---
 
-def voice_settings(cfg):
-    """The page voice settings: defaults, with the saved ones on top."""
-    saved = cfg.get("audio", {}).get("voice", {}) or {}
-    out = {"source": saved.get("source", VOICE_DEFAULTS["source"])}
-    if out["source"] not in ("recorded", "piper"):
-        out["source"] = "recorded"
+def voice_settings(cfg, recorded=None):
+    """The page voice settings: defaults (how the recordings were made, when known), with the
+    saved ones on top. Every value is checked: a bad one (a hand-edited settings.json) is
+    replaced by the default, never passed on."""
+    a = cfg.get("audio", {})
+    saved = a.get("voice", {})
+    saved = saved if isinstance(saved, dict) else {}
+    recorded = recorded or {}
+    out = {"source": saved.get("source") if saved.get("source") in ("recorded", "piper") else "recorded"}
     for lang in LANGS:
-        out[lang] = dict(VOICE_DEFAULTS[lang])
-        if isinstance(saved.get(lang), dict):
-            out[lang].update({k: v for k, v in saved[lang].items() if k in VOICE_DEFAULTS[lang]})
+        d = dict(VOICE_DEFAULTS[lang])
+        if isinstance(recorded.get("voices"), dict) and isinstance(recorded["voices"].get(lang), str):
+            d["voice"] = recorded["voices"][lang]
+        if isinstance(recorded.get("length_scale"), (int, float)):
+            d["pace"] = float(recorded["length_scale"])
+        if isinstance(a.get("speak_digits"), list):
+            d["digits"] = lang in a["speak_digits"]
+        got = saved.get(lang) if isinstance(saved.get(lang), dict) else {}
+        lv = dict(d)
+        if isinstance(got.get("voice"), str) and re.match(r"^[A-Za-z0-9_.-]{1,80}$", got["voice"]):
+            lv["voice"] = got["voice"]
+        try:
+            if 0.5 <= float(got.get("pace", d["pace"])) <= 2.5:
+                lv["pace"] = round(float(got.get("pace", d["pace"])), 2)
+        except (TypeError, ValueError):
+            pass
+        if isinstance(got.get("digits"), bool):
+            lv["digits"] = got["digits"]
+        try:
+            if 0 <= int(got.get("digit_pause_ms", 0)) <= MAX_DIGIT_PAUSE_MS:
+                lv["digit_pause_ms"] = int(got.get("digit_pause_ms", 0))
+        except (TypeError, ValueError):
+            pass
+        out[lang] = lv
     return out
 
 
-def parse_voice_form(form, voices):
-    """The page voice settings from the admin form. Returns (settings, errors)."""
+def parse_voice_form(form, voices, langs=LANGS, defaults=None):
+    """The page voice settings from the admin form. Returns (settings, errors). Only the
+    languages pages use (audio.languages) need a voice."""
     errs, out = [], {"source": "piper"}
     for lang, name in (("en", "English"), ("es", "Spanish")):
         v = form.get(lang + "_voice", "")
+        if lang not in langs and v not in voices:
+            out[lang] = dict((defaults or VOICE_DEFAULTS)[lang])     # not used: keep the default
+            continue
         if v not in voices:
             errs.append("pick an installed %s voice" % name)
         try:
@@ -85,10 +122,11 @@ def parse_voice_form(form, voices):
             pace = 1.25
         try:
             pause = int(form.get(lang + "_digit_pause_ms", "0") or 0)
-            if not 0 <= pause <= 1500:
+            if not 0 <= pause <= MAX_DIGIT_PAUSE_MS:
                 raise ValueError
         except ValueError:
-            errs.append("%s pause between digits must be 0 to 1500 ms" % name)
+            errs.append("%s pause between digits must be 0 to %d ms (a longer silence can end the page)"
+                        % (name, MAX_DIGIT_PAUSE_MS))
             pause = 0
         out[lang] = {"voice": v, "pace": pace, "digits": form.get(lang + "_digits") == "on",
                      "digit_pause_ms": pause}
@@ -130,7 +168,7 @@ def sentence_segments(cfg, lv, lang, code, press):
     if not (lv.get("digits") and lang in DIGIT_WORDS):
         return [{"text": say(lang, pre + str(press) + post)}]
     words = [DIGIT_WORDS[lang][int(d)] for d in str(press)]
-    pause = int(lv.get("digit_pause_ms", 0))
+    pause = max(0, min(MAX_DIGIT_PAUSE_MS, int(lv.get("digit_pause_ms", 0))))
     if not pause:
         return [{"text": say(lang, pre + ", ".join(words) + post)}]     # like the recordings
     pieces = [pre + words[0]] + words[1:]
@@ -144,14 +182,9 @@ def sentence_segments(cfg, lv, lang, code, press):
 
 
 def text_segments(lang, text):
-    """Free text (a custom page): [350] marks a pause, as in the voice lab."""
-    segs = []
-    for i, part in enumerate(re.split(r"\[(\d{1,4})\]", text)):
-        if i % 2:
-            segs.append({"pause_ms": min(5000, int(part))})
-        elif part.strip():
-            segs.append({"text": say(lang, part.strip())})
-    return segs
+    """Free text (a custom page), said as written: "[2]" is text here, not a pause."""
+    text = say(lang, str(text))
+    return [{"text": text}] if text else []
 
 
 # ---------------------------------------------------------------- Piper ---
@@ -165,6 +198,13 @@ def tts_env():
 def tts_ready(cfg):
     a = cfg["audio"]
     return os.path.exists(a["tts_python"]) and os.path.exists(a["tts_script"]) and os.path.isdir(a["tts_voices"])
+
+
+def _stuck(what):
+    """An AudioError meaning the helper itself hung or died (not a bad request)."""
+    e = AudioError("Piper %s" % what)
+    e.stuck = True
+    return e
 
 
 class PiperEngine:
@@ -181,6 +221,8 @@ class PiperEngine:
         self.buf = b""
         self.last_used = 0.0
         self.started = 0
+        self.cool_until = 0.0                     # pages skip Piper until then (it hung or crashed)
+        self.on_trouble = lambda: None            # set by PageVoice: reload the voices in the background
         threading.Thread(target=self._idle_watch, daemon=True).start()
 
     def ready(self):
@@ -193,19 +235,41 @@ class PiperEngine:
             while self.urgent and time.monotonic() < end:
                 self.turn.wait(0.5)
 
+    def cooling(self):
+        return time.monotonic() < self.cool_until
+
     def speak(self, voice, pace, segments, timeout, urgent=False):
-        """WAV bytes (8 kHz 16-bit mono), or AudioError."""
+        """WAV bytes (8 kHz 16-bit mono), or AudioError. timeout covers waiting for the helper
+        to be free AND its answer; only a slow answer counts as the helper being stuck.
+        urgent (a page): skipped while Piper is recovering; other requests wait for pages."""
         if not self.ready():
             raise AudioError("Piper isn't installed on this laptop (sudo bash install/install_tts.sh)")
         end = time.monotonic() + timeout
         if urgent:
+            if self.cooling():
+                raise AudioError("Piper is recovering from a problem; recorded clips are used meanwhile")
             with self.turn:
                 self.urgent += 1
+        else:
+            self.wait_turn(timeout)               # a page waiting for Piper goes first
         try:
-            if not self.lock.acquire(timeout=max(0.1, timeout)):
-                raise AudioError("Piper was busy for %d s" % timeout)
+            wait = end - time.monotonic()
+            if urgent:
+                wait = min(wait, PAGE_LOCK_WAIT_S)
+            if not self.lock.acquire(timeout=max(0.05, wait)):
+                raise AudioError("Piper was busy (another request)")
             try:
-                return self._ask({"voice": voice, "length_scale": pace, "segments": segments}, end)
+                if urgent and end - time.monotonic() < MIN_ANSWER_S:
+                    raise AudioError("not enough time left for Piper on this page")
+                wav = self._ask({"voice": voice, "length_scale": pace, "segments": segments}, end)
+                self.cool_until = 0.0
+                return wav
+            except AudioError as e:
+                if getattr(e, "stuck", False) and urgent:
+                    self.cool_until = time.monotonic() + COOL_OFF_S
+                    LOG.warning("Piper %s during a page; pages use the recorded clips for %d s", e, COOL_OFF_S)
+                    threading.Thread(target=self.on_trouble, daemon=True).start()
+                raise
             finally:
                 self.last_used = time.monotonic()
                 self.lock.release()
@@ -289,39 +353,52 @@ class PiperEngine:
                 return self._read(int(head["bytes"]), end)
             except TimeoutError:
                 self._stop(kill=True)
-                raise AudioError("Piper took too long")
+                raise _stuck("took too long")
             except (EOFError, BrokenPipeError, OSError, ValueError, KeyError) as e:
                 self._stop(kill=True)
                 if attempt == 2 or time.monotonic() >= end:
-                    raise AudioError("Piper stopped (%s)" % e.__class__.__name__)
-        raise AudioError("Piper failed")
+                    raise _stuck("stopped (%s)" % e.__class__.__name__)
+        raise _stuck("failed")
 
     def _idle_watch(self):
         while True:
             time.sleep(30)
-            if self.proc is None or self.keep_running():
-                continue
-            if time.monotonic() - self.last_used > IDLE_EXIT_S and self.lock.acquire(blocking=False):
-                try:
-                    if time.monotonic() - self.last_used > IDLE_EXIT_S:
-                        self._stop()
-                        LOG.info("Piper helper stopped (idle)")
-                finally:
-                    self.lock.release()
+            self._idle_check()
+
+    def _idle_check(self):
+        """Stop the helper if it has been unused a while, unless pages use the Piper voice."""
+        if self.proc is None or self.keep_running():
+            return
+        if time.monotonic() - self.last_used >= IDLE_EXIT_S and self.lock.acquire(blocking=False):
+            try:
+                if time.monotonic() - self.last_used >= IDLE_EXIT_S:
+                    self._stop()
+                    LOG.info("Piper helper stopped (idle)")
+            finally:
+                self.lock.release()
 
 
 # ---------------------------------------------------------- kept audio ---
 
 def _ulaw_wav(pcm):
-    """16-bit PCM -> an 8-bit mu-law WAV (like the recorded clips: half the size, and
-    exactly what the phone line carries)."""
+    """16-bit PCM -> (an 8-bit mu-law WAV, the 16-bit audio it plays back as). Mu-law is like
+    the recorded clips: half the size, and exactly what the phone line carries."""
     from p833_sip import pcm16_to_ulaw
     data = pcm16_to_ulaw(pcm)
     fmt = (7).to_bytes(2, "little") + (1).to_bytes(2, "little") + RATE.to_bytes(4, "little") + \
         RATE.to_bytes(4, "little") + (1).to_bytes(2, "little") + (8).to_bytes(2, "little")
     body = b"WAVE" + b"fmt " + len(fmt).to_bytes(4, "little") + fmt + \
         b"data" + len(data).to_bytes(4, "little") + data + (b"\x00" if len(data) % 2 else b"")
-    return b"RIFF" + len(body).to_bytes(4, "little") + body
+    return b"RIFF" + len(body).to_bytes(4, "little") + body, _ulaw_decode(data)
+
+
+def _whole_file(path):
+    """The file's bytes if it is a complete WAV (its size matches its header), else None."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 44 or data[:4] != b"RIFF" or len(data) < int.from_bytes(data[4:8], "little") + 8:
+        return None
+    return data
 
 
 def _wav_pcm(wav):
@@ -340,11 +417,17 @@ class PageVoice:
         self.engine = engine or PiperEngine(cfg, keep_running=self.active)
         self.page_busy = lambda: False            # set by the receiver: True while a page is going out
         self.installed = lambda: []               # set by the receiver: the installed voices
+        self.recorded = {}                        # set by the receiver: how the recordings were made
         self.lock = threading.Lock()
         self.job = {"running": False}             # "make all messages" progress
+        self.job_thread = None
+        self.writes = 0
+        self.page_budget = PAGE_BUDGET_S
+        self.engine.on_trouble = self.warm_up      # after a hang: reload the voices in the background
+        self._remove_leftovers()
 
     def settings(self):
-        return voice_settings(self.cfg)
+        return voice_settings(self.cfg, self.recorded)
 
     def active(self):
         return self.settings()["source"] == "piper"
@@ -353,9 +436,17 @@ class PageVoice:
         return self.engine.ready()
 
     # -- where a sentence is kept
-    @staticmethod
-    def _dir_key(lv):
-        k = json.dumps({"format": CACHE_FORMAT, "voice": lv["voice"], "pace": float(lv["pace"])}, sort_keys=True)
+    def _dir_key(self, lv):
+        """Everything about the voice that changes the audio: the voice and its model file,
+        the speed and the number style. (The exact words go in each file's name.)"""
+        try:
+            st = os.stat(os.path.join(self.cfg["audio"]["tts_voices"], lv["voice"] + ".onnx"))
+            model = [st.st_size, int(st.st_mtime)]
+        except (OSError, KeyError):
+            model = None
+        k = json.dumps({"format": CACHE_FORMAT, "voice": lv["voice"], "model": model, "pace": float(lv["pace"]),
+                        "digits": bool(lv.get("digits")), "pause": int(lv.get("digit_pause_ms", 0))},
+                       sort_keys=True)
         return hashlib.sha256(k.encode("utf-8")).hexdigest()[:16]
 
     def _path(self, lang, lv, segments):
@@ -363,45 +454,66 @@ class PageVoice:
         return os.path.join(self.cache_dir, "%s-%s" % (lang, self._dir_key(lv)), t[:32] + ".wav")
 
     def is_kept(self, lang, lv, segments):
-        return os.path.exists(self._path(lang, lv, segments))
+        return self.kept(lang, lv, segments) is not None
 
     # -- speaking
-    def frames(self, lang, lv, segments, urgent=True, timeout=PAGE_TIMEOUT_S):
-        """16-bit PCM of the segments in this voice: kept audio, or made now and kept."""
+    def kept(self, lang, lv, segments):
+        """The kept audio for these segments (16-bit PCM), or None."""
         path = self._path(lang, lv, segments)
         try:
+            data = _whole_file(path)
+            if data is None:
+                return None                        # cut short (power cut while writing?): made again
             pcm = read_wav(path)
-            try:
-                os.utime(path)                     # recently used: kept longest
-            except OSError:
-                pass
-            return pcm
         except (OSError, ValueError):
+            return None
+        try:
+            os.utime(path)                         # recently used: kept longest
+        except OSError:
             pass
+        return pcm
+
+    def frames(self, lang, lv, segments, urgent=True, timeout=PAGE_BUDGET_S):
+        """16-bit PCM of the segments in this voice: kept audio, or made now and kept."""
+        pcm = self.kept(lang, lv, segments)
+        if pcm is not None:
+            return pcm
         wav = self.engine.speak(lv["voice"], float(lv["pace"]), segments, timeout, urgent)
         pcm = _wav_pcm(wav)
         if not pcm.strip(b"\x00"):                 # empty or all silence: nothing was said
             raise AudioError("Piper made no sound")
-        data = _ulaw_wav(pcm)
+        data, played = _ulaw_wav(pcm)
+        self._keep(self._path(lang, lv, segments), data)
+        return played                              # the same audio the kept file will play next time
+
+    def _keep(self, path, data):
+        tmp = path + ".tmp%d" % threading.get_ident()
         try:
             new_dir = not os.path.isdir(os.path.dirname(path))
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + ".tmp%d" % threading.get_ident()
             with open(tmp, "wb") as f:
                 f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)
             if new_dir:
                 self._prune_dirs()
+            self.writes += 1
+            if self.writes % 200 == 0:
+                self._trim()
         except OSError as e:
             LOG.warning("could not keep the spoken sentence: %s", e)
-        return read_wav(path) if os.path.exists(path) else pcm
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
-    def sentence(self, lang, code, press, vs=None, urgent=True, timeout=PAGE_TIMEOUT_S):
+    def sentence(self, lang, code, press, vs=None, urgent=True, timeout=PAGE_BUDGET_S):
         vs = vs or self.settings()
         lv = vs[lang]
         return self.frames(lang, lv, sentence_segments(self.cfg, lv, lang, code, press), urgent, timeout)
 
-    def text(self, lang, text, vs=None, urgent=True, timeout=PAGE_TIMEOUT_S):
+    def text(self, lang, text, vs=None, urgent=True, timeout=PAGE_BUDGET_S):
         """Free text (a custom page). There is no recording to fall back on, so if the chosen
         voice isn't installed, any installed voice for the language is used."""
         vs = vs or self.settings()
@@ -435,11 +547,43 @@ class PageVoice:
         for n in drop:
             shutil.rmtree(os.path.join(self.cache_dir, n), ignore_errors=True)
 
+    def _remove_leftovers(self):
+        """Half-written files left by a crash or power cut."""
+        for root, _, files in os.walk(self.cache_dir):
+            for f in files:
+                if ".tmp" in f:
+                    try:
+                        os.remove(os.path.join(root, f))
+                    except OSError:
+                        pass
+
+    def _trim(self):
+        """Keep all kept audio under MAX_CACHE_MB: remove the least recently used files."""
+        files, total = [], 0
+        for root, _, names in os.walk(self.cache_dir):
+            for f in names:
+                path = os.path.join(root, f)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                files.append((st.st_mtime, st.st_size, path))
+                total += st.st_size
+        for _, size, path in sorted(files):
+            if total <= MAX_CACHE_MB * 1e6:
+                break
+            try:
+                os.remove(path)
+                total -= size
+            except OSError:
+                pass
+
     def saved_settings_changed(self):
         """Called after new settings are saved: drop audio kept for other settings."""
         self._prune_dirs(keep_only_current=True)
 
     def clear(self):
+        self.stop_making_all()
         shutil.rmtree(self.cache_dir, ignore_errors=True)
 
     def stats(self):
@@ -469,11 +613,16 @@ class PageVoice:
                 return False
             self.job = {"running": True, "done": 0, "made": 0, "failed": 0, "total": 0,
                         "started": time.time(), "error": ""}
-        threading.Thread(target=self._make_all, args=(max_press,), daemon=True).start()
+        self.job_thread = threading.Thread(target=self._make_all, args=(max_press,), daemon=True)
+        self.job_thread.start()
         return True
 
-    def stop_making_all(self):
+    def stop_making_all(self, wait=10):
+        """Stop "make all messages" and wait (a little) until it has stopped."""
         self.job["stop"] = True
+        t = self.job_thread
+        if t is not None and t is not threading.current_thread():
+            t.join(wait)
 
     def _make_all(self, max_press):
         vs = self.settings()
@@ -490,6 +639,8 @@ class PageVoice:
                     while self.page_busy() and not self.job.get("stop"):
                         time.sleep(0.5)             # a page is going out: don't take the CPU
                     self.engine.wait_turn()
+                    if self.job.get("stop") or self.settings() != vs:
+                        continue                    # (the loop's first check ends it)
                     try:
                         self.frames(lang, lv, segs, urgent=False, timeout=SLOW_TIMEOUT_S)
                         self.job["made"] += 1

@@ -5,7 +5,7 @@
 # By Ethan Brady & Ryan Raikes
 #
 # Voices: en_US-test-voice, en_US-other-voice, es_MX-test-voice.
-# A text containing SLOW makes it wait 3 s; DIE makes it exit at once;
+# A text containing SLOW makes it wait 5 s; DIE makes it exit at once;
 # NOSOUND makes it answer with no audio. Each request it speaks is appended to
 # requests.log in the voices folder it was given (a test's temporary folder).
 
@@ -24,7 +24,7 @@ def speak(req):
         raise ValueError("voice not installed: %s" % req.get("voice"))
     texts = " ".join(s.get("text", "") for s in req.get("segments", []))
     if "SLOW" in texts:
-        time.sleep(3)
+        time.sleep(5)
     if "DIE" in texts:
         os._exit(1)
     n = 0 if "NOSOUND" in texts else sum(80 if "text" in s else 8 * int(s["pause_ms"]) for s in req["segments"])

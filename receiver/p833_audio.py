@@ -19,6 +19,7 @@ import math
 import os
 import re
 import sys
+import time
 import unicodedata
 import wave
 from array import array
@@ -252,33 +253,41 @@ class AudioLibrary:
 
     def build(self, cfg, code, press, vs=None, urgent=True, timeout=None):
         """Return (WAV bytes, list of notes: out-of-date clips, missing tone, Piper fallbacks, ...).
-        vs: voice settings to use instead of the saved ones (a preview)."""
+        vs: voice settings to use instead of the saved ones (a preview). timeout: the most time
+        the page spends on Piper in all (default: the voice's page budget); kept sentences
+        take none, and what doesn't fit in it comes from the recorded clips."""
         vs = self.piper_settings(vs)
+        piper = bool(vs)
         if self.load_error and not vs:
             raise AudioError(self.load_error)
         opts = cfg.get("audio", {})
         langs = [l for l in ("en", "es") if l in opts.get("languages", ["en", "es"])]
-        body, notes = b"", []
-        for i, lang in enumerate(langs):
-            if i:
-                body += silence(_gap(cfg, "lang_gap_ms"))
+        end = time.monotonic() + (timeout or getattr(self.voice, "page_budget", 10))
+        parts, notes = [], []
+        for lang in langs:
             if vs:
                 try:
-                    body += self.voice.sentence(lang, code, press, vs=vs, urgent=urgent,
-                                                **({"timeout": timeout} if timeout else {}))
+                    parts.append(self.voice.sentence(lang, code, press, vs=vs, urgent=urgent,
+                                                     timeout=max(0.0, end - time.monotonic())))
                     continue
-                except AudioError as e:
-                    notes.append("Piper voice failed (%s), so the %s sentence is the recorded clip" % (e, lang))
+                except Exception as e:      # whatever went wrong, the page goes on (any bug included)
+                    why = e if isinstance(e, AudioError) else "%s: %s" % (e.__class__.__name__, e)
                     if self.load_error:
-                        raise AudioError("%s; and %s" % (e, self.load_error))
+                        notes.append("Piper voice failed (%s) and there are no recordings, so the page has "
+                                     "no %s sentence" % (why, lang))
+                        continue
+                    notes.append("Piper voice failed (%s), so the %s sentence is the recorded clip" % (why, lang))
+                    vs = None                   # and the rest of this page uses the recordings at once
             if press > self.max_press and "press %d is above" % press not in " ".join(notes):
                 notes.append("press %d is above the recorded 1-%d, so the page says press number unknown"
                              % (press, self.max_press))
             keys, warn = self.pieces(cfg, code, press, lang)
             notes += ["clip %s no longer matches the config wording" % k for k in warn]
-            for k in keys:
-                body += self._frames(k)
-        lead, tone_notes = self._lead_in_safe(cfg, code, bool(vs))
+            parts.append(b"".join(self._frames(k) for k in keys))
+        if not parts:
+            raise AudioError("; ".join(notes) or "nothing to say")
+        body = silence(_gap(cfg, "lang_gap_ms")).join(parts)
+        lead, tone_notes = self._lead_in_safe(cfg, code, piper)
         return self._wrap(lead, body, opts), notes + tone_notes
 
     def _lead_in_safe(self, cfg, code, piper):
@@ -289,16 +298,26 @@ class AudioLibrary:
                 raise
             return b"", ["no tone (%s)" % e]
 
-    def build_custom(self, cfg, en, es, vs=None):
+    def build_custom(self, cfg, en, es, vs=None, urgent=True):
         """A page of free text, spoken by Piper with the page voice (or, while pages use the
         recorded clips, with the voices the clips were made with)."""
         if self.voice is None or not self.voice.ready():
             raise AudioError("custom text needs Piper on the laptop (sudo bash install/install_tts.sh)")
         vs = vs or self.voice.settings()
         opts = cfg.get("audio", {})
-        body = self.voice.text("en", en, vs=vs)
+        end = time.monotonic() + getattr(self.voice, "page_budget", 10)
+        try:
+            body = self.voice.text("en", en, vs=vs, urgent=urgent, timeout=max(0.0, end - time.monotonic()))
+        except AudioError:
+            raise
+        except Exception as e:
+            raise AudioError("%s: %s" % (e.__class__.__name__, e))
         if es and "es" in opts.get("languages", ["en", "es"]):
-            body += silence(_gap(cfg, "lang_gap_ms")) + self.voice.text("es", es, vs=vs)
+            try:
+                body += silence(_gap(cfg, "lang_gap_ms")) + self.voice.text(
+                    "es", es, vs=vs, urgent=urgent, timeout=max(0.0, end - time.monotonic()))
+            except Exception:
+                pass                         # the English part still goes out
         lead, notes = self._lead_in_safe(cfg, None, True)
         return self._wrap(lead, body, opts)
 

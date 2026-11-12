@@ -104,7 +104,7 @@ Open `https://<laptop IP>:8833/admin` (plain `http://` is sent there). The first
 | **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
 | **Send a test call** | Pick a board, a call type (2 to 9) and a press. **1. Preview** shows the exact words and plays the exact audio, sending nothing. **2. Send** goes through exactly the same path as a real call from that board, and is logged with the detail "admin page test". |
 | **Add or rename a board** | Enter the board ID (it must match the ID in that board's firmware) and a cell name. Using an existing ID renames its cell. |
-| **Send a custom page** | Type your own English and, optionally, Spanish text and pick a zone. **Preview** shows it; there is no audio for free text. It is logged as code "custom". |
+| **Send a custom page** | Type your own English and, optionally, Spanish text and pick a zone. It is spoken by Piper with the page voice (see "Page voice"), and **Preview** lets you hear it. Without Piper installed, a live custom page fails. It is logged as code "custom". |
 | **Boards table** | **Remove** takes a board off the list. A board that calls in but isn't on the list shows an **Add** box in its row. |
 
 With dry run off, every test or custom page is really dialed (once the phone step exists).
@@ -249,28 +249,35 @@ installed (see "Set up once" under Voice lab).
    - **digit by digit** ticked: "press two, seven"; unticked: "press twenty-seven". English and Spanish each
      have their own tick box (English is ticked and Spanish isn't, like the recordings).
    - **Pause between digits**: 0 says them like the recordings ("two, seven"). A number such as 300 says
-     each digit on its own with that many milliseconds of silence between.
+     each digit on its own with that many milliseconds of silence between (at most 800: a longer silence can
+     make the feedback eliminator end the page).
 2. **Preview** plays a whole page (tone, English, Spanish, repeats, page volume) for the code and press
    you pick, in your browser. Nothing is saved or sent.
 3. **Save as the page voice** when it sounds right. From then on:
    - each page is spoken by Piper as it comes in, and the spoken sentence is kept on the laptop
-     (`/var/lib/p833-receiver/voice_cache`), so the same message plays straight from disk next time;
+     (`/var/lib/p833-receiver/voice_cache`, at most 300 MB; the least used goes first), so the same message
+     plays straight from disk next time;
    - changing any setting (or the wording in `config.json`) makes new audio for the messages affected;
    - presses above 100 are spoken properly (the recordings only go to 100), and custom pages are spoken too.
 4. **Make all messages now** (optional) speaks every message (codes 2 to 9, presses 0 to 100, both
-   languages, about 1,600 sentences) in the background, so no page ever waits for Piper. It takes a few
-   minutes, runs at low priority and pauses while a page is going out.
+   languages, 1,616 sentences, about 50 MB) in the background, so no page ever waits for Piper. Measured
+   here it took about 4.5 minutes. It runs at low priority and pauses while a page is going out.
 5. **Go back to the recorded clips** returns to the shipped recordings at any time (your Piper settings stay
    in the form). **Remove kept audio** clears the kept sentences.
 
-How fast is it? Measured on a 4-core 2.1 GHz Xeon: loading a voice takes about 1.5 s and 200 to 250 MB of
-memory, once; after that a sentence takes about 0.15 s, and a kept sentence about 0.001 s. With the Piper
-voice saved, the laptop keeps both voices loaded (about 300 to 500 MB of memory), so a new message adds well
-under a second to a page. Piper runs at a lower priority than the receiver, so it doesn't hold up the phone
-call. A slower laptop takes longer, so check the first page after saving.
+How fast is it? Measured on a 4-core 2.1 GHz Xeon: loading a voice takes about 1.5 s, once; after that a
+sentence takes about 0.15 s, and a kept sentence about 0.001 s. A new message reached the call log 0.6 s
+after the call came in; the same message again, 0.08 s. With the Piper voice saved, the laptop keeps Piper
+running with both voices loaded, which used 550 to 700 MB of memory here. Piper runs at a lower priority
+than the receiver, so it doesn't hold up the phone call. A slower laptop takes longer, so check the first
+page after saving.
 
-A page never fails because of Piper: if Piper isn't installed, stops, or takes over 15 s, that sentence
-comes from the recorded clips instead, and the call log's detail says so.
+A page never fails because of Piper. A page spends at most 10 s on Piper in all; if Piper isn't installed,
+stops, or is too slow, that sentence comes from the recorded clips instead, and the call log's detail says
+so. A page waits at most 3 s for Piper to be free (for example while you preview), and after one Piper
+problem the rest of that page uses the recordings. After Piper hangs or crashes on a page, pages use the
+recorded clips for a minute while Piper restarts in the background. Previews, the voice lab and Make all
+wait for a page that needs Piper before they start.
 
 ## Voice lab (try voices, speed and pauses)
 

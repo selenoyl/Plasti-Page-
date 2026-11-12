@@ -738,6 +738,9 @@ class PageWorker(threading.Thread):
             return wav, ""
         except AudioError as e:
             return None, "no audio: %s" % e
+        except Exception as e:          # a bug must never stop the page worker
+            LOG.exception("making the page audio failed")
+            return None, "no audio: %s: %s" % (e.__class__.__name__, e)
 
     def run(self):
         while True:
@@ -828,6 +831,7 @@ def page_voice(app):
     if app.get("voice") is None:
         app["voice"] = p833_voice.PageVoice(app["cfg"], app["state_dir"])
         app["voice"].installed = lambda: tts_voices(app["cfg"])
+        app["voice"].recorded = app["worker"].audio.manifest
         app["worker"].audio.voice = app["voice"]
     return app["voice"]
 
@@ -1277,7 +1281,8 @@ class Handler(BaseHTTPRequestHandler):
             msg = "Piper isn't installed on this laptop (sudo bash install/install_tts.sh)."
             return (self._reply(400, msg.encode(), "text/plain; charset=utf-8") if preview
                     else self._back("Page voice not saved: " + msg))
-        vs, errs = p833_voice.parse_voice_form(form, tts_voices(cfg))
+        vs, errs = p833_voice.parse_voice_form(form, tts_voices(cfg), cfg["audio"].get("languages", ["en", "es"]),
+                                               pv.settings())
         if preview:
             try:
                 code, press = int(form.get("code", "2")), int(form.get("press", "27"))
@@ -1319,6 +1324,8 @@ class Handler(BaseHTTPRequestHandler):
         if parts.path == "/admin/preview":
             if not self._admin_ok():
                 return self._ask_password()
+            if not self._same_site():       # it can run Piper: only for the admin page itself
+                return self._reply(403, b"Only from the admin page.", "text/plain")
             q = {k: v[0].strip() for k, v in parse_qs(parts.query).items()}
             return self._reply(200, preview_obj(self.app, q))
         if parts.path in ("/admin/last_phone_test.wav", "/admin/last_page_line.wav",
@@ -1333,6 +1340,8 @@ class Handler(BaseHTTPRequestHandler):
         if parts.path == "/admin/listen":
             if not self._admin_ok():
                 return self._ask_password()
+            if not self._same_site():
+                return self._reply(403, b"Only from the admin page.", "text/plain")
             q = parse_qs(parts.query)
             if q.get("kind", [""])[0] == "custom":
                 en, es = q.get("en", [""])[0].strip(), q.get("es", [""])[0].strip()
@@ -1340,7 +1349,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._reply(400, b"English text is needed, each text up to 200 characters",
                                        "text/plain")
                 try:
-                    wav = self.app["worker"].audio.build_custom(self.app["cfg"], en, es)
+                    wav = self.app["worker"].audio.build_custom(self.app["cfg"], en, es, urgent=False)
                 except AudioError as e:
                     return self._reply(404, ("No audio: %s" % e).encode(), "text/plain; charset=utf-8")
                 return self._reply(200, wav, "audio/wav")
@@ -1351,7 +1360,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._reply(400, b"code 2-9 and press 0-999 needed", "text/plain")
             try:
-                wav, _notes = self.app["worker"].audio.build(self.app["cfg"], code, press)
+                wav, _notes = self.app["worker"].audio.build(self.app["cfg"], code, press, urgent=False,
+                                                             timeout=p833_voice.SLOW_TIMEOUT_S)
             except AudioError as e:
                 return self._reply(404, ("No audio: %s" % e).encode(), "text/plain; charset=utf-8")
             return self._reply(200, wav, "audio/wav")
@@ -1399,7 +1409,7 @@ def preview_obj(app, q):
         tone += " (twice)"
     notes, audio = [], "/admin/listen?code=%d&press=%d" % (code, press)
     try:
-        _, notes = lib.build(cfg, code, press)
+        _, notes = lib.build(cfg, code, press, urgent=False, timeout=p833_voice.SLOW_TIMEOUT_S)
     except AudioError as e:
         notes, audio = ["No audio: %s. A live page would fail." % e], None
     if press > lib.max_press and not lib.piper_settings():
@@ -1725,14 +1735,18 @@ carrier doesn't flag a burst or a fixed rhythm as spam.</td></tr>
 def voice_html(app):
     """The Page voice card: tune Piper settings, hear a page with them, save them for pages."""
     cfg, e = app["cfg"], html.escape
-    vs = p833_voice.voice_settings(cfg)
+    pv = page_voice(app)
+    vs = pv.settings()
     voices = tts_voices(cfg)
     using = ("<b>Pages now use %s.</b>" % e(p833_voice.describe(vs)))
     if not voices:
-        return ("<div class=card><h2>Page voice</h2><p>%s</p><p class=small>To speak pages live with a voice, "
+        back = ("<p><b>Piper isn't working on this laptop, so every page uses the recorded clips anyway.</b></p>"
+                "<form method=post action='/admin/voice/recorded'><button>Go back to the recorded clips</button>"
+                "</form>" if vs["source"] == "piper" else "")
+        return ("<div class=card><h2>Page voice</h2><p>%s</p>%s<p class=small>To speak pages live with a voice, "
                 "speed and number style you choose, install Piper on this laptop once (needs internet the "
-                "first time):</p><pre>sudo bash install/install_tts.sh</pre></div>" % using)
-    pv = page_voice(app)
+                "first time):</p><pre>sudo bash install/install_tts.sh</pre></div>" % (using, back))
+    missing = [vs[l]["voice"] for l in ("en", "es") if vs[l]["voice"] not in voices]
     kept, mb = pv.stats()
     job = dict(pv.job)
     if job.get("running"):
@@ -1751,15 +1765,15 @@ def voice_html(app):
                         for v in voices if v.startswith(lang + "_"))
         rows.append(
             "<tr><td><b>%s</b></td><td><select name=%s_voice>%s</select></td>"
-            "<td><input name=%s_pace type=number min=0.5 max=2.5 step=0.05 value='%.2f' style='width:5em'></td>"
+            "<td><input name=%s_pace type=number min=0.5 max=2.5 step=0.01 value='%.2f' style='width:5em'></td>"
             "<td><label><input type=checkbox name=%s_digits%s> digit by digit (%s)</label></td>"
-            "<td><input name=%s_digit_pause_ms type=number min=0 max=1500 step=50 value='%d' style='width:5em'> ms</td></tr>"
+            "<td><input name=%s_digit_pause_ms type=number min=0 max=800 step=1 value='%d' style='width:5em'> ms</td></tr>"
             % (name, lang, vopts, lang, float(lv["pace"]), lang, " checked" if lv["digits"] else "", eg,
                lang, int(lv["digit_pause_ms"])))
     copts = "".join("<option value='%d'>%d: %s</option>" % (c, c, e(cfg["codes"][c]["who"])) for c in sorted(cfg["codes"]))
     return """
 <div class=card><h2>Page voice</h2>
-<p>%s</p>
+<p>%s</p>%s
 <p class=small>Try settings here, hear a whole page with them, then save. Once saved, each page is spoken
 live by Piper on this laptop and the spoken message is kept, so the same message plays at once next time.
 If Piper ever fails or is slow, that sentence uses the recorded clip, so a page never fails because of it.
@@ -1782,7 +1796,9 @@ a number such as 300 says each digit on its own with that much silence between.<
 <button>Remove kept audio</button></form>
 <p class=small>Make all messages now speaks every message (codes 2-9, presses 0-100, both languages) in the
 background, a few minutes of work, so no page waits for Piper. Pages always go first.</p></div>
-""" % (using, "\n".join(rows), copts, kept, mb, jobline,
+""" % (using, ("<p class=small><b>Not installed:</b> %s. Pick another voice, or install it: "
+               "<code>sudo bash install/install_tts.sh %s</code></p>" % (e(", ".join(missing)), e(" ".join(missing)))
+               if missing else ""), "\n".join(rows), copts, kept, mb, jobline,
        "" if vs["source"] == "piper" else " disabled", "" if vs["source"] == "piper" else " disabled")
 
 
@@ -1834,6 +1850,7 @@ function p833Lab(){
 function p833Voice(){
   dirty=true;
   var f=document.getElementById('voiceform'), box=document.getElementById('prev-voice');
+  if(!f.reportValidity()){return;}              // the same checks as Save
   box.innerHTML='Speaking... (a few seconds the first time a voice is used)';
   fetch('/admin/voice/preview',{method:'POST',body:new URLSearchParams(new FormData(f)),credentials:'same-origin'}).then(function(r){
     if(!r.ok){return r.text().then(function(t){box.innerHTML=p833Esc(t);});}
@@ -2093,7 +2110,7 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <button>2. Send custom page</button></form>
 <div id=prev-custom class=preview></div>
 <p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
-Custom text has no recorded audio yet, so with dry run off a custom page fails until on-laptop speech is added.</p></div>
+Custom text is spoken by Piper with the page voice (Preview lets you hear it); without Piper on the laptop, a live custom page fails.</p></div>
 """ % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + sms_html(app) \
             + voice_html(app) + lab_html(app) + PREVIEW_JS
 
@@ -2164,6 +2181,7 @@ def main(argv=None):
     voice = p833_voice.PageVoice(cfg, args.state_dir)
     voice.page_busy = lambda: worker.jobs.unfinished_tasks > 0
     voice.installed = lambda: tts_voices(cfg)
+    voice.recorded = worker.audio.manifest
     worker.audio.voice = voice
     voice.warm_up()
     LOG.info("page voice: %s", p833_voice.describe(voice.settings()))

@@ -715,7 +715,8 @@ class Server(unittest.TestCase):
         req = urllib.request.Request(url, data=data)
         if pw is not None:
             req.add_header("Authorization", "Basic " + base64.b64encode(("admin:" + pw).encode()).decode())
-        if origin == "self":
+        if origin == "self":                                   # like a browser on the admin page
+            req.add_header("Referer", "http://127.0.0.1:%d/admin" % self.port)
             origin = "http://127.0.0.1:%d" % self.port if data is not None else None
         if origin:
             req.add_header("Origin", origin)
@@ -868,7 +869,7 @@ class Server(unittest.TestCase):
         self.assertEqual(st, 401)
         url = "http://127.0.0.1:%d/admin/listen?code=8&press=27" % self.port
         req = urllib.request.Request(url, headers={"Authorization": "Basic " + base64.b64encode(
-            ("a:" + ADMIN_PW).encode()).decode()})
+            ("a:" + ADMIN_PW).encode()).decode(), "Referer": "http://127.0.0.1:%d/admin" % self.port})
         with urllib.request.urlopen(req) as r:
             self.assertEqual(r.headers["Content-Type"], "audio/wav")
             self.assertTrue(r.read().startswith(b"RIFF"))
@@ -1116,6 +1117,21 @@ class Server(unittest.TestCase):
         except OSError:
             return []
 
+    def test_listen_and_preview_only_from_the_admin_page(self):
+        q = "/admin/preview?" + urllib.parse.urlencode({"kind": "test", "code": "2", "press": "5", "board": "RSP_LH"})
+        self.assertEqual(self.admin(q)[0], 200)
+        self.assertEqual(self.admin(q, origin=None)[0], 403)            # e.g. an image tag on another site
+        self.assertEqual(self.admin("/admin/listen?code=2&press=5", origin=None)[0], 403)
+
+    def test_card_offers_the_way_back_when_piper_breaks(self):
+        self.use_fake_tts()
+        self.admin("/admin/voice/save", self.VOICE_FORM)
+        self.cfg["audio"]["tts_python"] = os.path.join(self.tmp, "gone")
+        R._voices_cache["at"] = 0
+        page = self.admin("/admin")[2]
+        self.assertIn("Piper isn't working", page)
+        self.assertIn("/admin/voice/recorded", page)
+
     def test_page_voice_card(self):
         page = self.admin("/admin")[2]
         self.assertIn("Page voice", page)
@@ -1206,7 +1222,8 @@ class Server(unittest.TestCase):
         prev = json.loads(self.admin("/admin/preview?" + q)[2])
         self.assertIn("/admin/listen?kind=custom", prev["audio"])
         req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, prev["audio"]), headers={
-            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode()})
+            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode(),
+            "Referer": "http://127.0.0.1:%d/admin" % self.port})
         with urllib.request.urlopen(req) as r:
             self.assertEqual((r.status, r.read(4)), (200, b"RIFF"))
 

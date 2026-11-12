@@ -24,6 +24,9 @@ LogsDirectory=p833-receiver
 LogsDirectoryMode=0750
 UMask=0027
 LimitNOFILE=4096
+# If memory runs out and the kernel stops the Piper helper, keep the receiver running
+# (pages then use the recorded clips). Older systemd ignores this line.
+OOMPolicy=continue
 # Sandbox. Settings an older systemd doesn't know are skipped with a note in the log.
 NoNewPrivileges=yes
 ProtectSystem=strict

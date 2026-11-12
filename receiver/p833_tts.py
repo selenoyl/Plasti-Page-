@@ -22,6 +22,7 @@
 #
 # Each text segment is spoken as its own utterance; pauses are exact.
 
+import collections
 import io
 import json
 import os
@@ -73,17 +74,19 @@ def list_voices(voices_dir):
     return out
 
 
-_LOADED = {}            # voice name -> loaded PiperVoice (serve keeps them)
-MAX_LOADED = 4          # about 100 to 250 MB each
+_LOADED = collections.OrderedDict()   # voice name -> loaded PiperVoice (serve keeps them), last used last
+MAX_LOADED = 3          # about 150 to 300 MB each; the least recently used goes first
 
 
 def load_voice(voices_dir, voice_name):
     from piper import PiperVoice
     if voice_name not in list_voices(voices_dir):
         raise ValueError("voice not installed: %s" % voice_name)
-    if voice_name not in _LOADED:
+    if voice_name in _LOADED:
+        _LOADED.move_to_end(voice_name)
+    else:
         if len(_LOADED) >= MAX_LOADED:
-            _LOADED.pop(next(iter(_LOADED)))
+            _LOADED.popitem(last=False)
         _LOADED[voice_name] = PiperVoice.load(os.path.join(voices_dir, voice_name + ".onnx"))
     return _LOADED[voice_name]
 
@@ -120,6 +123,13 @@ def speak(voices_dir, req):
 
 
 def serve(voices_dir):
+    # If memory runs out, the kernel should stop this helper (the receiver then uses the
+    # recorded clips and starts it again), not the receiver.
+    try:
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("800")
+    except OSError:
+        pass
     out = sys.stdout.buffer
     for line in sys.stdin.buffer:
         if not line.strip():
