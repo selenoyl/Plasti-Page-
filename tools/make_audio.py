@@ -2,21 +2,21 @@
 # P833 Call Receiver - make the spoken page clips.
 # By Ethan Brady & Ryan Raikes
 #
-# Reads the page wording from a config.json and records every piece with the
-# Piper offline voice, in English and Spanish, as phone-quality WAV files
-# (8 kHz, 16-bit, mono, trimmed, 200-3400 Hz):
+# Reads the page wording from a config.json and records every message as ONE
+# WHOLE SENTENCE with the Piper offline voice, in English and Spanish, as
+# phone-quality WAV files (8 kHz, 8-bit mu-law, mono, trimmed, 200-3400 Hz):
 #
-#   <out>/<lang>/c<code>_post.wav    "for camera fault."  (codes with a reason)
+#   <out>/<lang>/s/c<code>/<1..100>.wav  the whole sentence for that code and press,
+#                                    e.g. "Maintenance requested to press two, seven."
+#                                    (English reads the press digit by digit; Spanish
+#                                    as a number; see audio.speak_digits)
 #   <out>/<lang>/c<code>_nopress.wav the whole press-0 message
-#   <out>/<lang>/lead/<start>.wav    "Maintenance requested to press number", one per
-#                                    department (distinct start of the message)
-#   <out>/<lang>/n/<1..100>.wav      the press number, shared by all departments
-#                                    (--max-press; higher presses say "unknown")
-#   <out>/chime.wav                  attention chime played before a page
+#   <out>/chime.wav                  attention chime (16-bit PCM)
 #   <out>/manifest.json              the text of every clip, so the receiver can
 #                                    tell when the clips no longer match the config
 #
-# The receiver joins pieces at page time: chime, English, Spanish, (repeat).
+# Whole sentences flow naturally; nothing is joined mid-sentence. The receiver
+# plays: tone, English sentence, Spanish sentence, (repeat).
 # Only clips whose text changed are re-made, so a wording change is quick.
 #
 # Needs: Python 3.9+, piper-tts (pip install piper-tts), ffmpeg, and internet
@@ -39,7 +39,7 @@ import wave
 
 RATE = 8000
 DEFAULT_VOICES = {"en": "en_US-hfc_female-medium", "es": "es_MX-claude-high"}
-NUMBER_LENGTH_SCALE = 1.35   # numbers said slower than the rest, so they're easier to catch on a PA
+LENGTH_SCALE = 1.25   # speaking pace (above 1 = slower); 1.25 was chosen on the floor (sample W2)
 MAX_PRESS = 100     # press numbers recorded: 1 to this; higher presses page as "press unknown"
 # Trim silence gently: -60 dB and keep 60 ms before the first sound, so soft
 # starts ("five", "six", "seis") are not clipped.
@@ -61,28 +61,19 @@ def spoken(lang, text):
 
 # The receiver's own splitting rules, so the clips always match how it joins them.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "receiver"))
-from p833_audio import lead_key, number_key, parts, split_text  # noqa: E402,F401
+from p833_audio import sentence_key, spoken_text  # noqa: E402
 
 
 def clip_plan(cfg, max_press=MAX_PRESS):
-    """Every clip to make: {relative path: (lang, text)}.
-
-    'Maintenance requested to press number 27 for camera fault.' is played as
-    'Maintenance requested to press number' + '27' + 'for camera fault.'
-    The first part is one recording per department (codes with the same start
-    share it); the numbers are shared by every department."""
+    """Every clip to make: {relative path: (lang, text)}. One whole sentence per
+    code, press and language, plus the press-unknown message per code."""
     cfg = dict(cfg, codes={int(k): v for k, v in cfg["codes"].items()})
     plan = {}
     for code, c in sorted(cfg["codes"].items()):
         for lang in ("en", "es"):
-            lead, post = parts(cfg, code, lang)
-            plan[lead_key(lang, lead)] = (lang, lead)
-            if post:
-                plan["%s/c%d_post.wav" % (lang, code)] = (lang, post)
             plan["%s/c%d_nopress.wav" % (lang, code)] = (lang, c.get(lang + "_no_press", c[lang]))
-    for lang in ("en", "es"):
-        for n in range(1, max_press + 1):
-            plan[number_key(lang, n)] = (lang, str(n))
+            for n in range(1, max_press + 1):
+                plan[sentence_key(lang, code, n)] = (lang, spoken_text(cfg, code, n, lang))
     return plan
 
 
@@ -109,10 +100,8 @@ def main():
     p.add_argument("--voices-dir", default=os.path.expanduser("~/.cache/p833-voices"))
     p.add_argument("--voice-en", default=DEFAULT_VOICES["en"])
     p.add_argument("--voice-es", default=DEFAULT_VOICES["es"])
-    p.add_argument("--length-scale", type=float, default=1.05,
+    p.add_argument("--length-scale", type=float, default=LENGTH_SCALE,
                    help="speaking pace; above 1 is slower (clearer on a PA)")
-    p.add_argument("--number-length-scale", type=float, default=NUMBER_LENGTH_SCALE,
-                   help="speaking pace for the press numbers (higher = slower)")
     p.add_argument("--max-press", type=int, default=MAX_PRESS,
                    help="record press numbers 1 to this (1-999); higher presses page as press unknown")
     p.add_argument("--all", action="store_true", help="re-make every clip, not just changed ones")
@@ -141,7 +130,7 @@ def main():
     except (OSError, ValueError):
         old = {}
     same_voices = (old.get("voices") == voices and old.get("length_scale") == a.length_scale
-                   and old.get("number_length_scale") == a.number_length_scale
+                   and old.get("format") == "mulaw"
                    and old.get("filter") == FILTER and old.get("pronounce") == PRONOUNCE)
     old_clips = old.get("clips", {}) if same_voices and not a.all else {}
 
@@ -157,7 +146,6 @@ def main():
             download_voice(voices[lang], Path(a.voices_dir))
             loaded[lang] = PiperVoice.load(os.path.join(a.voices_dir, voices[lang] + ".onnx"))
     syn = SynthesisConfig(length_scale=a.length_scale)
-    syn_number = SynthesisConfig(length_scale=a.number_length_scale)
 
     tmpdir = tempfile.mkdtemp()
     start = time.time()
@@ -166,12 +154,11 @@ def main():
             lang, text = plan[key]
             raw = os.path.join(tmpdir, "raw.wav")
             with wave.open(raw, "wb") as w:
-                loaded[lang].synthesize_wav(spoken(lang, text), w,
-                                            syn_config=syn_number if "/n/" in key else syn)
+                loaded[lang].synthesize_wav(spoken(lang, text), w, syn_config=syn)
             dest = os.path.join(a.out, key)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", raw, "-af", FILTER,
-                            "-ar", str(RATE), "-ac", "1", "-c:a", "pcm_s16le",
+                            "-ar", str(RATE), "-ac", "1", "-c:a", "pcm_mulaw",
                             "-bitexact", "-map_metadata", "-1", dest], check=True)
             if i % 200 == 0 or i == len(todo):
                 print("  %d/%d (%.0f s)" % (i, len(todo), time.time() - start))
@@ -191,8 +178,8 @@ def main():
     make_chime(os.path.join(a.out, "chime.wav"))
     manifest = {"_about": "P833 page audio. By Ethan Brady & Ryan Raikes. Made by tools/make_audio.py; "
                           "do not edit by hand.",
-                "rate": RATE, "voices": voices, "length_scale": a.length_scale,
-                "number_length_scale": a.number_length_scale, "max_press": a.max_press,
+                "rate": RATE, "format": "mulaw", "voices": voices, "length_scale": a.length_scale,
+                "max_press": a.max_press,
                 "filter": FILTER, "pronounce": PRONOUNCE,
                 "clips": {k: t for k, (_, t) in sorted(plan.items())}}
     with open(man_path, "w", encoding="utf-8") as f:

@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -236,6 +236,7 @@ def load_config(path):
     audio.setdefault("lang_gap_ms", 400)
     audio.setdefault("repeat_gap_ms", 500)
     audio.setdefault("tone_gap_ms", 250)
+    audio.setdefault("speak_digits", ["en"])     # languages whose press numbers are read digit by digit
     phone = cfg.setdefault("phone", {})
     for k, v in PHONE_DEFAULTS.items():
         phone.setdefault(k, v)

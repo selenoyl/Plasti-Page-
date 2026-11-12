@@ -2,9 +2,11 @@
 # By Ethan Brady & Ryan Raikes
 #
 # The clips are made by tools/make_audio.py (see its header for the layout).
-# A page is: department tone, English, pause, Spanish, and the whole thing
-# repeated. Tones are in <audio>/tones/single (played once) and
-# <audio>/tones/twice (the tone played twice); a code with no tone gets the chime.
+# Every message is one whole recorded sentence per code, press and language, so
+# it flows naturally (nothing is joined mid-sentence). A page is: department
+# tone, the English sentence, a pause, the Spanish sentence, and the whole thing
+# repeated. Tones are in <audio>/tones/single; a code with no tone gets the chime.
+# Clips may be 16-bit PCM or 8-bit mu-law WAV (phone quality, half the size).
 # Standard library only; Python 3.6+.
 
 import io
@@ -22,8 +24,12 @@ RATE = 8000
 # the admin page). Paging feedback eliminators end a page after a short silence, so
 # every pause stays well under a second.
 DEFAULT_GAPS = {"lang_gap_ms": 400, "repeat_gap_ms": 500, "tone_gap_ms": 250}
-PIECE_GAP_MS = 40    # pause before the reason ("for camera fault.")
-NUMBER_GAP_MS = 250  # pause between "...press number" and the number
+# How press numbers are spoken: languages listed in audio.speak_digits are read
+# digit by digit ("two, seven"); the others as a whole number ("veintisiete").
+DIGIT_WORDS = {
+    "en": ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"],
+    "es": ["cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve"],
+}
 
 
 class AudioError(Exception):
@@ -43,22 +49,73 @@ def slug(text):
     return "_".join(re.findall(r"[a-z0-9]+", t))[:60] or "x"
 
 
-def parts(cfg, code, lang):
-    """(lead, tail) around the press number.
-
-    'Maintenance requested to press number {press} for camera fault.' is played as
-    the lead 'Maintenance requested to press number' (recorded as one phrase, once
-    per department), a short pause, the number ('27', shared by all departments),
-    then the tail 'for camera fault.'"""
-    return split_text(cfg["codes"][code][lang])
+def speak_digits(cfg, lang):
+    return lang in cfg.get("audio", {}).get("speak_digits", ["en"])
 
 
-def lead_key(lang, lead):
-    return "%s/lead/%s.wav" % (lang, slug(lead))
+def spoken_press(cfg, press, lang):
+    """How the press number is said: '2, 7' style words or the plain number."""
+    if speak_digits(cfg, lang) and lang in DIGIT_WORDS:
+        return ", ".join(DIGIT_WORDS[lang][int(d)] for d in str(press))
+    return str(press)
 
 
-def number_key(lang, press):
-    return "%s/n/%d.wav" % (lang, press)
+def spoken_text(cfg, code, press, lang):
+    """The exact sentence recorded for this code, press and language."""
+    return cfg["codes"][code][lang].replace("{press}", spoken_press(cfg, press, lang))
+
+
+def sentence_key(lang, code, press):
+    return "%s/s/c%d/%d.wav" % (lang, code, press)
+
+
+def read_wav(path):
+    """16-bit PCM samples from a mono 8 kHz WAV that is either 16-bit PCM or
+    8-bit mu-law (format 7), which Python's wave module can't read."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError("not a WAV file")
+    pos, fmt, body = 12, None, None
+    while pos + 8 <= len(data):
+        cid, size = data[pos:pos + 4], int.from_bytes(data[pos + 4:pos + 8], "little")
+        chunk = data[pos + 8:pos + 8 + size]
+        if cid == b"fmt ":
+            fmt = (int.from_bytes(chunk[0:2], "little"), int.from_bytes(chunk[2:4], "little"),
+                   int.from_bytes(chunk[4:8], "little"), int.from_bytes(chunk[14:16], "little"))
+        elif cid == b"data":
+            body = chunk
+        pos += 8 + size + (size & 1)
+    if not fmt or body is None:
+        raise ValueError("WAV has no fmt or data")
+    tag, channels, rate, bits = fmt
+    if channels != 1 or rate != RATE:
+        raise ValueError("not 8 kHz mono")
+    if tag == 1 and bits == 16:
+        return body[:len(body) // 2 * 2]
+    if tag == 7 and bits == 8:
+        return _ulaw_decode(body)
+    raise ValueError("WAV format %d/%d-bit not supported" % (tag, bits))
+
+
+def _ulaw_sample(u):
+    u = ~u & 0xFF
+    sign, exponent, mantissa = u & 0x80, (u >> 4) & 7, u & 0x0F
+    s = (((mantissa << 3) + 0x84) << exponent) - 0x84
+    return -s if sign else s
+
+
+_ULAW_TO_PCM = None
+
+
+def _ulaw_decode(data):
+    global _ULAW_TO_PCM
+    if _ULAW_TO_PCM is None:
+        _ULAW_TO_PCM = [_ulaw_sample(u) for u in range(256)]
+    a = array("h", [_ULAW_TO_PCM[b] for b in data])
+    if sys.byteorder != "little":
+        a.byteswap()
+    return a.tobytes()
 
 
 _GAIN_TABLES = {}
@@ -122,11 +179,8 @@ class AudioLibrary:
             return self.cache[key]
         path = os.path.join(self.folder, key)
         try:
-            with wave.open(path, "rb") as w:
-                if (w.getframerate(), w.getsampwidth(), w.getnchannels()) != (RATE, 2, 1):
-                    raise AudioError("%s is not 8 kHz 16-bit mono" % key)
-                data = w.readframes(w.getnframes())
-        except (OSError, EOFError, wave.Error) as e:
+            data = read_wav(path)
+        except (OSError, ValueError) as e:
             raise AudioError("clip %s missing or unreadable (%s)" % (key, e))
         if len(self.cache) < 4000:
             self.cache[key] = data
@@ -179,16 +233,10 @@ class AudioLibrary:
             if self.clips.get(key) not in (None, want):
                 warn.append(key)
             return keys, warn
-        lead, post = parts(cfg, code, lang)
-        keys = [lead_key(lang, lead), number_key(lang, press)]
-        expect = {keys[0]: lead, keys[1]: str(press)}
-        if post:
-            keys.append("%s/c%d_post.wav" % (lang, code))
-            expect[keys[-1]] = post
-        for k, t in expect.items():
-            if self.clips.get(k) not in (None, t):
-                warn.append(k)
-        return keys, warn
+        key = sentence_key(lang, code, press)
+        if self.clips.get(key) not in (None, spoken_text(cfg, code, press, lang)):
+            warn.append(key)
+        return [key], warn
 
     def build(self, cfg, code, press):
         """Return (WAV bytes, list of notes: out-of-date clips, missing tone, ...)."""
@@ -205,9 +253,7 @@ class AudioLibrary:
             notes += ["clip %s no longer matches the config wording" % k for k in warn]
             if i:
                 body += silence(_gap(cfg, "lang_gap_ms"))
-            for j, k in enumerate(keys):
-                if j:
-                    body += silence(NUMBER_GAP_MS if "/n/" in k else PIECE_GAP_MS)
+            for k in keys:
                 body += self._frames(k)
         lead, tone_notes = self.lead_in(cfg, code)
         return self._wrap(lead, body, opts), notes + tone_notes

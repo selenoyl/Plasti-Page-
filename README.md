@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.6.0:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.7.0:** receiving, checking, logging, dry-run paging, the
 admin page, the editable phone settings and the recorded page audio are in and
 tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
@@ -176,14 +176,14 @@ then the **department tone**, English, Spanish, and the tone and message again
   - A code with no tone, and custom pages, get a short chime instead.
   - To add a tone, put an 8 kHz 16-bit mono WAV with the same name in both `audio/tones/single/` and `audio/tones/twice/`.
 - **Voices** (free, offline Piper voices): English `en_US-hfc_female-medium`, Spanish `es_MX-claude-high` (Mexican).
-- **Press numbers 1 to 100 are recorded.** A press above 100 still pages, but says "press number unknown". The log and the Preview note it.
-- The clips live in `audio/` in the repository (243 files, 5 MB) and are installed to `/opt/p833-receiver/audio`.
-  - Pages say **"press number"**, then the number: "Maintenance requested to press number" + "27" ("Se solicita mantenimiento en la prensa número" + "27").
-  - The department phrase is **one recording per department** ("Maintenance requested to press number"), shared by codes with the same start (2, 8 and 9; 4 and 7). Recording the department word on its own made it sound like a different voice.
-  - The numbers 1 to 100 are recorded once per language and shared by every department, with a 120 ms pause before them.
-  - The reason for codes 7 to 9 follows the number ("for camera fault."). The press-unknown message is one whole recording per code.
+- **Every message is one whole recorded sentence** per call type, press and language, so it flows naturally; nothing is joined mid-sentence. They're spoken a little slower than normal (pace 1.25, sample W2).
+  - **English** reads the press **digit by digit**: "Maintenance requested to press two, seven."
+  - **Spanish** says the whole number: "Se solicita mantenimiento en la prensa 27."
+  - The setting `audio.speak_digits` lists which languages use digits.
+  - The log and the admin page still show "press 27".
+- **Presses 1 to 100 are recorded.** A press above 100 still pages, but says "press number unknown". The log and the Preview note it.
+- The clips live in `audio/` in the repository: 1,616 sentences, 49 MB, stored as 8-bit µ-law, the same format as the phone line. They're installed to `/opt/p833-receiver/audio`.
   - Words a voice mispronounces get a spoken spelling in `tools/make_audio.py` (`PRONOUNCE`). For example, the Spanish voice says "Red Rábit"; the page text doesn't change.
-- **Checked by machine:** every press 1 to 100 and every message, in both languages, was transcribed with a speech recognizer (Whisper), and the numbers all came out right.
 - **Volume:** "Page volume (dB)" on the admin page (default **+6**, range -6 to +12) makes the voice and tones louder before they go out, with a soft limiter, so peaks are rounded off instead of clipping. +6 dB is about 5 dB louder on average; +12 dB is about 9 dB louder. A speech recognizer still understood every page at +12 after phone encoding. Preview and Listen play at the same volume. The paging amplifier's volume knob and the HT813's FXO **Gain TX** are the other places to turn it up.
 - **Length:** a page is about 22 to 25 s with the message played twice, and about 30 s for the longest (Red Rabbit), including the 2.5 s of silence. Set "Times the message plays" to 1 on the admin page to roughly halve it.
 - On the admin page:
@@ -198,6 +198,8 @@ then the **department tone**, English, Spanish, and the tone and message again
 
   ```bash
   python3 tools/make_audio.py --config receiver/config.example.json --out audio --max-press 100
+
+  It takes about 6 minutes for all 1,616 sentences.
   ```
 
   Until the clips are re-made, the Audio box flags any that no longer match, and the old clips play. A page with a missing clip fails.

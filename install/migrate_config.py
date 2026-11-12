@@ -62,6 +62,23 @@ OLD_DEFAULTS = [
     ("8", "es", "Se solicita mantenimiento en la prensa {press} por falla de cámara."),
     ("9", "en", "Maintenance requested to press {press} for Red Rabbit failure."),
     ("9", "es", "Se solicita mantenimiento en la prensa {press} por falla de Red Rabbit."),
+    # 0.4.2 to 0.6.0 ("press number" / "prensa número")
+    ("2", "en", "Maintenance requested to press number {press}."),
+    ("2", "es", "Se solicita mantenimiento en la prensa número {press}."),
+    ("3", "en", "Technician requested to press number {press}."),
+    ("3", "es", "Se solicita un técnico en la prensa número {press}."),
+    ("4", "en", "Supervisor requested to press number {press}."),
+    ("4", "es", "Se solicita un supervisor en la prensa número {press}."),
+    ("5", "en", "Quality requested to press number {press}."),
+    ("5", "es", "Se solicita calidad en la prensa número {press}."),
+    ("6", "en", "Packaging requested to press number {press}."),
+    ("6", "es", "Se solicita empaque en la prensa número {press}."),
+    ("7", "en", "Supervisor requested to press number {press} for audit check-in."),
+    ("7", "es", "Se solicita un supervisor en la prensa número {press} para la revisión de auditoría."),
+    ("8", "en", "Maintenance requested to press number {press} for camera fault."),
+    ("8", "es", "Se solicita mantenimiento en la prensa número {press} por falla de cámara."),
+    ("9", "en", "Maintenance requested to press number {press} for Red Rabbit failure."),
+    ("9", "es", "Se solicita mantenimiento en la prensa número {press} por falla de Red Rabbit."),
 ]
 
 
