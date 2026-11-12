@@ -39,12 +39,13 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 import p833_audio  # noqa: E402
+import p833_logo  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.16.0"
+VERSION = "0.17.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -1245,18 +1246,22 @@ HOME_STYLE = """
 body.home{max-width:960px;margin:0 auto;padding:16px;box-sizing:border-box}
 .home .card,.home .msg{max-width:none}
 header.top{display:flex;justify-content:space-between;align-items:center;gap:12px}
-header.top h1{margin:8px 0}
+header.top h1{margin:6px 0;flex:1 1 auto;min-width:0}
+header.top h1 svg{display:block;width:100%;max-width:560px;height:auto}
 nav.lang{display:flex;flex-shrink:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
 nav.lang a{padding:7px 12px;color:var(--fg);text-decoration:none;font-size:15px}
 nav.lang a.on{background:var(--fg);color:var(--bg);font-weight:bold}
-@media (max-width:480px){header.top h1{font-size:24px} nav.lang a{padding:7px 9px}}
+@media (max-width:600px){header.top{flex-wrap:wrap;gap:8px} header.top nav.lang{order:-1;margin-left:auto}
+ header.top h1{flex-basis:100%}}
 .card label.tile{display:block;margin:0}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin:6px 0 14px}
+@media (min-width:600px){.tiles{grid-template-columns:repeat(auto-fill,minmax(172px,1fr))}}
 .tile{position:relative}
 .tile input{position:absolute;opacity:0;width:1px;height:1px;margin:0}
 .tile span{display:flex;flex-direction:column;justify-content:center;box-sizing:border-box;height:100%;
  min-height:64px;padding:10px;border:2px solid var(--line);border-radius:10px;background:var(--bg);
- text-align:center;font-size:18px;font-weight:bold;cursor:pointer}
+ text-align:center;font-size:clamp(15px,4.3vw,18px);line-height:1.2;font-weight:bold;cursor:pointer;
+ overflow-wrap:break-word;hyphens:auto}
 .tile small{font-weight:normal;font-size:14px}
 .tile em{font-style:normal;font-weight:normal;font-size:13px;color:var(--warn)}
 .tile input:checked+span{background:var(--fg);color:var(--bg);border-color:var(--fg)}
@@ -1367,8 +1372,8 @@ def home_html(app, lang="en", name="", msg="", ok=True):
         k, k, " class=on aria-current=true" if k == lang else "", label) for k, label in (("en", "English"), ("es", "Español")))
     return """<!doctype html><html lang=%s><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>%s</title><style>%s%s</style></head><body class=home>
-<header class=top><h1>PLASTI-PAGE</h1><nav class=lang aria-label='Language / Idioma'>%s</nav></header>
+<title>%s</title><link rel=icon href="%s"><style>%s%s</style></head><body class=home>
+<header class=top><h1 aria-label="PLASTI-PAGE">%s</h1><nav class=lang aria-label='Language / Idioma'>%s</nav></header>
 <p id=statusline>%s</p>
 %s%s
 <div class=card><h2>%s</h2>
@@ -1388,7 +1393,7 @@ def home_html(app, lang="en", name="", msg="", ok=True):
 <p class=small>%s</p>
 <footer class=credit>ETHAN BRADY &amp; RYAN RAIKES</footer>
 %s</body></html>""" % (
-        lang, e(T["title"]), PAGE_STYLE, HOME_STYLE, switch, live["status"],
+        lang, e(T["title"]), p833_logo.FAVICON, PAGE_STYLE, HOME_STYLE, p833_logo.svg(), switch, live["status"],
         "<div class='msg%s'>%s</div>" % ("" if ok else " err", e(msg)) if msg else "",
         "".join("<div class='msg err'>%s</div>" % e(w) for w in warns),
         e(T["card_page"]), e(T["who"]), "\n".join(tiles), e(T["press"]), e(T["press_eg"]), e(T["will_say"]),
@@ -2356,6 +2361,11 @@ input.wtxt{width:100%;min-width:16em;box-sizing:border-box;margin:1px 0}
 nav.tabs{display:flex;flex-wrap:wrap;gap:6px;position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;margin:8px 0 14px;border-bottom:1px solid var(--line)}
 nav.tabs button{padding:7px 14px;font-size:15px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;cursor:pointer}
 nav.tabs button.on{background:var(--fg);color:var(--bg);font-weight:bold}
+svg.logo .wm{fill:#004594}
+@media (prefers-color-scheme: dark){svg.logo .wm{fill:#9DBDF2}}
+h1.brand{display:flex;flex-wrap:wrap;align-items:center;gap:6px 18px;margin:6px 0 12px}
+h1.brand svg{display:block;width:440px;max-width:100%;height:auto}
+h1.brand .sub{font-size:22px}
 footer.credit{margin:32px 0 8px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;letter-spacing:.08em;opacity:.7;text-align:center}
 .preview{margin-top:10px;padding:8px 10px;border-left:4px solid var(--good)} .preview:empty{display:none}
 .preview audio{margin-top:8px;width:100%;max-width:520px}
@@ -3122,13 +3132,14 @@ Custom text is spoken by Piper with the page voice (Preview lets you hear it); w
     body = tab_sections(admin_html, tables) + PREVIEW_JS + TABS_JS if admin else tables
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PLASTI-PAGE Receiver</title><style>%s</style></head><body>
-<h1>PLASTI-PAGE RECEIVER%s</h1>
+<title>PLASTI-PAGE Receiver</title><link rel=icon href="%s"><style>%s</style></head><body>
+<h1 class=brand aria-label="PLASTI-PAGE RECEIVER%s">%s<span class=sub>RECEIVER%s</span></h1>
 <p id=statusline>%s</p>
 %s%s
 <footer class=credit>ETHAN BRADY &amp; RYAN RAIKES</footer>
 %s</body></html>""" % (
-        PAGE_STYLE, " - Admin" if admin else " - Log", live["status"],
+        p833_logo.FAVICON, PAGE_STYLE, " - Admin" if admin else " - Log", p833_logo.svg(),
+        " - Admin" if admin else " - Log", live["status"],
         "<div class=msg>%s</div>" % e(msg) if msg else "", body,
         ADMIN_LIVE_JS if admin else REFRESH_JS)
 

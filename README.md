@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.16.0:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.17.0:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -153,6 +153,7 @@ With dry run off, every test or custom page is really dialed.
 
 Open `https://<laptop IP>:8833/` (plain `http://` is sent there), on a PC, tablet or phone that can reach the laptop. It is made for the floor:
 
+- **Logo:** the PLASTI-PAGE logo, styled after the EPC logo, heads the paging page, the log and the admin page, and is the browser tab's icon.
 - **English / Español:** the switch in the top-right corner puts the whole page in English or Spanish: the buttons (Mantenimiento, Técnico, Calidad, Empaque, ...), the help text and the answers. The browser remembers the choice; the first time, it follows the phone's or PC's language. The pages themselves still play in English, then Spanish.
 
 - **Page someone to a press:** tap who (Maintenance, Technician, Supervisor, Quality, Packaging, or one with a reason, such as Maintenance, camera fault), type the press number, check the "Will say" line and tap **Page now**. It asks once more before it pages.
@@ -571,6 +572,8 @@ The plan. **Today the laptop, the HT813 and the boards are on the plant network,
 | `receiver/p833_voice.py` | The page voice: saved settings, live speech, the kept audio and Make all messages. |
 | `install/install_tts.sh` | Sets up the Voice lab: Piper and voices. |
 | `tools/make_audio.py` | Records the clips with Piper (run on a PC with internet). |
+| `tools/make_logo.py` | Makes the PLASTI-PAGE logo (`receiver/p833_logo.py` for the pages, and `plasti-page-logo.svg` for documents and signs). Run on a PC with `fonttools`. |
+| `plasti-page-logo.svg` | The logo as a file: styled after the EPC logo (red square, blue globe with a paging horn, bold blue name). |
 | `audio/` | The recorded clips and `manifest.json` (once made). |
 | `install/migrate_config.py` | Run by the installer: updates default wording in an installed config, keeping your own edits. |
 | `install/p833-receiver.service` | systemd unit. |

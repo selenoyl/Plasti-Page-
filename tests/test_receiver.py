@@ -1671,6 +1671,22 @@ class Server(unittest.TestCase):
         # the sign-in answer is in both languages
         self.assertIn("P\u00e1gina de voceo", self.home("/", pw=None)[2])
 
+    def test_logo_on_every_page(self):
+        import xml.etree.ElementTree as ET
+        import p833_logo as LOGO
+        self.set_paging_pw()
+        for page in (self.home("/")[2], self.get("/log"), self.admin("/admin")[2]):
+            self.assertIn('<svg class="logo" viewBox="0 0 %d %d"' % (LOGO.WIDTH, LOGO.HEIGHT), page)
+            self.assertIn('<link rel=icon href="data:image/svg+xml,', page)          # the browser tab's icon
+            self.assertNotIn("http://www.w3.org/2000/svg\" viewBox", page.split("<body")[1])   # inline, no file to fetch
+        self.assertIn('<h1 aria-label="PLASTI-PAGE">', self.home("/")[2])
+        ET.fromstring(LOGO.svg().replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1))   # well-formed
+        with open(os.path.join(ROOT, "plasti-page-logo.svg"), encoding="utf-8") as f:
+            logo = ET.fromstring(f.read())
+        self.assertEqual(logo.get("viewBox"), "0 0 %d %d" % (LOGO.WIDTH, LOGO.HEIGHT))
+        self.assertIn(LOGO.BLUE, LOGO.svg())
+        self.assertIn(LOGO.RED, LOGO.MARK)
+
     def test_home_screen_safety(self):
         self.set_paging_pw()
         self.assertEqual(self.home("/page/send", {"code": "2", "press": "5"}, origin="http://evil.example")[0], 403)
