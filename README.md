@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.12.1:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.12.2:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -168,17 +168,20 @@ then the **department tone**, English, Spanish, and the tone and message again
 
 - **Department tones** (`audio/tones/`, your andon tones, phone versions):
 
-  | Tone | Department | Codes |
+  | Tone (file) | Department | Codes |
   |---|---|---|
-  | maintenance bell | Maintenance | 2, 8 (camera fault), 9 (Red Rabbit) |
-  | technician wood | Technician | 3 |
-  | supervisor glide | Supervisor | 4, 7 (audit check-in) |
-  | quality flute | Quality | 5 |
-  | packaging pluck | Packaging | 6 |
+  | maintenance doorbell, "ding dong" (`6_maintenance_doorbell`) | Maintenance | 2, 8 (camera fault), 9 (Red Rabbit) |
+  | technician wood (`2_technician_wood`) | Technician | 3 |
+  | quality flute (`4_quality_flute`) | Supervisor | 4, 7 (audit check-in) |
+  | maintenance bell (`1_maintenance_bell`) | Quality | 5 |
+  | packaging pluck (`5_packaging_pluck`) | Packaging | 6 |
+  | supervisor glide (`3_supervisor_glide`) | not used now | |
 
-  - On the admin page (Phone and paging setup) you can change each code's tone, and set the tone to play **once**, **twice** (the `twice` tone files) or **off**.
+  The file names are from the original set; what matters is the table.
+  - On the admin page (Phone and paging setup) you can change each code's tone, and set the tone to play **once**, **twice** (the same tone twice with a short gap) or **off**.
   - A code with no tone, and custom pages, get a short chime instead.
-  - To add a tone, put an 8 kHz 16-bit mono WAV with the same name in both `audio/tones/single/` and `audio/tones/twice/`.
+  - To add a tone, put an 8 kHz 16-bit mono WAV in `audio/tones/single/`. The doorbell is made by `tools/make_doorbell.py`.
+  - **Keypad-tone guard:** the Nortel ATA2 listens to the line for keypad tones (DTMF), as from a phone. A tone that holds a steady pair of notes near a key's two tones for 40 ms or more can be heard as someone pressing that key during a page, so the page goes to the wrong zones or stops. Each tone is checked when it's first used; if it holds such a pair, those exact notes are cut out of it, narrowly, so it sounds nearly the same. Only the packaging pluck needs this: it held a "4" for 0.34 s.
 - **Voices** (free, offline Piper voices): English `en_US-hfc_female-medium`, Spanish `es_MX-claude-high` (Mexican).
 - **Every message is one whole recorded sentence** per call type, press and language, so it flows naturally; nothing is joined mid-sentence. They're spoken a little slower than normal (pace 1.25, sample W2).
   - **English** reads the press **digit by digit**: "Maintenance requested to press two, seven."

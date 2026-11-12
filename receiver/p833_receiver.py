@@ -43,7 +43,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.12.1"
+VERSION = "0.12.2"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -384,6 +384,9 @@ class State:
         ("tones-2026-11-12", "9", "1_maintenance_bell", "6_maintenance_doorbell"),
         ("tones-2026-11-12", "4", "3_supervisor_glide", "1_maintenance_bell"),
         ("tones-2026-11-12", "7", "3_supervisor_glide", "1_maintenance_bell"),
+        ("tones-2026-11-12b", "4", "1_maintenance_bell", "4_quality_flute"),     # Supervisor <-> Quality
+        ("tones-2026-11-12b", "7", "1_maintenance_bell", "4_quality_flute"),
+        ("tones-2026-11-12b", "5", "4_quality_flute", "1_maintenance_bell"),
     ]
 
     def _change_saved_settings(self):

@@ -189,7 +189,8 @@ class Audio(unittest.TestCase):
                                              "4_quality_flute", "5_packaging_pluck", "6_maintenance_doorbell"])
         # Maintenance has the doorbell, Supervisor the bell
         self.assertEqual([self.cfg["codes"][c]["tone"] for c in (2, 8, 9)], ["6_maintenance_doorbell"] * 3)
-        self.assertEqual([self.cfg["codes"][c]["tone"] for c in (4, 7)], ["1_maintenance_bell"] * 2)
+        self.assertEqual([self.cfg["codes"][c]["tone"] for c in (4, 7)], ["4_quality_flute"] * 2)   # Supervisor
+        self.assertEqual(self.cfg["codes"][5]["tone"], "1_maintenance_bell")                        # Quality
         # a missing tone falls back to the chime, with a note and a check problem
         cfg = dict(self.cfg, codes={c: dict(v) for c, v in self.cfg["codes"].items()})
         cfg["codes"][5]["tone"] = "nope"
@@ -292,8 +293,9 @@ class SavedTones(unittest.TestCase):
             st = R.State(R.load_config(CONFIG), tmp, tmp)
             tones = {c: st.cfg["codes"][c]["tone"] for c in range(2, 10)}
             self.assertEqual([tones[c] for c in (2, 8, 9)], ["6_maintenance_doorbell"] * 3)
-            self.assertEqual(tones[4], "1_maintenance_bell")
-            self.assertEqual(tones[7], "4_quality_flute")             # chosen on purpose: kept
+            self.assertEqual(tones[4], "4_quality_flute")             # Supervisor: glide, then bell, then flute
+            self.assertEqual(tones[5], "1_maintenance_bell")          # Quality: the bell
+            self.assertEqual(tones[7], "4_quality_flute")
             self.assertFalse(st.dry_run)                              # the rest of the settings kept
             # done once: picking the bell again for Maintenance afterwards stays
             st.settings["tuning"]["code_tone"]["2"] = "1_maintenance_bell"
@@ -336,8 +338,9 @@ class ConfigUpdate(unittest.TestCase):
             self.assertEqual(new["codes"][3]["en"], "Tech to press {press} please.")
             self.assertEqual(new["codes"][4]["es"], "Se solicita un supervisor en la prensa {press}.")
             self.assertEqual(new["codes"][7]["why"], "audit check-in")
-            self.assertEqual((new["codes"][2]["tone"], new["codes"][4]["tone"], new["codes"][7]["tone"]),
-                             ("6_maintenance_doorbell", "1_maintenance_bell", "4_quality_flute"))
+            self.assertEqual((new["codes"][2]["tone"], new["codes"][4]["tone"], new["codes"][5]["tone"]),
+                             ("6_maintenance_doorbell", "4_quality_flute", "1_maintenance_bell"))
+            self.assertEqual(new["codes"][7]["tone"], "4_quality_flute")
             self.assertEqual(new["zones"]["floor"]["dial"], "##61")
             self.assertEqual(new["audio"]["keep_dry_run_pages"], 0)
             with open(path, encoding="utf-8") as f:
@@ -987,7 +990,7 @@ class Server(unittest.TestCase):
         self.assertEqual(p["notes"], [])
         self.assertEqual(self.pager.sent, [])                 # previewing never pages
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "calls.csv")))   # nor logs a call
-        self.assertEqual(self.preview("kind=test&board=RSP_LH&code=4&press=3")["tone"], "maintenance bell")   # Supervisor has the bell now
+        self.assertEqual(self.preview("kind=test&board=RSP_LH&code=4&press=3")["tone"], "quality flute")   # Supervisor's tone now
 
     def test_preview_bad_and_password(self):
         self.assertFalse(self.preview("kind=test&board=RSP_LH&code=1&press=27")["ok"])

@@ -73,6 +73,52 @@ class Shaping(unittest.TestCase):
         self.assertEqual(c, A.CLARITY_DEFAULTS)     # anything odd: the default (and off)
 
 
+class Keypad(unittest.TestCase):
+    """Tones must not look like a keypad press (DTMF) to the ATA2: the packaging pluck did."""
+
+    def key(self, low, high, seconds=0.5):
+        return A._pcm([0.3 * math.sin(2 * math.pi * low * i / 8000.0) + 0.3 * math.sin(2 * math.pi * high * i / 8000.0)
+                       for i in range(int(8000 * seconds))])
+
+    def test_a_key_press_is_spotted_and_broken_up(self):
+        four = self.key(770, 1209)
+        self.assertGreater(A.dtmf_risk(four), 0.4)                              # held the whole 0.5 s
+        self.assertEqual(A.dtmf_check(four)[1][:1], [1209])
+        self.assertGreater(A.dtmf_risk(self.key(770 * 1.025, 1209 * 0.98)), 0.4)     # 2-3% off still counts
+        self.assertLess(A.dtmf_risk(A.dtmf_safe(four)), A.DTMF_HOLD_S)
+        self.assertLess(A.dtmf_risk(self.key(770, 1209, 0.03)), A.DTMF_HOLD_S)   # 30 ms is too short to count
+
+    def test_safe_tones_are_left_alone(self):
+        note = tone(1000, 0.5)
+        self.assertEqual(A.dtmf_risk(note), 0)
+        self.assertEqual(A.dtmf_safe(note), note)
+        self.assertEqual(A.dtmf_risk(self.key(600, 1209)), 0)                     # 600 Hz is no key
+
+    def test_real_tones(self):
+        lib = A.AudioLibrary(os.path.join(ROOT, "audio"))
+        pluck = lib._frames("tones/single/5_packaging_pluck.wav")
+        held, freqs = A.dtmf_check(pluck)
+        self.assertGreater(held, 0.2)                                # the culprit, as shipped: a "4"
+        self.assertTrue(any(1170 < f < 1250 for f in freqs), freqs)  # its "4" (1188 Hz near 1209)
+        for name in lib.tone_names() + ["chime"]:
+            self.assertLess(A.dtmf_risk(lib.tone(name)), A.DTMF_HOLD_S, name)
+            if name != "5_packaging_pluck":                          # the others are left exactly as they are
+                self.assertEqual(lib.tone(name), lib._frames("tones/single/%s.wav" % name if name != "chime"
+                                                             else "chime.wav"), name)
+        self.assertGreater(db(lib.tone("5_packaging_pluck"), 0) - db(pluck, 0), -3)   # still sounds as loud
+
+    def test_pages_use_the_safe_tone(self):
+        lib = A.AudioLibrary(os.path.join(ROOT, "audio"))
+        cfg = R.load_config(CONFIG)
+        cfg["audio"]["languages"] = ["en"]
+        wav, _ = lib.build(cfg, 6, 27)                               # packaging
+        import io
+        import wave
+        with wave.open(io.BytesIO(wav)) as w:
+            pcm = w.readframes(w.getnframes())
+        self.assertLess(A.dtmf_risk(pcm[:2 * 8000 * 2]), A.DTMF_HOLD_S)   # the tone at the start
+
+
 class Pages(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

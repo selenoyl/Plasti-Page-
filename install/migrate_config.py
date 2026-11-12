@@ -85,6 +85,10 @@ OLD_DEFAULTS = [
     ("9", "tone", "1_maintenance_bell"),
     ("4", "tone", "3_supervisor_glide"),
     ("7", "tone", "3_supervisor_glide"),
+    # 0.12.1: Supervisor had the bell and Quality the flute; now swapped.
+    ("4", "tone", "1_maintenance_bell"),
+    ("7", "tone", "1_maintenance_bell"),
+    ("5", "tone", "4_quality_flute"),
 ]
 
 

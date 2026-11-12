@@ -175,6 +175,87 @@ def silence(ms):
     return b"\x00\x00" * int(RATE * ms / 1000)
 
 
+# Keypad tones (DTMF). The Nortel ATA2 listens to the line for these, as from an analog
+# phone. A tone with a steady pair of overtones near a key's two tones can be heard as a
+# key press during a page. Measured: the packaging pluck holds a "4" (its 792 and 1188 Hz
+# overtones, within 3% of 770 and 1209 Hz) for 0.34 s; phone equipment needs about 40 ms.
+# No other tone holds one, and speech at most 0.06 s (and is never changed).
+DTMF_LOW = (697, 770, 852, 941)
+DTMF_HIGH = (1209, 1336, 1477, 1633)
+DTMF_KEYS = ("123A", "456B", "789C", "*0#D")
+DTMF_HOLD_S = 0.04          # a key pair held this long can count as a key press
+
+
+def _goertzel_power(x, f):
+    w = 2 * math.pi * f / RATE
+    c, s1, s2 = 2 * math.cos(w), 0.0, 0.0
+    for v in x:
+        s1, s2 = v + c * s1 - s2, s1
+    return s1 * s1 + s2 * s2 - c * s1 * s2
+
+
+_HANN = [0.5 - 0.5 * math.cos(2 * math.pi * i / 319) for i in range(320)]
+_STEPS = (0.97, 0.985, 1.0, 1.015, 1.03)   # phone equipment accepts about 3% off
+
+
+def dtmf_check(pcm):
+    """(seconds, key, upper frequencies): the longest a keypad pair is held steady in the
+    sound, as a phone's key-press receiver hears it (40 ms windows every 20 ms; the two
+    tones within 8 dB of each other and at least half the sound), and the exact upper-group
+    pitches found in those stretches."""
+    x = _floats(pcm)
+    n, step = 320, 160
+    best, run, prev, found, now_f = 0, 0, None, set(), []
+    for i in range(0, len(x) - n + 1, step):
+        b = [v * h for v, h in zip(x[i:i + n], _HANN)]      # a window, so nearby notes don't leak in
+        energy = sum(v * v for v in b)
+        key = None
+        if energy > 1e-7:
+            lo, li = max((_goertzel_power(b, f * k), j) for j, f in enumerate(DTMF_LOW) for k in _STEPS)
+            hi, hf, hj = max((_goertzel_power(b, f * k), f * k, j) for j, f in enumerate(DTMF_HIGH) for k in _STEPS)
+            if lo > 0 and hi > 0 and abs(10 * math.log10(lo / hi)) <= 8 \
+                    and (lo + hi) / (energy * n / 2.0 * 0.667) >= 0.5:
+                key = DTMF_KEYS[li][hj]
+        if key is not None and key == prev:
+            run += 1
+            now_f.append(hf)
+        else:
+            run, now_f = (1, [hf]) if key else (0, [])
+        prev = key
+        if run * step / RATE >= DTMF_HOLD_S:
+            found.update(round(f) for f in now_f)
+        best = max(best, run)
+    return best * step / RATE, sorted(found)
+
+
+def dtmf_risk(pcm):
+    """The longest a keypad pair is held in the sound, in seconds (see dtmf_check)."""
+    return dtmf_check(pcm)[0]
+
+
+def _notch(x, f, q=10.0):
+    """Cut a narrow band around f (RBJ notch)."""
+    w = 2 * math.pi * f / RATE
+    al, cw = math.sin(w) / (2 * q), math.cos(w)
+    a0 = 1 + al
+    return _biquad(x, 1 / a0, -2 * cw / a0, 1 / a0, -2 * cw / a0, (1 - al) / a0)
+
+
+def dtmf_safe(pcm):
+    """A tone that can't be heard as a key press. A key press needs one upper and one lower
+    keypad tone held together, so where a tone holds such a pair, its upper one is cut out
+    at the exact pitch found, until no pair is held. Safe tones are returned as they are."""
+    for _ in range(4):
+        held, freqs = dtmf_check(pcm)
+        if held < DTMF_HOLD_S or not freqs:
+            return pcm
+        x = _floats(pcm)
+        for f in freqs:
+            x = _notch(_notch(x, f), f)
+        pcm = _pcm(x)
+    return pcm
+
+
 def clarity_of(opts):
     """The PA clarity settings from the audio options, each value checked."""
     c = dict(CLARITY_DEFAULTS)
@@ -360,8 +441,11 @@ class AudioLibrary:
         return int(self.manifest.get("max_press", 999))
 
     def tone(self, name):
-        """A department tone, or "chime"."""
-        return self._frames("tones/single/%s.wav" % name if name != "chime" else "chime.wav")
+        """A department tone, or "chime", made safe from looking like a keypad press (dtmf_safe)."""
+        key = "tones/single/%s.wav" % name if name != "chime" else "chime.wav"
+        if ("safe", key) not in self.cache:
+            self.cache[("safe", key)] = dtmf_safe(self._frames(key))
+        return self.cache[("safe", key)]
 
     def tone_names(self):
         """Tones available (file names without .wav)."""
