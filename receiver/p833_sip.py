@@ -11,8 +11,14 @@
 # "," = 0.5 s pause, "F" = hook flash.
 # 1-stage: the digits go in the call's address and the HT813 dials them itself.
 #
+# Safety: only SIP and audio packets from the HT813's address are used, and SIP
+# messages must belong to this call (Call-ID, tags, branch), so another device can't
+# hang up or divert a page. If the HT813 asks for a password ("Authenticate incoming
+# INVITE"), the laptop answers with P833_HT813_PASSWORD from secrets.env.
+#
 # Standard library only; Python 3.6+.
 
+import hashlib
 import io
 import math
 import random
@@ -174,11 +180,34 @@ def sdp_target(body):
     """(ip, port) of the far end's audio from an SDP body, or None."""
     ip = port = None
     for line in body.splitlines():
-        if line.startswith("c=IN IP4 "):
-            ip = line.split()[2]
-        elif line.startswith("m=audio "):
-            port = int(line.split()[1])
-    return (ip, port) if ip and port else None
+        parts = line.split()
+        if line.startswith("c=IN IP4 ") and len(parts) >= 3 and re.match(r"^\d{1,3}(\.\d{1,3}){3}$", parts[2]):
+            ip = parts[2]
+        elif line.startswith("m=audio ") and len(parts) >= 2 and parts[1].isdigit():
+            port = int(parts[1])
+    return (ip, port) if ip and port and 0 < port < 65536 else None
+
+
+def digest_header(challenge, method, uri, user, password):
+    """The Authorization value answering a SIP Digest challenge (RFC 2617, MD5)."""
+    f = dict(re.findall(r'(\w+)="?([^",]*)"?', challenge))
+    if f.get("algorithm", "MD5").upper() != "MD5":
+        raise CallFailed("the HT813 asked for a %s password check, which isn't supported" % f["algorithm"])
+    md5 = lambda x: hashlib.md5(x.encode("utf-8")).hexdigest()   # noqa: E731 (required by SIP Digest)
+    ha1 = md5("%s:%s:%s" % (user, f.get("realm", ""), password))
+    ha2 = md5("%s:%s" % (method, uri))
+    out = 'Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=MD5' % (
+        user, f.get("realm", ""), f.get("nonce", ""), uri)
+    if "auth" in [q.strip() for q in f.get("qop", "").split(",")]:
+        cnonce, nc = _tag() + _tag(), "00000001"
+        resp = md5("%s:%s:%s:%s:auth:%s" % (ha1, f.get("nonce", ""), nc, cnonce, ha2))
+        out += ', qop=auth, nc=%s, cnonce="%s"' % (nc, cnonce)
+    else:
+        resp = md5("%s:%s:%s" % (ha1, f.get("nonce", ""), ha2))
+    out += ', response="%s"' % resp
+    if "opaque" in f:
+        out += ', opaque="%s"' % f["opaque"]
+    return out
 
 
 def local_ip_towards(host):
@@ -200,9 +229,10 @@ class SipPager:
 
     built = True
 
-    def __init__(self, cfg, log=None):
+    def __init__(self, cfg, log=None, password=""):
         self.cfg = cfg
         self.log = log or (lambda *a: None)
+        self.password = password          # for the HT813's password check, if it asks (secrets.env)
         self.line = threading.Lock()      # one phone line: one call at a time
         self.last_end = 0.0               # when the last call hung up (for the gap between calls)
         self.last_check = ""              # what the line check found on the last call
@@ -280,18 +310,22 @@ class SipPager:
         self.last_check = ""
 
         sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sip.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sip.bind(("0.0.0.0", lport))
+        try:
+            sip.bind(("0.0.0.0", lport))      # no SO_REUSEADDR: nothing else may share this port
+        except OSError:
+            self.log("phone: laptop SIP port %d is taken; using a free one for this call" % lport)
+            sip.bind(("0.0.0.0", 0))
         lport = sip.getsockname()[1]          # the port really in use (0 = any free one)
         rtp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         rtp.bind(("0.0.0.0", 0))
         rport = rtp.getsockname()[1]
         try:
-            d = Dialog(sip, me, lport, host, port, user)
+            auth_id = ph.get("ht813_auth_id", "") or ph.get("ht813_user", "") or "p833"
+            d = Dialog(sip, me, lport, host, port, user, (auth_id, self.password))
             far = d.invite(rport, deadline)
             self.log("phone: HT813 answered; audio to %s:%d" % far)
             try:
-                stream = RtpStream(rtp, far, record)
+                stream = RtpStream(rtp, far, record, d.peer_ip)
                 stream.silence(int(ph["wait_after_answer_ms"]), d)
                 if two_stage:
                     for ch in dial:
@@ -324,9 +358,16 @@ class SipPager:
 class Dialog:
     """The SIP side of one outgoing call (UAC), just what a page needs."""
 
-    def __init__(self, sock, me, lport, host, port, user):
+    MAX_PER_CHECK = 20       # SIP messages handled per audio frame (a flood can't stall the page)
+
+    def __init__(self, sock, me, lport, host, port, user, auth=("", "")):
         self.sock, self.me, self.lport = sock, me, lport
         self.host, self.port, self.user = host, port, user
+        self.auth = auth
+        try:
+            self.peer_ip = socket.gethostbyname(host)   # only packets from here are used
+        except OSError as e:
+            raise CallFailed("HT813 address %s not found (%s)" % (host, e))
         self.call_id = "%s@%s" % (_tag() + _tag(), me)
         self.ftag = _tag()
         self.ttag = ""
@@ -340,6 +381,11 @@ class Dialog:
 
     def _headers(self, method, branch, cseq, to_tag=True):
         to = "<%s>" % self.uri + (";tag=%s" % self.ttag if to_tag and self.ttag else "")
+        if method in ("INVITE", "ACK", "CANCEL") and getattr(self, "authorization", ""):
+            return self._headers_plain(method, branch, cseq, to) + self.authorization
+        return self._headers_plain(method, branch, cseq, to)
+
+    def _headers_plain(self, method, branch, cseq, to):
         return ("Via: SIP/2.0/UDP %s:%d;branch=z9hG4bK%s;rport\r\n"
                 "Max-Forwards: 70\r\n"
                 "From: \"P833 Pager\" <sip:p833@%s:%d>;tag=%s\r\n"
@@ -356,10 +402,14 @@ class Dialog:
                "m=audio %d RTP/AVP %d %d\r\na=rtpmap:0 PCMU/8000\r\n"
                "a=rtpmap:%d telephone-event/8000\r\na=fmtp:%d 0-16\r\na=ptime:20\r\na=sendrecv\r\n" % (
                    random.getrandbits(31), self.me, self.me, rport, PT_PCMU, PT_EVENT, PT_EVENT, PT_EVENT))
-        self.branch = _tag() + _tag()
-        msg = ("INVITE %s SIP/2.0\r\n" % self.uri + self._headers("INVITE", self.branch, self.cseq, False) +
-               "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS\r\n"
-               "Content-Type: application/sdp\r\nContent-Length: %d\r\n\r\n%s" % (len(sdp), sdp))
+        self.authorization, tried_auth = "", False
+
+        def new_invite():
+            self.branch = _tag() + _tag()
+            return ("INVITE %s SIP/2.0\r\n" % self.uri + self._headers("INVITE", self.branch, self.cseq, False) +
+                    "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS\r\n"
+                    "Content-Type: application/sdp\r\nContent-Length: %d\r\n\r\n%s" % (len(sdp), sdp))
+        msg = new_invite()
         self._send(msg)
         resend_at, interval, got_provisional = time.monotonic() + 0.5, 0.5, False
         answer_by = min(deadline, time.monotonic() + 15)
@@ -377,16 +427,41 @@ class Dialog:
             if not r:
                 continue
             first, h, body = r
-            if not first.startswith("SIP/2.0 ") or not h.get("cseq", "").endswith("INVITE"):
+            if not first.startswith("SIP/2.0 ") or h.get("cseq", "") != "%d INVITE" % self.cseq \
+                    or "branch=z9hG4bK%s" % self.branch not in h.get("via", ""):
+                continue                                       # not an answer to this INVITE
+            try:
+                code = int(first.split()[1])
+            except (IndexError, ValueError):
                 continue
-            code = int(first.split()[1])
             if code < 200:
                 got_provisional = True
                 continue
             self.ttag = _param(h.get("to", ""), "tag")
             if code >= 300:
                 self._ack_failure(h)
-                raise CallFailed("HT813 refused the call: %s" % first[8:])
+                challenge = h.get("www-authenticate") or h.get("proxy-authenticate") or ""
+                if code in (401, 407) and challenge.lower().startswith("digest"):
+                    if not self.auth[1]:
+                        raise CallFailed("the HT813 wants a password (Authenticate incoming INVITE is on): "
+                                         "put it in secrets.env as P833_HT813_PASSWORD")
+                    if tried_auth:
+                        raise CallFailed("the HT813 did not accept the password in secrets.env "
+                                         "(P833_HT813_PASSWORD) for user %s" % self.auth[0])
+                    tried_auth = True
+                    self.authorization = "%s: %s\r\n" % (
+                        "Proxy-Authorization" if code == 407 else "Authorization",
+                        digest_header(challenge, "INVITE", self.uri, self.auth[0], self.auth[1]))
+                    self.cseq += 1
+                    self.ttag = ""
+                    msg = new_invite()
+                    self._send(msg)
+                    resend_at, interval, got_provisional = time.monotonic() + 0.5, 0.5, False
+                    continue
+                if tried_auth and code in (401, 403, 407):
+                    raise CallFailed("the HT813 did not accept the password in secrets.env "
+                                     "(P833_HT813_PASSWORD) for user %s: %s" % (self.auth[0], first[8:][:40]))
+                raise CallFailed("HT813 refused the call: %s" % first[8:][:80])
             m = re.search(r"<([^>]+)>", h.get("contact", ""))
             if m:
                 self.remote_target = m.group(1)
@@ -395,6 +470,9 @@ class Dialog:
             if not far:
                 self.bye()
                 raise CallFailed("HT813 answered without an audio address")
+            if far[0] != self.peer_ip:
+                self.bye()
+                raise CallFailed("HT813 asked for the audio to go to another address (%s); refused" % far[0])
             return far
 
     def _ack(self):
@@ -422,16 +500,18 @@ class Dialog:
             end = time.monotonic() + wait
             while time.monotonic() < end:
                 r = self._recv(0.1)
-                if r and r[0].startswith("SIP/2.0 ") and r[1].get("cseq", "").endswith("BYE"):
+                if r and r[0].startswith("SIP/2.0 ") and r[1].get("cseq", "") == "%d BYE" % self.cseq:
                     return
 
     def check(self):
         """Handle anything the HT813 sends mid-call. Raises if it hung up."""
-        while True:
+        for _ in range(self.MAX_PER_CHECK):
             r = self._recv(0)
             if not r:
                 return
             first, h, _ = r
+            if not first.startswith("SIP/2.0 ") and not self._in_dialog(h):
+                continue                                       # a request that isn't for this call
             if first.startswith("BYE "):
                 self._reply_ok(h)
                 self.hung_up = True
@@ -444,13 +524,26 @@ class Dialog:
                    "Content-Length: 0\r\n\r\n" % (h.get("via", ""), h.get("from", ""), h.get("to", ""),
                                                   h.get("call-id", ""), h.get("cseq", "")))
 
+    def _in_dialog(self, h):
+        """A request from the HT813 within this call: its From tag is the HT813's, its To tag ours."""
+        return bool(self.ttag) and _param(h.get("from", ""), "tag") == self.ttag \
+            and _param(h.get("to", ""), "tag") == self.ftag
+
     def _recv(self, timeout):
+        """The next SIP message for this call from the HT813's address, or None."""
         rd, _, _ = select.select([self.sock], [], [], timeout)
         if not rd:
             return None
-        data, _ = self.sock.recvfrom(8192)
+        try:
+            data, addr = self.sock.recvfrom(8192)
+        except OSError:
+            return None
+        if addr[0] != self.peer_ip:
+            return None
         r = parse_sip(data)
-        if r and r[1].get("call-id") not in (None, self.call_id):
+        if not r or r[1].get("call-id") != self.call_id:
+            return None
+        if r[0].startswith("SIP/2.0 ") and _param(r[1].get("from", ""), "tag") != self.ftag:
             return None
         return r
 
@@ -463,8 +556,9 @@ def _param(header, name):
 class RtpStream:
     """Sends 20 ms RTP packets, paced by the clock."""
 
-    def __init__(self, sock, far, record=False):
+    def __init__(self, sock, far, record=False, peer_ip=None):
         self.sock, self.far = sock, far
+        self.peer_ip = peer_ip or far[0]     # only audio from the HT813 counts
         self.record = True          # always keep what the line sends: the line check needs it
         self.got = []              # PCMU payloads received from the HT813 (what the line sends back)
         self.seq = random.getrandbits(16)
@@ -495,9 +589,11 @@ class RtpStream:
             if not rd:
                 return
             try:
-                data, _ = self.sock.recvfrom(2048)
+                data, addr = self.sock.recvfrom(2048)
             except OSError:
                 return
+            if addr[0] != self.peer_ip:
+                continue
             if self.record and len(data) > 12 and (data[1] & 0x7F) == PT_PCMU and len(self.got) < 3000:
                 cc = data[0] & 0x0F
                 self.got.append(data[12 + 4 * cc:])

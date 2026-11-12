@@ -77,6 +77,7 @@ PHONE_DEFAULTS = {
     "wait_after_dial_ms": 2000,
     "max_call_s": 90,
     "ht813_user": "",      # SIP user to call; empty = call the HT813 by address (direct IP call)
+    "ht813_auth_id": "",   # user for the HT813's password check (config file only); default ht813_user or p833
     "min_gap_s": 6,        # gap after a call before the next, so the HT813 and Norstar release the line
     "line_check": "warn",  # after dialing, listen for dial/busy/ringing tone: retry, warn or off
 }
@@ -672,8 +673,8 @@ class NotBuiltPager:
         return False, "phone pager not built yet (HT813 step); nothing was dialed"
 
 
-def make_live_pager(cfg):
-    return SipPager(cfg, LOG.info)
+def make_live_pager(cfg, ht813_password=""):
+    return SipPager(cfg, LOG.info, password=ht813_password)
 
 
 class PageWorker(threading.Thread):
@@ -1889,7 +1890,8 @@ def main(argv=None):
     removed = dry_pager.prune(dry_pager.keep())
     if removed:
         LOG.info("removed %d saved dry-run audio file(s) (keeping %d)", removed, dry_pager.keep())
-    worker = PageWorker(cfg, state, make_live_pager(cfg), dry_pager)
+    ht813_pw = os.environ.pop("P833_HT813_PASSWORD", "").strip()   # only if the HT813 asks for one
+    worker = PageWorker(cfg, state, make_live_pager(cfg, ht813_pw), dry_pager)
     worker.state_dir = args.state_dir
     if worker.audio.load_error:
         LOG.warning("AUDIO: %s", worker.audio.load_error)

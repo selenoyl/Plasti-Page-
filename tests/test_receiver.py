@@ -365,8 +365,11 @@ class Server(unittest.TestCase):
         self.fail("no row in the call log")
 
     def log_rows(self):
+        # Read it whole, then parse: parsing line by line while the receiver creates the
+        # file can mix up the header (the file grows between reads).
+        import io
         with open(os.path.join(self.tmp, "calls.csv"), newline="") as f:
-            return list(csv.DictReader(f))
+            return list(csv.DictReader(io.StringIO(f.read(), newline="")))
 
     def test_call_is_paged_and_logged(self):
         st, txt = self.post("/call", {"board": "RSP_LH", "boot": "b1", "seq": 5, "code": 2, "press": 27})

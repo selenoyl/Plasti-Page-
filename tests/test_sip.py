@@ -2,6 +2,7 @@
 # By Ethan Brady & Ryan Raikes
 
 import os
+import re
 import sys
 import time
 import unittest
@@ -152,6 +153,62 @@ class Pager(unittest.TestCase):
         ok, _ = pager.page("floor", "61", "en", "es", tone_wav(0.1))
         self.assertTrue(ok)
         self.assertGreater(time.monotonic() - t0, 1.4)
+
+    def test_password_challenge(self):
+        self.ht = FakeHT813(password="s3cret")
+        ok, detail = S.SipPager(cfg_for(self.ht), password="s3cret").page("floor", "61", "en", "es",
+                                                                          tone_wav(0.2))
+        self.assertTrue(ok, detail)
+        self.assertTrue(self.ht.auth_ok)
+        self.assertTrue(self.ht.wait_bye())
+        for pw, word in (("wrong", "did not accept"), ("", "wants a password")):
+            ht = FakeHT813(password="s3cret")
+            try:
+                ok, detail = S.SipPager(cfg_for(ht), password=pw).page("floor", "61", "en", "es", tone_wav(0.2))
+            finally:
+                ht.close()
+            self.assertFalse(ok)
+            self.assertIn(word, detail)
+        self.assertEqual(S.digest_header('Digest realm="r", nonce="n"', "INVITE", "sip:h", "u", "p"),
+                         'Digest username="u", realm="r", nonce="n", uri="sip:h", algorithm=MD5, '
+                         'response="%s"' % __import__("hashlib").md5(
+                             ("%s:n:%s" % (__import__("hashlib").md5(b"u:r:p").hexdigest(),
+                                           __import__("hashlib").md5(b"INVITE:sip:h").hexdigest())).encode()
+                         ).hexdigest())
+
+    def forged_bye(self, src_ip, from_tag=None):
+        """Send a BYE for the current call, as another device would, from src_ip."""
+        import socket as _s
+        _, h, _ = self.ht.invites[-1]
+        our = h["from"]                                   # the pager's From (with its tag)
+        bye = ("BYE sip:p833@127.0.0.1 SIP/2.0\r\nVia: SIP/2.0/UDP %s:5060;branch=z9hG4bKforged\r\n"
+               "From: <sip:x@%s>;tag=%s\r\nTo: %s\r\nCall-ID: %s\r\nCSeq: 9 BYE\r\n"
+               "Content-Length: 0\r\n\r\n" % (src_ip, src_ip, from_tag or "fake1", our, h["call-id"]))
+        port = int(re.search(r"Contact: <sip:p833@[^:]+:(\d+)>", "\r\n".join(
+            "%s: %s" % (k.title(), v) for k, v in h.items())).group(1))
+        sock = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+        sock.bind((src_ip, 0))
+        sock.sendto(bye.encode(), ("127.0.0.1", port))
+        sock.close()
+
+    def test_forged_hang_up_is_ignored(self):
+        import threading as _t
+        for src, tag in (("127.0.0.2", None), ("127.0.0.1", "not-the-ht813-tag")):
+            self.ht = FakeHT813()
+            result = {}
+            pager = S.SipPager(cfg_for(self.ht))
+            th = _t.Thread(target=lambda: result.update(r=pager.page("floor", "61", "en", "es", tone_wav(1.5))))
+            th.start()
+            for _ in range(200):
+                if self.ht.got_ack:
+                    break
+                time.sleep(0.01)
+            time.sleep(0.3)
+            self.forged_bye(src, tag)
+            th.join(10)
+            self.assertTrue(result["r"][0], (src, tag, result["r"]))   # the page played to the end
+            self.ht.close()
+            self.ht = None
 
     def test_ulaw(self):
         self.assertEqual(S.pcm16_to_ulaw(b"\x00\x00"), b"\xff")

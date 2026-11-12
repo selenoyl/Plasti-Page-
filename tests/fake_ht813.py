@@ -5,7 +5,10 @@
 #
 # mode: "answer" (normal), "busy" (486), "silent" (never answers),
 #       "hangup" (answers, then hangs up after hangup_after seconds)
+# password: if set, INVITEs must answer a Digest challenge with it (user "p833")
 
+import hashlib
+import re
 import socket
 import struct
 import threading
@@ -16,10 +19,11 @@ EVENT_CHARS.update({10: "*", 11: "#", 16: "F"})
 
 
 class FakeHT813:
-    def __init__(self, mode="answer", hangup_after=0.5, line_tone="quiet"):
+    def __init__(self, mode="answer", hangup_after=0.5, line_tone="quiet", password=""):
         # line_tone: what the "line" sends back during the call: quiet (an open page),
         # dial (dial tone: flash or digits not taken), busy, or ring (called a phone)
         self.mode, self.hangup_after, self.line_tone = mode, hangup_after, line_tone
+        self.password, self.auth_ok = password, None
         self.calls = 0
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sip.bind(("127.0.0.1", 0))
@@ -74,6 +78,8 @@ class FakeHT813:
                 self._peer = (addr, h)
                 if self.mode == "silent":
                     continue
+                if self.password and not self._auth_ok(first, h):
+                    continue
                 self._reply(addr, 100, "Trying", h)
                 if self.mode == "busy":
                     self._reply(addr, 486, "Busy Here", h)
@@ -97,6 +103,24 @@ class FakeHT813:
                 self._reply(addr, 200, "OK", h)
             elif first.startswith("CANCEL "):
                 self._reply(addr, 200, "OK", h)
+
+    def _auth_ok(self, first, h):
+        """Digest check like the HT813's 'Authenticate incoming INVITE'. Replies 401/403 itself."""
+        addr = self._peer[0]
+        auth = h.get("authorization", "")
+        if not auth:
+            self._reply(addr, 401, "Unauthorized", h, extra='WWW-Authenticate: Digest realm="HT813", '
+                        'nonce="n0nce42", qop="auth", algorithm=MD5\r\n')
+            return False
+        f = dict(re.findall(r'(\w+)="?([^",]*)"?', auth[7:]))
+        md5 = lambda x: hashlib.md5(x.encode()).hexdigest()   # noqa: E731
+        ha1 = md5("%s:HT813:%s" % (f.get("username"), self.password))
+        ha2 = md5("INVITE:%s" % first.split()[1])
+        want = md5("%s:n0nce42:%s:%s:auth:%s" % (ha1, f.get("nc"), f.get("cnonce"), ha2))
+        self.auth_ok = f.get("response") == want and f.get("username") == "p833"
+        if not self.auth_ok:
+            self._reply(addr, 403, "Forbidden", h)
+        return self.auth_ok
 
     def _send_tone_back(self, far, seconds=12):
         """Send what the line would: quiet, or a call-progress tone, until the call ends."""
