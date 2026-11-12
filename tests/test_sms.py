@@ -34,7 +34,7 @@ class FakeVoipMs:
 
 def cfg_with(**sms):
     s = dict(T.DEFAULTS, enabled=True, api_username="ops@example.com", did="555-123-4567",
-             to=["5550001111", "(555) 000-2222"])
+             to=["5550001111", "(555) 000-2222"], stagger_s=0)
     s.update(sms)
     return {"sms": s}
 
@@ -118,6 +118,33 @@ class Sms(unittest.TestCase):
         s.set_password("")
         self.assertFalse(os.path.exists(path))
         self.assertFalse(s.has_password())
+
+    def test_staggered(self):
+        fake = FakeVoipMs()
+        s = self.sender(cfg_with(to=["5550001111", "5550002222", "5550003333"], stagger_s=1), fake)
+        t0 = time.monotonic()
+        ok, _ = s.send("hi")
+        self.assertTrue(ok)
+        self.assertGreater(time.monotonic() - t0, 1.9)          # two pauses of 1 s
+        self.assertEqual(len(fake.requests), 3)
+
+    def test_hourly_cap(self):
+        fake = FakeVoipMs()
+        s = self.sender(cfg_with(to=["5550001111", "5550002222", "5550003333"], max_per_hour=2), fake)
+        ok, detail = s.send("hi")
+        self.assertFalse(ok)
+        self.assertEqual(len(fake.requests), 2)
+        self.assertEqual([r["result"] for r in s.recent], ["sent", "sent", "SKIPPED"])
+        self.assertIn("hourly limit", detail)
+
+    def test_test_text_is_queued(self):
+        fake = FakeVoipMs()
+        s = self.sender(cfg_with(), fake)
+        ok, detail = s.test_text()
+        self.assertTrue(ok)
+        self.assertIn("queued for 2", detail)
+        self.assertEqual(s.jobs.get_nowait(), "Chapar: Test text from the paging system.")
+        self.assertFalse(self.sender(cfg_with(to=[]), fake).test_text()[0])
 
     def test_https_only(self):
         with self.assertRaises(ValueError):

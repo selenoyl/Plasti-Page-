@@ -151,6 +151,8 @@
     "prefix": "Chapar:",
     "template": "{prefix} {message}",
     "timeout_s": 15,
-    "admin_tests": false
+    "admin_tests": false,
+    "stagger_s": 3,
+    "max_per_hour": 60
   }
 }

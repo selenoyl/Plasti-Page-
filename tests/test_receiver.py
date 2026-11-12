@@ -915,7 +915,7 @@ sys.stdout.buffer.write(b.getvalue())
         from test_sms import FakeVoipMs
         fake = FakeVoipMs()
         self.cfg["sms"].update(dict(enabled=True, api_username="ops@example.com", did="5551234567",
-                                    to=["5550001111"]), **sms)
+                                    to=["5550001111"], stagger_s=0), **sms)
         sender = p833_sms.SmsSender(self.cfg, self.tmp, self.tmp, opener=fake)
         sender.set_password("api-secret-123")
         sender.start()
@@ -988,7 +988,8 @@ sys.stdout.buffer.write(b.getvalue())
     def test_sms_test_button(self):
         sender, fake = self.use_sms(enabled=False)
         _, loc, _ = self.admin("/admin/sms/test", {})
-        self.assertIn("Test text OK", urllib.parse.unquote(loc))
+        self.assertIn("Test text OK: queued", urllib.parse.unquote(loc))
+        self.wait_texts(fake, 1)
         self.assertEqual(fake.requests[0][1]["message"], "Chapar: Test text from the paging system.")
 
 

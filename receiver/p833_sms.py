@@ -13,6 +13,7 @@
 #
 # Standard library only; Python 3.6+.
 
+import collections
 import csv
 import json
 import logging
@@ -39,6 +40,8 @@ DEFAULTS = {
     "template": "{prefix} {message}",
     "timeout_s": 15,
     "admin_tests": False,        # also text for test calls sent from the admin page
+    "stagger_s": 3,              # pause between texts to different numbers (avoid spam flags)
+    "max_per_hour": 60,          # cap on texts sent in any hour (cost and spam guard)
 }
 MAX_SMS = 160                    # voip.ms sendSMS limit (characters)
 CSV_FIELDS = ["time", "to", "text", "result", "detail"]
@@ -81,6 +84,7 @@ class SmsSender(threading.Thread):
         self.csv_file = os.path.join(log_dir, "texts.csv")
         self.jobs = queue.Queue()
         self.recent = []
+        self.sent_times = collections.deque()      # when each text went out, for the hourly cap
         self.lock = threading.Lock()
         self.opener = opener or self._https
 
@@ -118,10 +122,16 @@ class SmsSender(threading.Thread):
         self.jobs.put(compose(self.cfg, rec))
 
     def test_text(self):
-        """Send a test text now (even when texts are switched off), return (ok, detail)."""
+        """Queue a test text to every number (even when texts are switched off).
+        Returns (ok, detail); the results show in the recent texts."""
         s = settings_of(self.cfg)
+        n = len([x for x in s["to"] if clean_number(x)])
+        if not n:
+            return False, "no numbers to text"
         text = " ".join(("%s Test text from the paging system." % s["prefix"]).split())[:MAX_SMS]
-        return self.send(text)
+        self.jobs.put(text)
+        return True, ("queued for %d number(s), %s s apart; refresh in a moment and see Recent texts"
+                      % (n, s["stagger_s"]))
 
     def run(self):
         while True:
@@ -143,13 +153,30 @@ class SmsSender(threading.Thread):
             self._record("-", text, "FAILED", problem)
             return False, problem
         results = []
-        for dst in dsts:
+        for i, dst in enumerate(dsts):
+            if i:
+                time.sleep(max(0.0, float(s["stagger_s"])))     # spread texts out
+            if not self._under_cap(int(s["max_per_hour"])):
+                detail = "skipped: hourly limit of %s texts reached" % s["max_per_hour"]
+                self._record(dst, text, "SKIPPED", detail)
+                results.append((dst, False, detail))
+                continue
             ok, detail = self._send_one(s, user, pw, did, dst, text)
+            if ok:
+                with self.lock:
+                    self.sent_times.append(time.monotonic())
             self._record(dst, text, "sent" if ok else "FAILED", detail)
             results.append((dst, ok, detail))
         n_ok = sum(1 for _, ok, _ in results if ok)
         summary = "; ".join("%s: %s" % (d, "sent" if ok else det) for d, ok, det in results)
         return n_ok == len(results), "%d of %d sent (%s)" % (n_ok, len(results), summary)
+
+    def _under_cap(self, per_hour):
+        now = time.monotonic()
+        with self.lock:
+            while self.sent_times and now - self.sent_times[0] > 3600:
+                self.sent_times.popleft()
+            return len(self.sent_times) < per_hour
 
     def _send_one(self, s, user, pw, did, dst, text):
         params = {"api_username": user, "api_password": pw, "method": "sendSMS",

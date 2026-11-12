@@ -1188,6 +1188,14 @@ def parse_sms_form(form):
             any(n not in ("prefix", "message", "cell", "press", "who", "code") for n in names):
         errs.append("the template must contain {message} and only {prefix} {message} {cell} {press} {who} {code}")
     out["template"] = template
+    for key, label, lo, hi, default in (("stagger_s", "the pause between texts", 0, 120, 3),
+                                        ("max_per_hour", "the hourly limit", 1, 1000, 60)):
+        try:
+            out[key] = int(form.get(key, str(default)) or str(default))
+            if not lo <= out[key] <= hi:
+                raise ValueError
+        except ValueError:
+            errs.append("%s must be %d to %d" % (label, lo, hi))
     return out, errs
 
 
@@ -1221,7 +1229,13 @@ Leave blank to keep the current one.</td></tr>
 <tr><td>Send from (voip.ms number)</td><td><input name=did value='%s' size=14 maxlength=20></td>
 <td class=small>Your SMS-enabled voip.ms number (DID), 10 digits.</td></tr>
 <tr><td>Text these numbers</td><td><textarea name=to rows=4 cols=18>%s</textarea></td>
-<td class=small>One 10-digit number per line, up to 20. Each number gets its own text.</td></tr>
+<td class=small>One 10-digit number per line, up to 20. Each number gets its own text (voip.ms
+doesn't do group chats through its API).</td></tr>
+<tr><td>Pause between texts (s)</td><td><input name=stagger_s type=number min=0 max=120 value='%d'
+ style='width:5em'></td><td class=small>Texts go to one number at a time, this far apart, so the carrier
+doesn't flag a burst as spam.</td></tr>
+<tr><td>Most texts per hour</td><td><input name=max_per_hour type=number min=1 max=1000 value='%d'
+ style='width:6em'></td><td class=small>A cap on cost and spam: texts over it are skipped and logged.</td></tr>
 <tr><td>Prefix</td><td><input name=prefix value='%s' size=14 maxlength=30></td><td></td></tr>
 <tr><td>Message</td><td><input name=template value='%s' size=28 maxlength=200></td>
 <td class=small>{prefix} {message} and optionally {cell} {press} {who} {code}. Up to 160 characters are sent.</td></tr>
@@ -1236,7 +1250,7 @@ Leave blank to keep the current one.</td></tr>
 (HTTPS, port 443) for texts to go out.</p></div>
 """ % ("ON" if s["enabled"] else "off", e(example), " checked" if s["enabled"] else "", e(s["api_username"]),
        "set: leave blank to keep" if sms.has_password() else "not set", e(s["did"]), e("\n".join(s["to"])),
-       e(s["prefix"]), e(s["template"]), " checked" if s["admin_tests"] else "",
+       int(s["stagger_s"]), int(s["max_per_hour"]), e(s["prefix"]), e(s["template"]), " checked" if s["admin_tests"] else "",
        "\n".join(rows) or "<tr><td colspan=4>none yet</td></tr>")
 
 
