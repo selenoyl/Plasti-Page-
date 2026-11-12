@@ -267,6 +267,20 @@ if [ "$AUTO" = on ] && [ -e /etc/systemd/system/p833-update.timer ] && [ -d .git
 else
     systemctl disable --now p833-update.timer >/dev/null 2>&1 || true
 fi
+# Don't cut a page off: if one is going out, wait for it (at most 3 minutes) before restarting.
+# (Stopped mid-page anyway, the receiver hangs up the call first, so the HT813 isn't left busy.)
+if systemctl is-active --quiet p833-receiver; then
+    RPORT=$("$PY" -I -c 'import json; print(json.load(open("/etc/p833-receiver/config.json")).get("port", 8833))' \
+            2>/dev/null || echo 8833)
+    for i in $(seq 1 36); do
+        BUSY=$(curl -s --max-time 5 "http://127.0.0.1:$RPORT/status.json" | "$PY" -I -c \
+               'import json, sys; s = json.load(sys.stdin); print(int(bool(s.get("busy")) or s.get("pages_waiting", 0) > 0))' \
+               2>/dev/null || echo 0)
+        [ "$BUSY" = 0 ] && break
+        [ "$i" = 1 ] && echo "A page is going out: waiting for it to finish before restarting (at most 3 minutes)..."
+        sleep 5
+    done
+fi
 systemctl restart p833-receiver
 sleep 2
 systemctl --no-pager --lines=5 status p833-receiver || true

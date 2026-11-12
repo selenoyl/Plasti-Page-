@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.17.1:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.17.2:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -466,6 +466,10 @@ Set "Line check after dialing" under Phone and paging setup:
 | **off** | No check |
 
 Start with warn. Once real pages on your line show no false warnings, switch to retry. The admin page keeps the line audio of the last page ("Last live page") and of the last failed try ("Last failed page try"). It also waits **6 s between calls** ("Gap between calls"), so the HT813 and Norstar fully release the line; the HT813 itself waits 4 s.
+
+**When pages fail with "busy",** the call's Detail (Recent calls) says which kind:
+- **"HT813 said busy (486 Busy Here): its phone line is still in another call"**: the HT813 is still holding the line in an earlier call that was never hung up. Up to 0.17.1 this happened when the receiver was stopped in the middle of a page (an update restarts it). Since 0.17.2 the receiver hangs up first when it's stopped, the installer waits for a page in progress to finish, and a call left open by a crash or power cut is hung up at the next start. To clear it now: reboot the HT813 (its web page, or unplug it for 10 s), then **Call the HT813 (no dialing)** on the Phone tab.
+- **"the line sent a busy or reorder tone after dialing"**: the HT813 answered, but the page zone was busy. The usual cause is the feedback eliminator still playing back the last page (it plays each page again after the call ends, so it is busy for about as long as the page). If pages come close together, raise **Gap between calls (s)** on the Phone tab to about the length of a page (25 to 30 s).
 
 **Admin page tools:**
 - **Call the HT813 (no dialing):** holds the ATA2 line about 3 s and dials nothing. Proves laptop → HT813 → line.

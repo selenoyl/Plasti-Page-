@@ -20,7 +20,9 @@
 
 import hashlib
 import io
+import json
 import math
+import os
 import random
 import re
 import select
@@ -237,11 +239,16 @@ class SipPager:
 
     built = True
 
-    def __init__(self, cfg, log=None, password=""):
+    def __init__(self, cfg, log=None, password="", state_dir=None):
         self.cfg = cfg
         self.log = log or (lambda *a: None)
         self.password = password          # for the HT813's password check, if it asks (secrets.env)
         self.line = threading.Lock()      # one phone line: one call at a time
+        self.active = None                # the call going on now (hung up first if the receiver stops)
+        # The call going on now is also noted on disk until it is hung up: if the receiver stops
+        # mid-page without hanging up (crash, power cut), the next start hangs it up. Otherwise
+        # the HT813 keeps its line in that call and answers every new call "486 Busy Here".
+        self.open_file = os.path.join(state_dir, "open_call.json") if state_dir else None
         self.last_end = 0.0               # when the last call hung up (for the gap between calls)
         self.last_check = ""              # what the line check found on the last call
         self.last_recording = b""         # what the line sent back during the last test (WAV)
@@ -278,6 +285,67 @@ class SipPager:
                 return False, "phone: %s" % e
             except OSError as e:
                 return False, "phone: network error: %s" % e
+
+    # -- a call left open: noted on disk while it lasts, hung up by the next start
+    def _remember(self, d):
+        if not self.open_file:
+            return
+        try:
+            tmp = self.open_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"host": d.host, "port": d.port, "call_id": d.call_id, "ftag": d.ftag, "ttag": d.ttag,
+                           "uri": d.uri, "remote_target": d.remote_target, "cseq": d.cseq}, f)
+            os.replace(tmp, self.open_file)
+        except OSError as e:
+            self.log("phone: could not note the call in progress (%s)" % e)
+
+    def _forget(self):
+        if self.open_file:
+            try:
+                os.remove(self.open_file)
+            except OSError:
+                pass
+
+    def hang_up_leftover(self):
+        """Hang up a call that an earlier run left open (call this at start)."""
+        with self.line:
+            return self._hang_up_leftover()
+
+    def _hang_up_leftover(self, sock=None):
+        if not self.open_file or not os.path.exists(self.open_file):
+            return False
+        try:
+            with open(self.open_file, encoding="utf-8") as f:
+                c = json.load(f)
+            host, port, cseq = str(c["host"]), int(c["port"]), int(c["cseq"])
+        except (OSError, ValueError, KeyError, TypeError):
+            self._forget()
+            return False
+        own = sock is None
+        if own:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("0.0.0.0", 0))
+        try:
+            d = Dialog(sock, local_ip_towards(host), sock.getsockname()[1], host, port, "")
+            d.call_id, d.ftag, d.ttag = str(c["call_id"]), str(c["ftag"]), str(c["ttag"])
+            d.uri, d.remote_target, d.cseq = str(c["uri"]), str(c["remote_target"]), cseq
+            answered = d.bye()
+            self.log("phone: hung up a call the receiver left open (it stopped in the middle of a page)%s"
+                     % ("" if answered else "; the HT813 did not answer"))
+        except (CallFailed, OSError) as e:
+            self.log("phone: could not hang up the call left open: %s" % e)
+        finally:
+            if own:
+                sock.close()
+        self._forget()
+        return True
+
+    def hang_up_now(self):
+        """The receiver is stopping: hang up the call going on, if any, at once. (It stays noted
+        on disk: the next start hangs it up again in case this didn't get through.)"""
+        d = self.active
+        if d is not None and not d.hung_up:
+            d.bye(quick=True)
 
     def _page(self, zone, dial, audio):
         ph = self.cfg["phone"]
@@ -328,9 +396,13 @@ class SipPager:
         rtp.bind(("0.0.0.0", 0))
         rport = rtp.getsockname()[1]
         try:
+            if self._hang_up_leftover(sip):
+                time.sleep(1.0)                    # give the HT813 a moment to free its line
             auth_id = ph.get("ht813_auth_id", "") or ph.get("ht813_user", "") or "p833"
             d = Dialog(sip, me, lport, host, port, user, (auth_id, self.password))
             far = d.invite(rport, deadline)
+            self.active = d
+            self._remember(d)
             self.log("phone: HT813 answered; audio to %s:%d" % far)
             try:
                 stream = RtpStream(rtp, far, record, d.peer_ip)
@@ -353,7 +425,9 @@ class SipPager:
                             raise CallFailed("page did not open: " + found)
                 played = stream.play(pcm, d, deadline)
             finally:
-                d.bye()
+                if d.bye():                        # hung up (or the HT813 did): no longer open
+                    self._forget()
+                self.active = None
                 self.last_end = time.monotonic()
                 if record:
                     self.last_recording = pcm_to_wav(stream.heard())
@@ -469,6 +543,9 @@ class Dialog:
                 if tried_auth and code in (401, 403, 407):
                     raise CallFailed("the HT813 did not accept the password in secrets.env "
                                      "(P833_HT813_PASSWORD) for user %s: %s" % (self.auth[0], first[8:][:40]))
+                if code == 486:
+                    raise CallFailed("HT813 said busy (%s): its phone line is still in another call. If this "
+                                     "keeps up, reboot the HT813" % first[8:][:40])
                 raise CallFailed("HT813 refused the call: %s" % first[8:][:80])
             m = re.search(r"<([^>]+)>", h.get("contact", ""))
             if m:
@@ -496,20 +573,23 @@ class Dialog:
         self._send("CANCEL %s SIP/2.0\r\n" % self.uri + self._headers("CANCEL", self.branch, self.cseq, False) +
                    "Content-Length: 0\r\n\r\n")
 
-    def bye(self):
+    def bye(self, quick=False):
+        """Hang up. True if the HT813 answered (or had hung up itself). quick: when the receiver
+        is stopping, send it twice without waiting long."""
         if self.hung_up:
-            return
+            return True
         self.hung_up = True
         self.cseq += 1
         msg = ("BYE %s SIP/2.0\r\n" % self.remote_target + self._headers("BYE", _tag() + _tag(), self.cseq) +
                "Content-Length: 0\r\n\r\n")
-        for wait in (0.5, 1.0, 1.5):            # send, then resend twice if not answered
+        for wait in ((0.2, 0.3) if quick else (0.5, 1.0, 1.5)):   # send, then resend if not answered
             self._send(msg)
             end = time.monotonic() + wait
             while time.monotonic() < end:
                 r = self._recv(0.1)
                 if r and r[0].startswith("SIP/2.0 ") and r[1].get("cseq", "") == "%d BYE" % self.cseq:
-                    return
+                    return True
+        return False
 
     def check(self):
         """Handle anything the HT813 sends mid-call. Raises if it hung up."""

@@ -24,6 +24,7 @@ import logging
 import os
 import queue
 import re
+import signal
 import socket
 import socketserver
 import ssl
@@ -45,7 +46,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.17.1"
+VERSION = "0.17.2"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -809,8 +810,22 @@ class NotBuiltPager:
         return False, "phone pager not built yet (HT813 step); nothing was dialed"
 
 
-def make_live_pager(cfg, ht813_password=""):
-    return SipPager(cfg, LOG.info, password=ht813_password)
+def make_live_pager(cfg, ht813_password="", state_dir=None):
+    return SipPager(cfg, LOG.info, password=ht813_password, state_dir=state_dir)
+
+
+def hang_up_on_stop(pager):
+    """When the receiver is stopped (systemctl stop or restart, an update), hang up the page
+    call in progress first. Killed without that, the HT813 keeps its line in the call and
+    answers every later call "486 Busy Here"."""
+    def stop(signum, _frame):
+        if getattr(pager, "active", None) is not None:
+            LOG.warning("stopping in the middle of a page: hanging up the call first")
+        try:
+            getattr(pager, "hang_up_now", lambda: None)()
+        finally:
+            raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
 
 
 class PageWorker(threading.Thread):
@@ -3251,7 +3266,9 @@ def main(argv=None):
     if removed:
         LOG.info("removed %d saved dry-run audio file(s) (keeping %d)", removed, dry_pager.keep())
     ht813_pw = os.environ.pop("P833_HT813_PASSWORD", "").strip()   # only if the HT813 asks for one
-    worker = PageWorker(cfg, state, make_live_pager(cfg, ht813_pw), dry_pager)
+    worker = PageWorker(cfg, state, make_live_pager(cfg, ht813_pw, args.state_dir), dry_pager)
+    hang_up_on_stop(worker.live)
+    threading.Thread(target=worker.live.hang_up_leftover, daemon=True).start()   # one left open last time
     worker.state_dir = args.state_dir
     if worker.audio.load_error:
         LOG.warning("AUDIO: %s", worker.audio.load_error)

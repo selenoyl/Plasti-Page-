@@ -5,6 +5,8 @@
 #
 # mode: "answer" (normal), "busy" (486), "silent" (never answers),
 #       "hangup" (answers, then hangs up after hangup_after seconds)
+# one_line: like the real FXO port, one call at a time: while a call that nobody hung up
+#       is open, every new call gets 486 Busy Here (until a BYE for that call arrives)
 # password: if set, INVITEs must answer a Digest challenge with it (user "p833")
 
 import hashlib
@@ -19,7 +21,7 @@ EVENT_CHARS.update({10: "*", 11: "#", 16: "F"})
 
 
 class FakeHT813:
-    def __init__(self, mode="answer", hangup_after=0.5, line_tone="quiet", password=""):
+    def __init__(self, mode="answer", hangup_after=0.5, line_tone="quiet", password="", one_line=False):
         # line_tone: what the "line" sends back during the call: quiet (an open page),
         # dial (dial tone: flash or digits not taken), busy, or ring (called a phone)
         self.mode, self.hangup_after, self.line_tone = mode, hangup_after, line_tone
@@ -37,6 +39,8 @@ class FakeHT813:
         self.timeline = []            # ("audio"|"event"|"silence", time)
         self.got_bye = False
         self.got_ack = False
+        self.one_line, self.open_call = one_line, None     # the call-id of the call on the line now
+        self.byes = []                # (call-id, the answer: 200 or 481)
         self._last_event_ts = None
         self._stop = False
         self._peer = None
@@ -81,9 +85,11 @@ class FakeHT813:
                 if self.password and not self._auth_ok(first, h):
                     continue
                 self._reply(addr, 100, "Trying", h)
-                if self.mode == "busy":
+                if self.mode == "busy" or (self.one_line and self.open_call):
                     self._reply(addr, 486, "Busy Here", h)
                     continue
+                if self.one_line:
+                    self.open_call = h.get("call-id")
                 sdp = ("v=0\r\no=ht 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"
                        "m=audio %d RTP/AVP 0 101\r\na=rtpmap:101 telephone-event/8000\r\n" % self.rtp_port)
                 self._reply(addr, 200, "OK", h, sdp, "Contact: <sip:fxo@127.0.0.1:%d>\r\n"
@@ -99,7 +105,13 @@ class FakeHT813:
             elif first.startswith("ACK "):
                 self.got_ack = True
             elif first.startswith("BYE "):
+                if self.one_line and h.get("call-id") != self.open_call:
+                    self.byes.append((h.get("call-id"), 481))
+                    self._reply(addr, 481, "Call/Transaction Does Not Exist", h)
+                    continue
                 self.got_bye = True
+                self.open_call = None
+                self.byes.append((h.get("call-id"), 200))
                 self._reply(addr, 200, "OK", h)
             elif first.startswith("CANCEL "):
                 self._reply(addr, 200, "OK", h)
@@ -147,6 +159,7 @@ class FakeHT813:
             time.sleep(0.02)
 
     def _hang_up(self, addr, h):
+        self.open_call = None
         msg = ("BYE sip:p833@%s SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:%d;branch=z9hG4bKfakebye\r\n"
                "From: %s;tag=fake1\r\nTo: %s\r\nCall-ID: %s\r\nCSeq: 1 BYE\r\nContent-Length: 0\r\n\r\n" % (
                    addr[0], self.port, h.get("to", ""), h.get("from", ""), h.get("call-id", "")))

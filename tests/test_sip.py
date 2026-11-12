@@ -1,9 +1,14 @@
 # Tests for the phone pager (receiver/p833_sip.py) against a fake HT813.
 # By Ethan Brady & Ryan Raikes
 
+import json
 import os
 import re
+import shutil
+import signal
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -75,6 +80,71 @@ class Pager(unittest.TestCase):
         ok, detail = S.SipPager(cfg_for(self.ht)).page("floor", "61", "en", "es", tone_wav(0.2))
         self.assertFalse(ok)
         self.assertIn("486", detail)
+        self.assertIn("still in another call", detail)
+        self.assertIn("reboot the HT813", detail)
+
+    # ---- the receiver stopped in the middle of a page (an update's restart, a crash)
+    CHILD = r"""
+import io, json, sys, wave
+sys.path.insert(0, %r)
+import p833_receiver as R
+pager = R.make_live_pager({"phone": json.loads(sys.argv[1])}, "", sys.argv[2])
+R.hang_up_on_stop(pager)
+buf = io.BytesIO()
+with wave.open(buf, "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x10\x00" * 8000 * 20)
+pager.page("floor", "61", "en", "es", buf.getvalue())
+""" % os.path.join(os.path.dirname(HERE), "receiver")
+
+    def stopped_mid_page(self, sig):
+        """A receiver in another process pages, and is stopped by `sig` while the call is on."""
+        state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, state)
+        proc = subprocess.Popen([sys.executable, "-c", self.CHILD, json.dumps(cfg_for(self.ht)["phone"]), state],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(200):
+            if self.ht.open_call:
+                break
+            time.sleep(0.05)
+        self.assertTrue(self.ht.open_call, "the call never started")
+        time.sleep(0.5)
+        proc.send_signal(sig)
+        proc.wait(10)
+        time.sleep(0.3)
+        return state, proc.returncode
+
+    def test_stopped_mid_page_hangs_up_first(self):
+        self.ht = FakeHT813(one_line=True)
+        state, code = self.stopped_mid_page(signal.SIGTERM)          # what systemctl restart (an update) does
+        self.assertIsNone(self.ht.open_call)                         # the HT813's line is free again
+        self.assertEqual(code, 0)
+        ok, detail = S.SipPager(cfg_for(self.ht), state_dir=state).page("floor", "61", "en", "es", tone_wav(0.2))
+        self.assertTrue(ok, detail)
+
+    def test_call_left_open_is_hung_up_next_time(self):
+        self.ht = FakeHT813(one_line=True)
+        state, _ = self.stopped_mid_page(signal.SIGKILL)              # a crash or power cut: no chance to hang up
+        left = self.ht.open_call
+        self.assertTrue(left)                                        # the line stays in that call...
+        ok, detail = S.SipPager(cfg_for(self.ht)).page("floor", "61", "en", "es", tone_wav(0.2))
+        self.assertFalse(ok)                                         # ...so a call is answered "busy"
+        self.assertIn("486", detail)
+        ok, detail = S.SipPager(cfg_for(self.ht), state_dir=state).page("floor", "61", "en", "es", tone_wav(0.2))
+        self.assertTrue(ok, detail)                                  # the next start hangs it up first
+        self.assertIn((left, 200), self.ht.byes)
+        self.assertFalse(os.path.exists(os.path.join(state, "open_call.json")))
+
+    def test_open_call_note_is_cleared_after_each_call(self):
+        self.ht = FakeHT813(one_line=True)
+        state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, state)
+        pager = S.SipPager(cfg_for(self.ht), state_dir=state)
+        for _ in range(2):
+            ok, detail = pager.page("floor", "61", "en", "es", tone_wav(0.2))
+            self.assertTrue(ok, detail)
+            self.assertFalse(os.path.exists(os.path.join(state, "open_call.json")))
+        self.assertIsNone(self.ht.open_call)
+        self.assertFalse(pager.hang_up_leftover())                    # nothing left over
 
     def test_no_answer(self):
         self.ht = FakeHT813(mode="silent")
