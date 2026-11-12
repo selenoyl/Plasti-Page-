@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.9.0:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.9.1:** receiving, checking, logging, dry-run paging, the
 admin page, the editable phone settings and the recorded page audio are in and
 tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
@@ -214,7 +214,9 @@ Each call from a cell can also go out as a one-way text, for example
 **voip.ms setup:**
 1. Go to **Main Menu > SOAP and REST/JSON API**.
 2. Enable the API and set an **API password**. This isn't your voip.ms login password.
-3. Add the laptop's **public internet IP address** to the allowed list.
+3. Add the site's **public internet IP address** to the allowed list. If you don't know it, send a test text: when the address isn't allowed yet, the result says which address voip.ms sees.
+4. Turn **SMS on** for the voip.ms number (DID) the texts come from.
+5. E-mail **messaging@voip.ms** before going live. Ask them to register the texts as business (A2P) messages, and to raise the daily limit if you need more. The default is 100 texts a day, and each number on the list counts. Unregistered automated texts to US mobiles can be quietly blocked by the carriers.
 
 **On the admin page:**
 - Enter the voip.ms account e-mail and the API password. The password is write-only: it's stored in `/var/lib/p833-receiver/sms_secret.json` (mode 0600, readable only by the paging service) and is never shown again or written to a log.
@@ -226,7 +228,10 @@ Each call from a cell can also go out as a one-way text, for example
 **How it behaves:**
 - Texts go out from a separate queue, so a slow or failed text never delays a page.
 - Repeats aren't texted. Test calls from the admin page are texted only if "Text test calls too" is ticked.
-- Results show under **Recent texts**; the full log is `/var/log/p833-receiver/texts.csv`.
+- Results show under **Recent texts**; the full log is `/var/log/p833-receiver/texts.csv`. "sent" means voip.ms accepted the text; there is no delivery receipt.
+- If voip.ms says the account itself has a problem (wrong password, API off, address not allowed, no funds, daily limit), the other numbers are skipped instead of tried, and the result says what to fix.
+- If voip.ms can't be reached, the text is tried once more. If the request went out but no answer came back, it is **not** retried, because that could text everyone twice.
+- Texts are plain ASCII: accents are dropped ("Mañana" becomes "Manana"). Anything over 160 characters is cut and ends in "...".
 - The laptop needs to reach voip.ms on the internet (HTTPS, port 443), even if the rest of the IoT network is isolated.
 
 ## Voice lab (try voices, speed and pauses)

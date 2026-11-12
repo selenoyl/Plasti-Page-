@@ -38,7 +38,7 @@ from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 import p833_sms  # noqa: E402
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -1241,8 +1241,9 @@ Up to 160 characters, counted against the hourly limit; the result shows under R
 <tr><td>Send texts</td><td><input type=checkbox name=enabled%s></td><td class=small>Off until you're ready.
 Pages don't depend on texts: a text that fails never holds up a page.</td></tr>
 <tr><td>voip.ms account e-mail</td><td><input name=api_username value='%s' size=28 maxlength=100></td>
-<td class=small>voip.ms: Main Menu, SOAP and REST/JSON API. Enable the API there and add this laptop's
-public internet address to its allowed IP list.</td></tr>
+<td class=small>voip.ms: Main Menu, SOAP and REST/JSON API. Enable the API there and add this site's
+public internet address to its allowed IP list (a test text shows it if it's missing). voip.ms allows
+100 texts a day unless you ask messaging@voip.ms for more.</td></tr>
 <tr><td>voip.ms API password</td><td><input name=api_password type=password size=28 maxlength=200
  autocomplete=new-password placeholder='%s'><br><label class=small><input type=checkbox name=clear_password>
  remove the stored password</label></td><td class=small>The API password set on that voip.ms page (not your

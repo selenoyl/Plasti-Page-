@@ -4,11 +4,14 @@
 import json
 import os
 import shutil
+import socket
 import stat
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "receiver"))
@@ -16,20 +19,29 @@ import p833_sms as T    # noqa: E402
 
 
 class FakeVoipMs:
-    """Stands in for the HTTPS call to voip.ms: records requests, answers with a status."""
+    """Stands in for the HTTPS call to voip.ms: records sendSMS requests, answers with a status.
+    fail_network: requests that never get there; timeouts: requests sent but not answered."""
 
-    def __init__(self, statuses=None, fail_network=0):
-        self.requests = []
+    def __init__(self, statuses=None, fail_network=0, timeouts=0, ip="203.0.113.5"):
+        self.requests, self.ip_lookups = [], 0
         self.statuses = list(statuses or [])
-        self.fail_network = fail_network
+        self.fail_network, self.timeouts, self.ip = fail_network, timeouts, ip
 
     def __call__(self, url, params, timeout):
+        if params.get("method") == "getIP":
+            self.ip_lookups += 1
+            return json.dumps({"status": "success", "ip": self.ip}).encode()
         self.requests.append((url, dict(params), timeout))
         if self.fail_network:
             self.fail_network -= 1
-            raise OSError("network down")
+            raise urllib.error.URLError(OSError("network down"))
+        if self.timeouts:
+            self.timeouts -= 1
+            raise socket.timeout("timed out")
         status = self.statuses.pop(0) if self.statuses else "success"
-        return json.dumps({"status": status}).encode()
+        if status[:1] in ("{", "<", "["):
+            return status.encode()                      # a raw answer
+        return json.dumps({"status": status, "sms": 23434} if status == "success" else {"status": status}).encode()
 
 
 def cfg_with(**sms):
@@ -63,7 +75,8 @@ class Sms(unittest.TestCase):
         self.assertEqual(T.compose(cfg_with(), rec), "Chapar: Maintenance requested to press 27 for camera fault.")
         self.assertEqual(T.compose(cfg_with(template="{prefix} {cell}: {message}"), rec),
                          "Chapar: RSP LH: Maintenance requested to press 27 for camera fault.")
-        self.assertEqual(len(T.compose(cfg_with(), {"message": "x" * 300})), T.MAX_SMS)
+        long = T.compose(cfg_with(), {"message": "x" * 300})
+        self.assertEqual((len(long), long[-3:]), (T.MAX_SMS, "..."))
         self.assertEqual(T.compose(cfg_with(template="{nope}"), rec)[:8], "Chapar: ")   # bad template falls back
 
     def test_send_to_each_number(self):
@@ -79,11 +92,55 @@ class Sms(unittest.TestCase):
         self.assertTrue(fake.requests[0][0].startswith("https://voip.ms/api/v1/rest.php"))
 
     def test_errors_are_reported(self):
-        s = self.sender(cfg_with(), FakeVoipMs(statuses=["invalid_credentials", "success"]))
+        s = self.sender(cfg_with(), FakeVoipMs(statuses=["invalid_dst", "success"]))
         ok, detail = s.send("hi")
         self.assertFalse(ok)
-        self.assertIn("invalid_credentials", detail)
-        self.assertEqual([r["result"] for r in s.recent], ["FAILED", "sent"])
+        self.assertIn("invalid_dst", detail)
+        self.assertEqual([r["result"] for r in s.recent], ["FAILED", "sent"])   # one bad number: keep going
+        self.assertIn("voip.ms id 23434", s.recent[1]["detail"])
+
+    def test_account_problem_stops_the_batch(self):
+        fake = FakeVoipMs(statuses=["invalid_credentials"])
+        s = self.sender(cfg_with(to=["5550001111", "5550002222", "5550003333"]), fake)
+        ok, detail = s.send("hi")
+        self.assertFalse(ok)
+        self.assertEqual(len(fake.requests), 1)                  # no point trying the others
+        self.assertEqual([r["result"] for r in s.recent], ["FAILED", "SKIPPED", "SKIPPED"])
+        self.assertIn("API password", s.recent[0]["detail"])     # with a hint what to fix
+
+    def test_ip_not_allowed_shows_the_address(self):
+        fake = FakeVoipMs(statuses=["ip_not_enabled"])
+        s = self.sender(cfg_with(to=["5550001111"]), fake)
+        ok, detail = s.send("hi")
+        self.assertFalse(ok)
+        self.assertEqual(fake.ip_lookups, 1)
+        self.assertIn("voip.ms sees this site as 203.0.113.5", detail)
+
+    def test_busy_is_retried_once(self):
+        fake = FakeVoipMs(statuses=["api_limit_exceeded", "success"])
+        s = self.sender(cfg_with(to=["5550001111"]), fake)
+        s.busy_retry_s = 0.05
+        self.assertTrue(s.send("hi")[0])
+        self.assertEqual(len(fake.requests), 2)
+        fake = FakeVoipMs(statuses=["sms_failed", "success"])    # not a busy answer: no retry
+        s = self.sender(cfg_with(to=["5550001111"]), fake)
+        self.assertFalse(s.send("hi")[0])
+        self.assertEqual(len(fake.requests), 1)
+
+    def test_no_retry_once_the_request_may_have_arrived(self):
+        fake = FakeVoipMs(timeouts=1)
+        s = self.sender(cfg_with(to=["5550001111"]), fake)
+        ok, detail = s.send("hi")
+        self.assertFalse(ok)
+        self.assertEqual(len(fake.requests), 1)                  # a retry could send it twice
+        self.assertIn("may or may not", detail)
+
+    def test_bad_answers(self):
+        for raw, word in (("<soap:Fault/>", "isn't JSON"), ("{}", "no status"), ('["x"]', "no status")):
+            s = self.sender(cfg_with(to=["5550001111"]), FakeVoipMs(statuses=[raw]))
+            ok, detail = s.send("hi")
+            self.assertFalse(ok)
+            self.assertIn(word, detail)
 
     def test_network_error_is_retried_once(self):
         fake = FakeVoipMs(fail_network=1)
@@ -153,9 +210,45 @@ class Sms(unittest.TestCase):
         self.assertEqual(s.jobs.get_nowait(), ("Chapar: Test text from the paging system.", None))
         self.assertFalse(self.sender(cfg_with(to=[]), fake).test_text()[0])
 
-    def test_https_only(self):
-        with self.assertRaises(ValueError):
-            T.SmsSender._https("http://voip.ms/api/v1/rest.php", {}, 1)
+    def test_https_only_and_only_to_voipms(self):
+        for url in ("http://voip.ms/api/v1/rest.php", "https://voip.ms.evil.example/api/v1/rest.php",
+                    "https://evil.example/?x=https://voip.ms/", "https://voip.ms@evil.example/",
+                    "https://voip.ms/api/v1/rest.php?method=x"):
+            with self.assertRaises(ValueError, msg=url):
+                T.SmsSender._https(url, {}, 1)
+
+    def test_request_is_a_get(self):
+        seen = []
+
+        class Opener:
+            def open(self, req, timeout):
+                seen.append((req, timeout))
+                raise urllib.error.URLError("stop here")
+
+        real = T.urllib.request.build_opener
+        T.urllib.request.build_opener = lambda *a: Opener()
+        try:
+            with self.assertRaises(urllib.error.URLError):
+                T.SmsSender._https("https://voip.ms/api/v1/rest.php",
+                                   {"api_password": "p&ss#w+rd", "method": "sendSMS", "message": "a b"}, 7)
+        finally:
+            T.urllib.request.build_opener = real
+        req, timeout = seen[0]
+        self.assertEqual((req.get_method(), req.data, timeout), ("GET", None, 7))
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
+        self.assertEqual((q["api_password"], q["message"]), (["p&ss#w+rd"], ["a b"]))   # encoded safely
+
+    def test_redirects_are_refused(self):
+        class Req:
+            full_url = "https://voip.ms/api/v1/rest.php?api_password=secret"
+        with self.assertRaises(urllib.error.HTTPError) as c:
+            T._NoRedirect().redirect_request(Req(), None, 301, "Moved", {}, "http://voip.ms/x")
+        self.assertNotIn("secret", c.exception.geturl())
+
+    def test_plain_ascii(self):
+        self.assertEqual(T.finish("Ma\u00f1ana \u2013 \u201cpress\u201d it\u2019s\u2026 \U0001f527"),
+                         'Manana - "press" it\'s...')
+        self.assertEqual(T.mask("5551234567"), "...4567")
 
     def test_queue_respects_switches(self):
         fake = FakeVoipMs()
@@ -183,6 +276,7 @@ class Sms(unittest.TestCase):
         self.assertEqual(s.manual_text("5554443333", "no prefix", add_prefix=False)[1], "queued to 5554443333: no prefix")
         self.assertFalse(s.manual_text("123", "hi")[0])
         self.assertFalse(s.manual_text("5554443333", "   ")[0])
+        self.assertFalse(s.manual_text("5554443333", "\U0001f527")[0])     # nothing left once made ASCII
         self.assertEqual(len(s.manual_text("5554443333", "x" * 300)[1].split(": ", 1)[1]), T.MAX_SMS)
 
 

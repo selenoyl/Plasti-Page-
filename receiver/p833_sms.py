@@ -7,6 +7,12 @@
 # background thread with its own queue, so a slow or failed text never delays
 # or blocks a page.
 #
+# voip.ms facts this follows (from its API docs and working clients; see AAR D57):
+#   - one HTTPS GET per text to https://voip.ms/api/v1/rest.php, method=sendSMS,
+#     did (from), dst (ONE number: no group texts), message (160 characters max)
+#   - errors come back as HTTP 200 with {"status": "<code>"}; only "success" is OK
+#   - the API must be enabled and this site's public IP allowed at voip.ms
+#
 # The voip.ms API password is entered on the admin page and stored in
 # <state dir>/sms_secret.json, mode 0600, readable only by the service user
 # (and root). It is never shown back, written to a log or put in a URL.
@@ -24,6 +30,7 @@ import re
 import ssl
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,6 +54,30 @@ DEFAULTS = {
 }
 MAX_SMS = 160                    # voip.ms sendSMS limit (characters)
 CSV_FIELDS = ["time", "to", "text", "result", "detail"]
+API_HOSTS = ("voip.ms",)         # the password is only ever sent here
+
+# voip.ms answers that mean every other text would fail the same way: stop the batch.
+STOP_ALL = {"invalid_credentials", "missing_credentials", "api_not_enabled", "ip_not_enabled",
+            "missing_method", "invalid_method", "missing_did", "invalid_did", "non_sufficient_funds",
+            "limit_reached"}
+# Answers worth one more try after a pause.
+TRANSIENT = {"api_limit_exceeded", "method_maintenance", "provider_outofservice", "tls_error",
+             "unavailable_info"}
+HINTS = {
+    "invalid_credentials": "check the account e-mail and the API password",
+    "missing_credentials": "check the account e-mail and the API password",
+    "api_not_enabled": "turn the API on at voip.ms: Main Menu, SOAP and REST/JSON API",
+    "ip_not_enabled": "add this site's public IP to the allowed list at voip.ms",
+    "invalid_did": "check the sending number, and that SMS is turned on for it at voip.ms",
+    "non_sufficient_funds": "add funds to the voip.ms account",
+    "limit_reached": "voip.ms daily text limit reached (100 a day unless voip.ms raises it)",
+    "invalid_dst": "voip.ms won't text that number",
+    "sms_toolong": "over 160 characters",
+    "sms_failed": "voip.ms could not send it",
+    "api_limit_exceeded": "too many requests a minute",
+}
+_ASCII = {"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-",
+          "\u2026": "...", "\u00a0": " "}
 
 
 def clean_number(s):
@@ -55,6 +86,19 @@ def clean_number(s):
     if len(d) == 11 and d.startswith("1"):
         d = d[1:]
     return d if len(d) == 10 else ""
+
+
+def finish(text):
+    """One line of plain ASCII (accents dropped: n for \u00f1), cut to 160 characters."""
+    text = "".join(_ASCII.get(c, c) for c in str(text))
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = " ".join(text.split())
+    return text if len(text) <= MAX_SMS else text[:MAX_SMS - 3].rstrip() + "..."
+
+
+def mask(n):
+    """A number as it goes in the system log: only the last 4 digits."""
+    return "..." + n[-4:] if len(n) > 4 else n
 
 
 def settings_of(cfg):
@@ -72,12 +116,19 @@ def compose(cfg, rec):
         text = s["template"].format(**fields)
     except (KeyError, IndexError, ValueError):
         text = "%s %s" % (s["prefix"], fields["message"])
-    text = " ".join(text.split())                 # one line, single spaces
-    return text[:MAX_SMS]
+    return finish(text)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: the request URL holds the API password."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url.split("?")[0], code, "redirect refused", headers, fp)
 
 
 class SmsSender(threading.Thread):
     """Sends texts one at a time from a queue; keeps a log of results."""
+    network_retry_s = 3              # pause before the one retry when voip.ms couldn't be reached
+    busy_retry_s = 5                 # ...or when it said it was busy (api_limit_exceeded and the like)
 
     def __init__(self, cfg, state_dir, log_dir, opener=None):
         super().__init__(daemon=True)
@@ -130,7 +181,7 @@ class SmsSender(threading.Thread):
         n = len([x for x in s["to"] if clean_number(x)])
         if not n:
             return False, "no numbers to text"
-        text = " ".join(("%s Test text from the paging system." % s["prefix"]).split())[:MAX_SMS]
+        text = finish("%s Test text from the paging system." % s["prefix"])
         self.jobs.put((text, None))
         return True, ("queued for %d number(s), %s to %s s apart; refresh in a moment and see Recent texts"
                       % (n, s["stagger_min_s"], s["stagger_max_s"]))
@@ -142,10 +193,11 @@ class SmsSender(threading.Thread):
         if not dst:
             return False, "the number must be 10 digits"
         message = " ".join(str(message).split())
-        if not message or not message.isprintable():
+        message = finish(message) if message.isprintable() else ""
+        if not message:
             return False, "type a message"
         s = settings_of(self.cfg)
-        text = ("%s %s" % (s["prefix"], message) if add_prefix and s["prefix"] else message)[:MAX_SMS]
+        text = finish("%s %s" % (s["prefix"], message) if add_prefix and s["prefix"] else message)
         self.jobs.put((text, [dst]))
         return True, "queued to %s: %s" % (dst, text)
 
@@ -169,8 +221,12 @@ class SmsSender(threading.Thread):
         if problem:
             self._record("-", text, "FAILED", problem)
             return False, problem
-        results = []
+        results, stop = [], ""
         for i, dst in enumerate(dsts):
+            if stop:                                            # the account can't send: don't keep trying
+                self._record(dst, text, "SKIPPED", "skipped: " + stop)
+                results.append((dst, False, "skipped"))
+                continue
             if i:
                 time.sleep(self.pause_s(s))                     # spread texts out, at random
             if not self._under_cap(int(s["max_per_hour"])):
@@ -178,10 +234,12 @@ class SmsSender(threading.Thread):
                 self._record(dst, text, "SKIPPED", detail)
                 results.append((dst, False, detail))
                 continue
-            ok, detail = self._send_one(s, user, pw, did, dst, text)
+            ok, detail, stop_all = self._send_one(s, user, pw, did, dst, text)
             if ok:
                 with self.lock:
                     self.sent_times.append(time.monotonic())
+            elif stop_all:
+                stop = detail
             self._record(dst, text, "sent" if ok else "FAILED", detail)
             results.append((dst, ok, detail))
         n_ok = sum(1 for _, ok, _ in results if ok)
@@ -202,46 +260,97 @@ class SmsSender(threading.Thread):
                 self.sent_times.popleft()
             return len(self.sent_times) < per_hour
 
+    def _call(self, s, params):
+        """One API request. Returns (status, answer dict), or raises:
+        urllib.error.URLError when the request never reached voip.ms (safe to retry),
+        OSError when it may have got there but no answer came (not safe: could double-send),
+        ValueError for an unusable answer or address."""
+        body = self.opener(s["api_url"], params, float(s["timeout_s"]))
+        try:
+            answer = json.loads(body.decode("utf-8", "replace"))
+        except ValueError:
+            raise ValueError("voip.ms sent an answer that isn't JSON")
+        if not isinstance(answer, dict) or not answer.get("status"):
+            raise ValueError("voip.ms sent an answer with no status")
+        return str(answer["status"]), answer
+
     def _send_one(self, s, user, pw, did, dst, text):
+        """Returns (ok, detail, stop_all). stop_all: the rest of the batch would fail too."""
         params = {"api_username": user, "api_password": pw, "method": "sendSMS",
                   "did": did, "dst": dst, "message": text}
         for attempt in (1, 2):
             try:
-                body = self.opener(s["api_url"], params, float(s["timeout_s"]))
-            except (urllib.error.URLError, OSError, ValueError) as e:
-                detail = "could not reach voip.ms (%s)" % getattr(e, "reason", e)
-                if attempt == 1:
-                    time.sleep(3)
+                status, answer = self._call(s, params)
+            except urllib.error.HTTPError as e:
+                return False, "voip.ms answered HTTP %s" % e.code, False
+            except urllib.error.URLError as e:
+                if attempt == 1:                            # never got there: one more try
+                    time.sleep(self.network_retry_s)
                     continue
-                return False, detail
-            try:
-                status = json.loads(body.decode("utf-8", "replace")).get("status", "")
-            except ValueError:
-                return False, "voip.ms sent an answer that isn't JSON"
+                return False, self._scrub("could not reach voip.ms (%s)" % (e.reason,), pw), False
+            except ValueError as e:
+                return False, self._scrub(str(e), pw), False
+            except OSError as e:
+                # Sent, but no answer in time. voip.ms may have taken it, so a retry could
+                # send it twice; don't.
+                return False, self._scrub("no answer from voip.ms (%s); the text may or may not "
+                                          "have gone out" % (e,), pw), False
             if status == "success":
-                return True, "sent"
-            return False, "voip.ms said %s" % (status or "nothing")
-        return False, "failed"
+                sms_id = answer.get("sms")
+                return True, "sent (voip.ms id %s)" % sms_id if sms_id not in (None, "", 0, "0") \
+                    else "sent (voip.ms gave no message id)", False
+            if status in TRANSIENT and attempt == 1:
+                time.sleep(self.busy_retry_s)
+                continue
+            detail = "voip.ms said %s" % status
+            if status in HINTS:
+                detail += ": " + HINTS[status]
+            if status == "ip_not_enabled":
+                ip = self.public_ip(s, user, pw)
+                if ip:
+                    detail += " (voip.ms sees this site as %s)" % ip
+            return False, detail, status in STOP_ALL
+        return False, "failed", False
+
+    def public_ip(self, s, user, pw):
+        """The internet address voip.ms sees this laptop coming from ('' if unknown).
+        getIP is the one API method that works before the address is allowed."""
+        try:
+            status, answer = self._call(s, {"api_username": user, "api_password": pw, "method": "getIP"})
+        except (OSError, ValueError):
+            return ""
+        ip = str(answer.get("ip", ""))
+        return ip if status == "success" and re.match(r"^[0-9a-fA-F.:]{3,45}$", ip) else ""
+
+    @staticmethod
+    def _scrub(detail, pw):
+        """Make sure no error text carries the password."""
+        for v in {pw, urllib.parse.quote_plus(pw), urllib.parse.quote(pw)}:
+            if v:
+                detail = detail.replace(v, "***")
+        return detail
 
     @staticmethod
     def _https(url, params, timeout):
-        """POST the request over HTTPS with certificate checking. The password goes in
-        the request body, never in the URL."""
-        if not url.startswith("https://"):
-            raise ValueError("the voip.ms API address must start with https://")
-        data = urllib.parse.urlencode(params).encode()
-        req = urllib.request.Request(url, data=data, method="POST",
-                                     headers={"Content-Type": "application/x-www-form-urlencoded",
-                                              "User-Agent": "P833-Receiver"})
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+        """GET the API over HTTPS, as voip.ms documents it (a form POST can land on its SOAP
+        handler). Certificates are checked, only voip.ms is ever contacted, and redirects
+        are refused so the request can't be bounced elsewhere or onto plain HTTP. The URL
+        carries the password, so it is never logged."""
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != "https" or parts.hostname not in API_HOSTS or parts.query:
+            raise ValueError("the voip.ms API address must be https://voip.ms/...")
+        req = urllib.request.Request(url + "?" + urllib.parse.urlencode(params),
+                                     headers={"User-Agent": "P833-Receiver", "Accept": "application/json"})
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+                                             _NoRedirect)
+        with opener.open(req, timeout=timeout) as r:
             return r.read(65536)
 
     # -- log of texts (no passwords in it)
     def _record(self, dst, text, result, detail):
         row = {"time": datetime.now().isoformat(sep=" ", timespec="seconds"), "to": dst, "text": text,
                "result": result, "detail": detail}
-        (LOG.info if result == "sent" else LOG.warning)("text to %s: %s (%s)", dst, result, detail)
+        (LOG.info if result == "sent" else LOG.warning)("text to %s: %s (%s)", mask(dst), result, detail)
         with self.lock:
             self.recent.append(row)
             self.recent = self.recent[-30:]
