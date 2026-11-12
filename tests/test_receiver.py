@@ -513,6 +513,16 @@ class Server(unittest.TestCase):
             self.assertEqual(self.post("/heartbeat", {"board": bad}, KEY)[0], 400, bad)
         self.assertEqual(self.call(boot="bad boot!")[0], 400)
 
+    def test_board_reports_dropped_calls(self):
+        with self.assertLogs("p833", "WARNING") as logs:
+            self.post("/heartbeat", {"board": "RSP_LH", "boot": "b9", "dropped": 0}, KEY)
+            self.post("/heartbeat", {"board": "RSP_LH", "boot": "b9", "dropped": 2}, KEY)
+            self.post("/heartbeat", {"board": "RSP_LH", "boot": "b9", "dropped": 2}, KEY)    # no news
+            R.LOG.warning("end")
+        lost = [m for m in logs.output if "lost" in m]
+        self.assertEqual(len(lost), 1)
+        self.assertIn("lost 2 call(s)", lost[0])
+
     def test_old_message_sent_again_is_not_paged(self):
         self.assertEqual(self.call(seq=4)[0], 200)
         self.wait_pages()

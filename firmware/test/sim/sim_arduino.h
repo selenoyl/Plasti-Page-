@@ -240,7 +240,8 @@ inline void xTaskCreatePinnedToCore(void (*fn)(void*), const char*, int, void* a
   std::thread(fn, arg).detach();
 }
 
-// ---- WebServer and Update: compile-only stand-ins (the PC test doesn't serve pages)
+// ---- WebServer and Update: stand-ins. The main sim doesn't serve pages; the update test
+// (test_update_main.cpp) sets the sim* fields to play one request into the handlers.
 enum HTTPMethod { HTTP_GET, HTTP_POST };
 enum HTTPAuthMethod { BASIC_AUTH };
 enum HTTPUploadStatus { UPLOAD_FILE_START, UPLOAD_FILE_WRITE, UPLOAD_FILE_END, UPLOAD_FILE_ABORTED };
@@ -253,10 +254,21 @@ class WebServer {
   void onNotFound(std::function<void()>) {}
   void begin();   // defined after WiFi below: aborts if the network stack isn't up, as on the board
   void handleClient() {}
-  void send(int, const char*, const String&) {}
-  bool authenticate(const char*, const char*) { return false; }
-  void requestAuthentication(HTTPAuthMethod, const char*) {}
+  void send(int code, const char*, const String&) { simLastCode = code; std::printf("[sim] web reply %d\n", code); }
+  bool authenticate(const char*, const char*) { return simAuthOk; }
+  void requestAuthentication(HTTPAuthMethod, const char*) { simLastCode = 401; }
+  void collectHeaders(const char* [], const size_t) {}
+  bool hasHeader(const String& name) {
+    if (name == "Authorization") return simAuthOk || simHasAuthHeader;
+    if (name == "Origin") return !simOrigin.empty();
+    return false;
+  }
+  String header(const String& name) { return name == "Origin" ? String(simOrigin.c_str()) : String(""); }
+  String hostHeader() { return String(simHost.c_str()); }
   HTTPUpload& upload() { return up_; }
+  bool simAuthOk = false, simHasAuthHeader = false;
+  std::string simOrigin, simHost;
+  int simLastCode = 0;
  private:
   HTTPUpload up_{};
 };

@@ -26,7 +26,7 @@
 #error "Needs the esp32 board package 3.0.0 or newer (Arduino IDE: Tools > Board > Boards Manager > esp32)"
 #endif
 
-#define FW_VERSION "1.1.2"
+#define FW_VERSION "1.1.3"
 
 // ---- Board pins (Waveshare wiki and demo code for the ESP32-S3-ETH-8DI-8RO):
 //   DI1..DI8 = GPIO4..GPIO11, optocoupler inputs read with the pull-up on;
@@ -60,6 +60,7 @@ QueueHandle_t decodedQ;
 QueueHandle_t logQ;
 PendingCall pending[MAX_QUEUE];
 int pendingCount = 0;
+uint32_t droppedCalls = 0;       // calls lost because the queue was full (reported in heartbeats)
 uint32_t nextSeq = 1;
 char bootId[9];
 uint32_t nextTryAt = 0, retryDelay = 2000, lastHeartbeat = 0, wifiLostAt = 0;
@@ -305,6 +306,7 @@ int post(const char* path, const String& body) {
 void queueCall(int code, int press, const char* why) {
   if (pendingCount == MAX_QUEUE) {
     Serial.println("QUEUE FULL: oldest call dropped");
+    droppedCalls++;
     memmove(&pending[0], &pending[1], sizeof(PendingCall) * (MAX_QUEUE - 1));
     pendingCount--;
   }
@@ -354,8 +356,10 @@ void heartbeat() {
   lastHeartbeat = millis() | 1;
   char body[200];
   snprintf(body, sizeof(body),
-           "{\"board\":\"%s\",\"boot\":\"%s\",\"fw\":\"%s\",\"rssi\":%d,\"uptime_s\":%lu,\"pending\":%d}",
-           cfg.id.c_str(), bootId, FW_VERSION, WiFi.RSSI(), (unsigned long)(millis() / 1000), pendingCount);
+           "{\"board\":\"%s\",\"boot\":\"%s\",\"fw\":\"%s\",\"rssi\":%d,\"uptime_s\":%lu,\"pending\":%d,"
+           "\"dropped\":%lu}",
+           cfg.id.c_str(), bootId, FW_VERSION, WiFi.RSSI(), (unsigned long)(millis() / 1000), pendingCount,
+           (unsigned long)droppedCalls);
   int st = post("/heartbeat", String(body));
   if (st != 200) {
     Serial.printf("heartbeat failed (%d); trying again in 10 s\n", st);
@@ -374,6 +378,9 @@ void heartbeat() {
 WebServer web(80);
 String updateError;
 bool updateRefused = false;
+bool updateGotFile = false;      // a whole firmware file was received and checked
+uint8_t otaFails = 0;            // wrong update passwords in a row
+uint32_t otaLockUntil = 0;       // after 5, updates wait 5 minutes (guessing protection)
 
 String htmlEscape(const String& in) {
   String out;
@@ -392,13 +399,38 @@ String page(const String& title, const String& body) {
          "</body></html>";
 }
 
+// The update password: right, or not. 5 wrong in a row lock updates for 5 minutes.
+// (Only requests that carry a password count; the browser's first request has none.)
+bool otaLocked() { return otaLockUntil && (int32_t)(millis() - otaLockUntil) < 0; }
+
+bool otaPasswordOk() {
+  if (!cfg.otapass.length() || otaLocked()) return false;
+  if (web.authenticate("p833", cfg.otapass.c_str())) { otaFails = 0; return true; }
+  if (web.hasHeader("Authorization") && ++otaFails >= 5) {
+    otaFails = 0;
+    otaLockUntil = (millis() + 300000UL) | 1;
+    Serial.println("UPDATE: 5 wrong passwords; updates locked for 5 minutes");
+  }
+  return false;
+}
+
+// A form post from a page on another site (cross-site request) is refused.
+bool sameSite() {
+  if (!web.hasHeader("Origin")) return true;      // tools like curl send none
+  return web.header("Origin") == String("http://") + web.hostHeader();
+}
+
 bool updateAllowed() {
   if (!cfg.otapass.length()) {
     web.send(403, "text/html", page("Update", "<p>Updates are off. Set a password over USB: "
                                                "<code>otapass &lt;password&gt;</code></p>"));
     return false;
   }
-  if (!web.authenticate("p833", cfg.otapass.c_str())) {
+  if (otaLocked()) {
+    web.send(429, "text/html", page("Update", "<p>Too many wrong passwords. Try again in 5 minutes.</p>"));
+    return false;
+  }
+  if (!otaPasswordOk()) {
     web.requestAuthentication(BASIC_AUTH, "P833 board update");
     return false;
   }
@@ -437,9 +469,11 @@ void webUpdateUpload() {
   if (up.status == UPLOAD_FILE_START) {
     updateError = "";
     updateRefused = false;
-    if (!cfg.otapass.length() || !web.authenticate("p833", cfg.otapass.c_str())) {
-      updateRefused = true; updateError = "wrong password"; return;
-    }
+    updateGotFile = false;
+    if (!cfg.otapass.length()) { updateRefused = true; updateError = "updates are off"; return; }
+    if (otaLocked()) { updateRefused = true; updateError = "too many wrong passwords; wait 5 minutes"; return; }
+    if (!sameSite()) { updateRefused = true; updateError = "the form came from another site"; return; }
+    if (!otaPasswordOk()) { updateRefused = true; updateError = "wrong password"; return; }
     if (pendingCount) { updateRefused = true; updateError = "a call is waiting to be sent; try again shortly"; return; }
     Serial.printf("UPDATE: receiving %s\n", up.filename.c_str());
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) updateError = Update.errorString();
@@ -447,7 +481,10 @@ void webUpdateUpload() {
     if (!updateRefused && !updateError.length() && Update.write(up.buf, up.currentSize) != up.currentSize)
       updateError = Update.errorString();
   } else if (up.status == UPLOAD_FILE_END) {
-    if (!updateRefused && !updateError.length() && !Update.end(true)) updateError = Update.errorString();
+    if (!updateRefused && !updateError.length()) {
+      if (Update.end(true)) updateGotFile = true;
+      else updateError = Update.errorString();
+    }
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     if (!updateRefused) Update.abort();
     updateError = "upload stopped part way";
@@ -455,14 +492,21 @@ void webUpdateUpload() {
 }
 
 void webUpdateDone() {
-  if (updateRefused || updateError.length()) {
-    if (!updateRefused) Update.abort();
-    Serial.printf("UPDATE failed: %s\n", updateError.c_str());
-    web.send(updateError == "wrong password" ? 401 : 400, "text/html",
-             page("Update failed", "<p>" + htmlEscape(updateError) + "</p><p>The board is still running "
+  // Restart ONLY after this same request sent a whole firmware file that was accepted. A
+  // POST with no file part never reaches the upload handler, so it must not restart.
+  bool ok = !updateRefused && !updateError.length() && updateGotFile && cfg.otapass.length() &&
+            !otaLocked() && sameSite() && web.authenticate("p833", cfg.otapass.c_str());
+  if (!ok) {
+    if (!updateRefused && !updateGotFile) Update.abort();
+    String why = updateError.length() ? updateError : String("no firmware file was received");
+    updateError = ""; updateRefused = false; updateGotFile = false;
+    Serial.printf("UPDATE failed: %s\n", why.c_str());
+    web.send(why == "wrong password" ? 401 : why == "too many wrong passwords; wait 5 minutes" ? 429 : 400,
+             "text/html", page("Update failed", "<p>" + htmlEscape(why) + "</p><p>The board is still running "
                   FW_VERSION ".</p><p><a href='/update'>Back</a></p>"));
     return;
   }
+  updateGotFile = false;
   Serial.println("UPDATE: done, restarting");
   web.send(200, "text/html", page("Update done", "<p>Restarting into the new firmware. "
                                   "Check the version on the <a href='/'>status page</a> in about 15 s.</p>"));
@@ -471,6 +515,8 @@ void webUpdateDone() {
 }
 
 void startWeb() {
+  static const char* headers[] = {"Origin"};
+  web.collectHeaders(headers, 1);      // Authorization is always collected too
   web.on("/", HTTP_GET, webStatus);
   web.on("/update", HTTP_GET, webUpdateForm);
   web.on("/update", HTTP_POST, webUpdateDone, webUpdateUpload);

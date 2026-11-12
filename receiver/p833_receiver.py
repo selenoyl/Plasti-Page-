@@ -1002,10 +1002,15 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(board, str) or not BOARD_ID.match(board):
             return self._reply(400, {"ok": False, "error": "board missing"})
         extra = {}
-        for k in ("fw", "rssi", "uptime_s", "boot"):
+        for k in ("fw", "rssi", "uptime_s", "boot", "dropped"):
             if k in body:
                 v = body[k]
                 extra[k] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else plain(v)
+        prev = self.app["state"].heard_info.get(board, {})
+        before = prev.get("dropped", 0) if prev.get("boot") == extra.get("boot") else 0
+        if isinstance(extra.get("dropped"), int) and isinstance(before, int) and extra["dropped"] > before:
+            LOG.warning("board %s (%s) lost %d call(s): its queue was full (could it reach the receiver?)",
+                        board, self.app["state"].cell_name(board), extra["dropped"] - before)
         self.app["state"].heard(board, self.client_address[0], extra)
         return self._reply(200, {"ok": True})
 

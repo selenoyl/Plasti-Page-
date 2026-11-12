@@ -66,9 +66,9 @@ def main():
         want = [("RSP_LH", "2", "27", "dry-run"), ("RSP_LH", "5", "63", "dry-run"), ("RSP_LH", "9", "42", "dry-run")]
         ok = got == want
         lh = [b for b in status["boards"] if b["board"] == "RSP_LH"]
-        hb_ok = bool(lh) and lh[0]["fw"] == "1.1.2" and lh[0]["ok"]
+        hb_ok = bool(lh) and lh[0]["fw"] == "1.1.3" and lh[0]["ok"]
         print("\nExpected calls arrived exactly once each, in order: %s" % ("YES" if ok else "NO, got %s" % got))
-        print("Heartbeat seen (fw 1.1.2, board OK): %s" % ("YES" if hb_ok else "NO"))
+        print("Heartbeat seen (fw 1.1.3, board OK): %s" % ("YES" if hb_ok else "NO"))
         return 0 if ok and hb_ok else 1
     finally:
         shutil.rmtree(tmp)

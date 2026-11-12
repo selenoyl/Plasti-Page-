@@ -20,7 +20,7 @@ PLC slot 2 OUT14 (24 V sourcing) --> DI1 --> decode pulses --> Wi-Fi --> laptop 
   - Each call carries how long it waited, so the laptop logs the real call time.
   - If Wi-Fi is down, calls wait and go out when it comes back.
   - Calls are kept in memory only, so a call waiting while the board loses power is lost.
-- **Heartbeat every 60 s,** so the laptop shows the board as OK and its Wi-Fi signal.
+- **Heartbeat every 60 s,** so the laptop shows the board as OK and its Wi-Fi signal. From 1.1.3 it also reports calls lost because its queue was full, and the laptop logs them.
 - **Status LED:**
 
   | Colour | Meaning |
@@ -119,6 +119,8 @@ After the first USB upload, later versions can go in over Wi-Fi from any browser
 
 - If a call is waiting to be sent, the board refuses the update ("a call is waiting"). Try again a minute later.
 - A failed or wrong upload leaves the old firmware running.
+- From 1.1.3, the board restarts only after the whole file arrived with the right password. Five wrong passwords lock updates for 5 minutes. An upload posted by a page on another web site is refused.
+- **Security:** the update page is plain HTTP and the firmware isn't signed, so anyone who knows `otapass` and can reach the board can put any program on it. Keep the boards on the isolated IoT network. Turn updates off between updates by typing `otapass` with nothing after it on the USB console, then set it again when you next update.
 - Settings (ID, Wi-Fi, key and so on) are kept through an update.
 
 Settings stay in the board's flash through power cuts and reflashing. To start clean, erase the flash when uploading (Tools > Erase All Flash Before Sketch Upload > Enabled).
@@ -161,6 +163,12 @@ Without the real board (the ESP32 build tools can't be downloaded in the build s
   python3 firmware/test/run_sim_test.py
   ```
 
+- **The update page, on a PC:** requests are played into the real `/update` handlers. Only a whole file with the right password restarts the board. A bare POST, a wrong password, updates switched off, a cross-site post and the 5-try lockout all leave it running. (The same test on 1.1.2 showed a bare POST restarting the board.)
+
+  ```bash
+  python3 firmware/test/run_update_test.py
+  ```
+
 **Not yet done:**
 - Compiling with the real ESP32 tools, and running on the board. The first Arduino IDE upload and the bench steps above (5 to 8) are that check.
-- The web status and update pages were compiled on the PC but not run there. Test the update page once on the bench by uploading the same version again.
+- The web pages ran on the PC only through the stand-ins. Test the update page once on the bench by uploading the same version again.
