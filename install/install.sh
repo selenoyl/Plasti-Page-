@@ -35,10 +35,15 @@ echo "Python: $PY ($($PY --version 2>&1))"
 if [ -e "$APP" ] || [ -e "$ETC" ] || [ -e "$UNIT" ]; then
     BK=/root/p833-backup-$(date +%Y%m%d-%H%M%S)
     mkdir "$BK"          # fails if it already exists, so it is always new and empty
-    for p in "$APP" "$ETC" "$UNIT" /var/log/p833-receiver /var/lib/p833-receiver; do
+    # The program and settings; not the recordings, Piper or its voices (large, and
+    # not changed by this installer).
+    if [ -e "$APP" ]; then
+        tar -C / --exclude="${APP#/}/audio" --exclude="${APP#/}/tts" --exclude="${APP#/}/voices" \
+            -cf - "${APP#/}" | tar -C "$BK" -xf -
+    fi
+    for p in "$ETC" "$UNIT" /var/log/p833-receiver /var/lib/p833-receiver; do
         [ -e "$p" ] && cp -a --parents "$p" "$BK"/
     done
-    rm -rf "$BK$APP/audio"   # the clips are in the download; no need to keep a copy each time
     chmod 700 "$BK"
     echo "Backed up the old install to $BK"
 fi

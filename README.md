@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.7.0:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.8.0:** receiving, checking, logging, dry-run paging, the
 admin page, the editable phone settings and the recorded page audio are in and
 tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
@@ -205,6 +205,31 @@ then the **department tone**, English, Spanish, and the tone and message again
   Until the clips are re-made, the Audio box flags any that no longer match, and the old clips play. A page with a missing clip fails.
 - Custom pages from the admin page have no audio, because they are free text. In dry run they are logged; live, they fail.
 
+## Voice lab (try voices, speed and pauses)
+
+The last box on the admin page speaks **any text** with Piper (the same offline voices the recordings are
+made with), so you can hear what works on your speakers before the full set is recorded.
+
+- **Pick** a voice, the speed (1 = normal, higher = slower), an optional department tone and how many plays.
+- **Write the text.** Put a pause anywhere as **[350]** (milliseconds). Each part between pauses is spoken on its own, which gives digits a clear, separate sound. For example: `Maintenance requested to press two. [350] Seven.`
+- **Preview** plays it in your browser at the page volume; nothing is sent.
+- **Page it** dials the zone and plays it on the speakers. It works with dry run on, and it isn't logged as a call.
+- When something sounds right, tell whoever maintains the recordings the voice, speed and pause, and the full set is re-recorded to match (`tools/make_audio.py`).
+
+**Set up once** (needs internet, and Python 3.9 or newer; on AlmaLinux 8 run `sudo dnf install -y python3.11` first):
+
+```bash
+sudo bash install/install_tts.sh
+```
+
+It installs Piper into `/opt/p833-receiver/tts` and these voices into `/opt/p833-receiver/voices` (about 60 MB each):
+- English: hfc_female (current), joe, john, mike, norman, hfc_male
+- Spanish: claude (current, Mexican), ald (Mexican, male), davefx (Spain, male)
+
+To add more voices, name them: `sudo bash install/install_tts.sh en_US-sam-medium`. Normal updates don't touch Piper or the voices, and don't copy them into backups.
+
+Piper (piper-tts 1.8) is open source under the GPL; fine for internal use.
+
 ## Phone paging through the HT813
 
 With dry run off, each page is a phone call from the laptop to the Grandstream
@@ -301,7 +326,9 @@ The laptop replies `200 {"ok": true, ...}`. The board resends the **same** body 
 | `tools/p833_test_sender.py` | Test sender that plays a board. |
 | `install/install.sh` | First setup, or reinstall from this folder. Safe to run again. |
 | `install/update.sh` | Fetch the newest version from GitHub and run the installer. |
-| `receiver/p833_audio.py` | Joins the recorded clips into a page. |
+| `receiver/p833_audio.py` | Builds a page from the recorded sentences and tones. |
+| `receiver/p833_tts.py` | Voice lab helper: runs Piper (in its own environment) to speak any text. |
+| `install/install_tts.sh` | Sets up the Voice lab: Piper and voices. |
 | `tools/make_audio.py` | Records the clips with Piper (run on a PC with internet). |
 | `audio/` | The recorded clips and `manifest.json` (once made). |
 | `install/migrate_config.py` | Run by the installer: updates default wording in an installed config, keeping your own edits. |

@@ -803,6 +803,86 @@ class Server(unittest.TestCase):
         self.assertIn("Phone test FAILED", urllib.parse.unquote(loc))
         self.assertIn("did not answer", urllib.parse.unquote(loc))
 
+    # ---- voice lab (with a stand-in for Piper)
+    def use_fake_tts(self):
+        stub = os.path.join(self.tmp, "fake_tts.py")
+        with open(stub, "w") as f:
+            f.write("""import io, json, sys, wave
+if sys.argv[1] == "list":
+    print(json.dumps(["en_US-test-voice"])); sys.exit(0)
+req = json.loads(sys.stdin.read())
+if req["voice"] != "en_US-test-voice":
+    sys.stderr.write("voice not installed: %s\\n" % req["voice"]); sys.exit(1)
+n = sum(80 if "text" in s else 8 * s["pause_ms"] for s in req["segments"])
+b = io.BytesIO()
+with wave.open(b, "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\\x30\\x00" * n)
+sys.stdout.buffer.write(b.getvalue())
+""")
+        os.makedirs(os.path.join(self.tmp, "voices"), exist_ok=True)
+        self.cfg["audio"].update(tts_python=sys.executable, tts_script=stub,
+                                 tts_voices=os.path.join(self.tmp, "voices"))
+
+    def lab_post(self, **form):
+        url = "http://127.0.0.1:%d/admin/voicelab" % self.port
+        req = urllib.request.Request(url, data=urllib.parse.urlencode(form).encode(), headers={
+            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode()})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.headers.get("Content-Type"), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Content-Type"), e.read()
+
+    def test_lab_segments(self):
+        self.assertEqual(R.lab_segments("press two. [350] Seven."),
+                         [{"text": "press two."}, {"pause_ms": 350}, {"text": "Seven."}])
+        self.assertEqual(R.lab_segments("[9999]a"), [{"pause_ms": 5000}, {"text": "a"}])
+
+    def test_voice_lab_not_installed(self):
+        self.cfg["audio"].update(tts_python="/nonexistent/python")
+        self.assertIn("sudo bash install/install_tts.sh", self.admin("/admin")[2])
+        st, _, body = self.lab_post(voice="x", pace="1.25", text="hi", action="preview")
+        self.assertEqual(st, 400)
+        self.assertIn(b"isn't installed", body)
+
+    def test_voice_lab_preview(self):
+        self.use_fake_tts()
+        self.assertIn("en_US-test-voice", self.admin("/admin")[2])
+        st, ctype, body = self.lab_post(voice="en_US-test-voice", pace="1.25", plays="1", tone="",
+                                        text="press two. [350] Seven.", action="preview")
+        self.assertEqual((st, ctype), (200, "audio/wav"))
+        import io, wave as _w
+        with _w.open(io.BytesIO(body)) as w:
+            self.assertEqual(w.getnframes(), 80 + 2800 + 80 + 2400)     # text, 350 ms, text, end silence
+        st, _, body = self.lab_post(voice="nope", pace="1.25", text="hi", action="preview")
+        self.assertEqual(st, 400)
+        self.assertIn(b"voice not installed", body)
+        st, _, body = self.lab_post(voice="en_US-test-voice", pace="9", text="hi", action="preview")
+        self.assertEqual(st, 400)
+        self.assertEqual(self.pager.sent, [])                            # previews never page
+
+    def test_voice_lab_page_it(self):
+        self.use_fake_tts()
+        ht = self.use_fake_ht813()
+        self.cfg["zones"]["floor"]["dial"] = "F61"
+        st, _, _ = self.lab_post(voice="en_US-test-voice", pace="1.25", plays="1",
+                                 tone="1_maintenance_bell", text="Test page.", zone="floor", action="page")
+        self.assertEqual(st, 200)                                      # followed the redirect to /admin
+        self.assertEqual(ht.digits, ["F", "6", "1"])
+        self.assertGreater(ht.audio_frames, 0)
+        self.assertTrue(ht.wait_bye())
+
+    def test_admin_error_is_shown_not_dropped(self):
+        self.use_fake_tts()
+        orig = R.lab_wav
+        R.lab_wav = lambda app, form: 1 / 0
+        try:
+            st, _, body = self.lab_post(voice="en_US-test-voice", text="x", action="preview")
+        finally:
+            R.lab_wav = orig
+        self.assertEqual(st, 500)
+        self.assertIn(b"ZeroDivisionError", body)
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):

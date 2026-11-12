@@ -17,15 +17,18 @@ import base64
 import csv
 import hmac
 import html
+import io
 import json
 import logging
 import os
 import queue
 import re
 import socketserver
+import subprocess
 import sys
 import threading
 import time
+import wave
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
@@ -34,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -237,6 +240,10 @@ def load_config(path):
     audio.setdefault("repeat_gap_ms", 500)
     audio.setdefault("tone_gap_ms", 250)
     audio.setdefault("speak_digits", ["en"])     # languages whose press numbers are read digit by digit
+    # Voice lab (Piper on the laptop, set up by install/install_tts.sh)
+    audio.setdefault("tts_python", os.path.join(here, "tts", "bin", "python"))
+    audio.setdefault("tts_script", os.path.join(here, "p833_tts.py"))
+    audio.setdefault("tts_voices", os.path.join(here, "voices"))
     phone = cfg.setdefault("phone", {})
     for k, v in PHONE_DEFAULTS.items():
         phone.setdefault(k, v)
@@ -618,6 +625,88 @@ class PageWorker(threading.Thread):
             self.jobs.task_done()
 
 
+# ------------------------------------------------------------- voice lab ---
+# Speak any text with Piper on the laptop, to try voices, pace and pauses.
+
+LAB_DEFAULT_TEXT = "Maintenance requested to press two. [350] Seven."
+
+
+def tts_ready(cfg):
+    a = cfg["audio"]
+    return os.path.exists(a["tts_python"]) and os.path.exists(a["tts_script"]) and os.path.isdir(a["tts_voices"])
+
+
+def tts_voices(cfg):
+    if not tts_ready(cfg):
+        return []
+    a = cfg["audio"]
+    try:
+        out = subprocess.run([a["tts_python"], a["tts_script"], "list", a["tts_voices"]],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        return json.loads(out.stdout.decode() or "[]") if out.returncode == 0 else []
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+
+
+def lab_segments(text):
+    """'press two. [350] Seven.' -> [{'text': 'press two.'}, {'pause_ms': 350}, {'text': 'Seven.'}]"""
+    segs = []
+    for i, part in enumerate(re.split(r"\[(\d{1,4})\]", text)):
+        if i % 2:
+            segs.append({"pause_ms": min(5000, int(part))})
+        elif part.strip():
+            segs.append({"text": part.strip()})
+    return segs
+
+
+def tts_speak(cfg, voice, length_scale, text):
+    """WAV bytes (8 kHz 16-bit) of the text, or AudioError."""
+    if not tts_ready(cfg):
+        raise AudioError("the voice lab isn't installed on this laptop (run: sudo bash install/install_tts.sh)")
+    segs = lab_segments(text)
+    if not any("text" in x for x in segs):
+        raise AudioError("there is no text to speak")
+    a = cfg["audio"]
+    req = json.dumps({"voice": voice, "length_scale": length_scale, "segments": segs}).encode()
+    try:
+        out = subprocess.run([a["tts_python"], a["tts_script"], "speak", a["tts_voices"]], input=req,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+    except subprocess.TimeoutExpired:
+        raise AudioError("speaking took too long")
+    except OSError as e:
+        raise AudioError("could not run Piper: %s" % e)
+    if out.returncode != 0 or not out.stdout.startswith(b"RIFF"):
+        err = out.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise AudioError("Piper failed: %s" % (err[-1] if err else "no output"))
+    return out.stdout
+
+
+def lab_wav(app, form):
+    """The voice lab's audio as it would page: optional tone, the text, page volume."""
+    cfg, lib = app["cfg"], app["worker"].audio
+    voice = form.get("voice", "")
+    try:
+        pace = float(form.get("pace", "1.25"))
+        if not 0.5 <= pace <= 2.5:
+            raise ValueError
+        plays = int(form.get("plays", "1"))
+        if not 1 <= plays <= 3:
+            raise ValueError
+    except ValueError:
+        raise AudioError("pace must be 0.5 to 2.5, plays 1 to 3")
+    text = form.get("text", "")[:1500]
+    speech = tts_speak(cfg, voice, pace, text)
+    with wave.open(io.BytesIO(speech)) as w:
+        body = w.readframes(w.getnframes())
+    lead = b""
+    tone = form.get("tone", "")
+    if tone:
+        lead = lib._frames("tones/single/%s.wav" % tone) + b"\x00\x00" * 2400
+    return lib._wrap(lead, body, {"repeat": plays, "lead_silence_ms": 0,
+                                  "repeat_gap_ms": cfg["audio"].get("repeat_gap_ms", 500),
+                                  "gain_db": cfg["audio"].get("gain_db", 0)})
+
+
 # ------------------------------------------------------------ web server ---
 
 class Handler(BaseHTTPRequestHandler):
@@ -638,7 +727,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _raw_body(self, limit=4096):
+    def _raw_body(self, limit=8192):
         try:
             n = int(self.headers.get("Content-Length", 0))
         except ValueError:
@@ -693,7 +782,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlsplit(self.path).path
         if path.startswith("/admin/"):
-            return self._admin_post(path)
+            try:
+                return self._admin_post(path)
+            except Exception as e:      # never drop the connection on a bug; show and log it
+                LOG.exception("admin page error on %s", path)
+                return self._reply(500, ("Error: %s: %s (details in the receiver log)"
+                                         % (e.__class__.__name__, e)).encode(), "text/plain; charset=utf-8")
         if path not in ("/call", "/heartbeat"):
             return self._reply(404, {"ok": False, "error": "not found"})
         if not self._key_ok():
@@ -835,6 +929,25 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError as e:
                     LOG.warning("could not save the phone test recording: %s", e)
             return self._back(("Phone test OK: " if ok else "Phone test FAILED: ") + detail + note)
+
+        if path == "/admin/voicelab":
+            try:
+                wav = lab_wav(self.app, form)
+            except AudioError as e:
+                if form.get("action") == "preview":
+                    return self._reply(400, ("Voice lab: %s" % e).encode(), "text/plain; charset=utf-8")
+                return self._back("Voice lab: %s" % e)
+            if form.get("action") == "preview":
+                return self._reply(200, wav, "audio/wav")
+            live = self.app["worker"].live
+            zone = form.get("zone", "floor")
+            dial = self.app["cfg"]["zones"].get(zone, {}).get("dial", "")
+            if not hasattr(live, "connection_test") or not dial:
+                return self._back("Voice lab: zone %s has no dial digits set." % zone)
+            LOG.info("voice lab page from admin page (%s), voice %s: %s", who, form.get("voice"),
+                     form.get("text", "")[:200])
+            ok, detail = live.connection_test(digits=dial, wav=wav, what="the voice lab text")
+            return self._back(("Voice lab page OK: " if ok else "Voice lab page FAILED: ") + detail)
 
         if path == "/admin/dryrun":
             on = form.get("dry_run") == "on"
@@ -980,7 +1093,51 @@ button{cursor:pointer} .msg{padding:8px 12px;border:2px solid var(--good);margin
 .preview audio{margin-top:8px;width:100%;max-width:520px}
 """
 
+def lab_html(app):
+    cfg, e = app["cfg"], html.escape
+    voices = tts_voices(cfg)
+    if not voices:
+        return ("<div class=card><h2>Voice lab</h2><p>Not installed on this laptop. To try voices, speeds and "
+                "pauses here, run once (needs internet the first time):</p><pre>sudo bash install/install_tts.sh</pre>"
+                "</div>")
+    current = cfg["audio"].get("lab_voice") or "en_US-hfc_female-medium"
+    vopts = "".join("<option%s>%s</option>" % (" selected" if v == current else "", e(v)) for v in voices)
+    tones = app["worker"].audio.tone_names()
+    topts = "<option value=''>no tone</option>" + "".join(
+        "<option value='%s'>%s</option>" % (e(t), e(re.sub(r"^\d+_", "", t).replace("_", " "))) for t in tones)
+    zopts = "".join("<option>%s</option>" % e(z) for z in cfg["zones"])
+    return """
+<div class=card><h2>Voice lab</h2>
+<p class=small>Speak any text with Piper, right here, to try voices, speed and pauses. Write a pause as
+<b>[350]</b> (milliseconds); each part between pauses is spoken on its own. Numbers can be written as words
+("two. [350] Seven.") or digits. Preview plays it in this browser at the page volume; nothing is sent.
+"Page it" dials the zone and plays it on the speakers (works with dry run on).</p>
+<form id=labform method=post action='/admin/voicelab'>
+<label>Voice <select name=voice>%s</select></label>
+<label>Speed <input name=pace type=number min=0.5 max=2.5 step=0.05 value=1.25 style='width:5em'></label>
+<span class=small>(1 = normal, higher = slower)</span><br>
+<label>Tone first <select name=tone>%s</select></label>
+<label>Plays <select name=plays><option>1</option><option>2</option></select></label><br>
+<textarea name=text rows=3 cols=70 maxlength=1500>%s</textarea><br>
+<button type=button onclick="p833Lab()">Preview (in this browser)</button>
+<label>Zone <select name=zone>%s</select></label>
+<button name=action value=page onclick="return confirm('Page this on the speakers now?')">Page it</button>
+</form><div id=prev-lab class=preview></div></div>
+""" % (vopts, topts, e(LAB_DEFAULT_TEXT), zopts)
+
+
 PREVIEW_JS = """<script>
+function p833Lab(){
+  dirty=true;
+  var f=document.getElementById('labform'), box=document.getElementById('prev-lab');
+  var fd=new FormData(f); fd.set('action','preview');
+  box.innerHTML='Speaking... (a few seconds)';
+  fetch('/admin/voicelab',{method:'POST',body:new URLSearchParams(fd),credentials:'same-origin'}).then(function(r){
+    if(!r.ok){return r.text().then(function(t){box.innerHTML=p833Esc(t);});}
+    return r.blob().then(function(b){
+      box.innerHTML='<audio controls autoplay src="'+URL.createObjectURL(b)+'"></audio>';});
+  }).catch(function(e){box.innerHTML='Preview failed: '+p833Esc(e);});
+}
 function p833Esc(t){var d=document.createElement('div');d.textContent=t==null?'':String(t);return d.innerHTML;}
 function p833Preview(kind){
   dirty=true;  // stop the page refreshing while you listen
@@ -1222,7 +1379,8 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <div id=prev-custom class=preview></div>
 <p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
 Custom text has no recorded audio yet, so with dry run off a custom page fails until on-laptop speech is added.</p></div>
-""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + PREVIEW_JS
+""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + lab_html(app) \
+            + PREVIEW_JS
 
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
