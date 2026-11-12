@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.17.0:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.17.1:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -166,7 +166,9 @@ Open `https://<laptop IP>:8833/` (plain `http://` is sent there), on a PC, table
 - Pages from here are logged as from "Paging page", with the name the supervisor signed in with, and are texted like board calls when texts are on.
 - In dry run the page says **PRACTICE MODE**: pages are logged, not played.
 
-**Password:** set the paging password on the admin page (Overview tab, **Paging page**). Supervisors sign in with **their name as the user name** (it goes in the log) and the paging password; the browser can remember both. The admin password also opens the paging page, but the paging password never opens the admin page. Until a paging password is set, only the admin password opens it. The laptop keeps only a hash of it (`/var/lib/p833-receiver/paging_password.json`, readable by the service only), so it can't be shown again: to change it, save a new one. 10 wrong passwords from one address lock that address out of both pages for 10 minutes.
+**Password:** set the paging password on the admin page (Overview tab, **Paging page**). Supervisors sign in with **their name as the user name** (it goes in the log) and the paging password; the browser can remember both. The admin password also opens the paging page, but the paging password never opens the admin page. Until a paging password is set, only the admin password opens it. The laptop keeps only a hash of it (`/var/lib/p833-receiver/paging_password.json`, readable by the service only), so it can't be shown again: to change it, save a new one. 10 *different* wrong passwords from one address lock that address out of both pages for 10 minutes; the same wrong one again (a browser that saved an old password) counts once. After a password change, a page left open says it **stopped updating**: reload it and sign in with the new password.
+
+**Many people at once:** tested with 40 people loading the page at the same moment from one address (all behind one router, or on one PC): every page loaded. The receiver serves up to 24 connections from one address and 128 in all (16 kept for the boards); at a busy moment a connection waits up to 5 seconds for a free one instead of being refused.
 
 The first time on each device, the browser warns about the laptop's own certificate, as on the admin page (check the fingerprint, then **Advanced > Proceed**).
 
@@ -485,7 +487,7 @@ What protects what (receiver 0.10.0, board firmware 1.1.3):
 
 | Part | Protection |
 |---|---|
-| Admin page | Password; **HTTPS** with the laptop's own certificate (same port; boards keep plain HTTP). 10 wrong passwords from one address lock it out for 10 minutes. Forms only from the page itself (Origin/Referer). Can't be framed by another site. |
+| Admin page | Password; **HTTPS** with the laptop's own certificate (same port; boards keep plain HTTP). 10 different wrong passwords from one address lock it out for 10 minutes (a browser resending one saved wrong password counts once). Forms only from the page itself (Origin/Referer). Can't be framed by another site. |
 | Board calls | Board key (`secrets.env`); no key set = calls refused. Board IDs checked. Old messages sent again are never paged. At most 20 pages waiting and 6 calls a minute per board. |
 | Texts | voip.ms API password write-only, stored 0600, sent only to voip.ms over checked HTTPS (no redirects). Only boards on the list send texts. Queue and hourly caps. |
 | Phone line | The laptop uses only SIP and audio from the HT813's address that belong to the call, so other devices can't hang up or divert a page. Optional password on calls (above). |

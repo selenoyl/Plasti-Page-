@@ -45,7 +45,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.17.0"
+VERSION = "0.17.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -53,18 +53,21 @@ CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
 BOARD_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 RECENT_CALLS = 20         # calls shown on the status and admin pages (calls.csv keeps them all)
 BOOT_ID = re.compile(r"^[A-Za-z0-9_-]{0,32}$")
-MAX_CONNECTIONS = 64      # open web connections at once; more are closed at once
-MAX_PER_ADDRESS = 8       # ...from any one address
+MAX_CONNECTIONS = 128     # open web connections at once
+MAX_PER_ADDRESS = 24      # ...from any one address (people behind one router, or on one PC, share it)
 RESERVED_FOR_BOARDS = 16  # ...of which this many are kept for boards (and the laptop itself)
+SLOT_WAIT_S = 5           # a connection over those limits waits this long for a free slot, then is closed
+MAX_WAITING = 64          # ...but at most this many wait at once (more are closed at once)
 REQUEST_DEADLINE_S = 15   # the whole request (TLS hello, headers, body) must arrive in this time
 MAX_WAITING_PAGES = 20    # pages queued but not yet sent; calls over it get "busy" and the board retries
 MAX_CALLS_PER_MIN = 6     # accepted calls from one board ID in a minute
 MAX_UNKNOWN_BOARDS = 50   # boards not on the list that are remembered on the status page
-LOGIN_FAILS = 10          # wrong admin passwords from one address...
+LOGIN_FAILS = 10          # different wrong passwords from one address...
 LOGIN_WINDOW_S = 600      # ...in this many seconds lock that address out for this long
 
 
 csv_safe = p833_sms.csv_safe
+_LOGIN_KEY = os.urandom(16)   # to tell wrong passwords apart without keeping them
 
 
 def plain(v, n=32):
@@ -1105,6 +1108,8 @@ HOME_TEXT = {
         "confirm_page": "Page now?",
         "confirm_msg": "Page this message now?",
         "type_first": "Type the message first.",
+        "signed_out": "This page stopped updating: its sign-in no longer works (the password may have changed). "
+                      "Reload the page to sign in again.",
         "warn_no_floor": "The floor zone isn't set up on the laptop, so nothing can be paged from here. Tell the admin.",
         "warn_no_dial": "The floor zone has no dial digits yet, so pages will fail. Tell the admin.",
         "warn_plain": "This page isn't encrypted (no HTTPS certificate on the laptop). Tell the admin.",
@@ -1162,6 +1167,8 @@ HOME_TEXT = {
         "confirm_page": "¿Vocear ahora?",
         "confirm_msg": "¿Vocear este mensaje ahora?",
         "type_first": "Primero escriba el mensaje.",
+        "signed_out": "Esta página dejó de actualizarse: su sesión ya no funciona (quizá cambió la contraseña). "
+                      "Vuelva a cargar la página para entrar de nuevo.",
         "warn_no_floor": "La zona de la planta no está configurada en la laptop, así que no se puede vocear desde "
                          "aquí. Avise al administrador.",
         "warn_no_dial": "La zona de la planta todavía no tiene los dígitos para marcar, así que los voceos van a "
@@ -1312,9 +1319,12 @@ HOME_JS = """<script>
     say();
   }
   waits(@WAIT@);
-  setInterval(function(){
+  var timer=setInterval(function(){
     if(document.hidden){return;}
-    fetch('/page/live',{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null;}).then(function(p){
+    fetch('/page/live',{credentials:'same-origin'}).then(function(r){
+      if(r.status===401||r.status===429){clearInterval(timer);
+        var s=document.getElementById('statusline');s.textContent=L.signed_out;s.className='msg err';return null;}
+      return r.ok?r.json():null;}).then(function(p){
       if(!p){return;}
       document.getElementById('statusline').innerHTML=p.status;
       document.getElementById('recent').innerHTML=p.calls;
@@ -1344,7 +1354,8 @@ def home_html(app, lang="en", name="", msg="", ok=True):
                      % (code, " disabled" if w else "", e(home_who(c, lang)), e(home_why(c, lang)), code,
                         e(home_text(lang, "again", n=(w + 59) // 60)) if w else ""))
     texts = {str(code): {"en": c["en"], "es": c["es"] if "es" in langs else ""} for code, c in cfg["codes"].items()}
-    ui = {k: T[k] for k in ("pick", "type_press", "again", "confirm_page", "confirm_msg", "type_first", "custom_wait")}
+    ui = {k: T[k] for k in ("pick", "type_press", "again", "confirm_page", "confirm_msg", "type_first", "custom_wait",
+                            "signed_out")}
     lib = app["worker"].audio
     warns = []
     if PAGING_ZONE not in cfg["zones"]:
@@ -1435,7 +1446,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "P833Receiver/" + VERSION
     app = None  # set in main()
     timeout = 20          # seconds a connection may sit idle or trickle in; then it's closed
-    login_fails = {}      # address -> times of wrong admin passwords
+    login_fails = {}      # address -> {a wrong password's digest: when it was last tried}
     login_lock = threading.Lock()
 
     def log_message(self, fmt, *args):  # keep the journal quiet
@@ -1489,11 +1500,22 @@ class Handler(BaseHTTPRequestHandler):
         return bool(key) and hmac.compare_digest(given.encode("utf-8", "replace"), key.encode("utf-8"))
 
     # -- passwords (HTTP Basic; the user name is any name, the password is checked)
+    def _recent_fails(self, ip, now=None):
+        """How many different wrong passwords this address tried lately (login_lock held)."""
+        now = now or time.time()
+        tried = {k: t for k, t in self.login_fails.get(ip, {}).items() if now - t < LOGIN_WINDOW_S}
+        if tried:
+            self.login_fails[ip] = tried
+        else:
+            self.login_fails.pop(ip, None)
+        return len(tried)
+
     def _login(self, paging=False):
         """The user name typed, if the login holds the admin password (or, for the paging page,
         the paging password); else None. No password set means closed (fail closed). Wrong
-        passwords are logged, and an address with LOGIN_FAILS of them in LOGIN_WINDOW_S is
-        locked out of both pages that long."""
+        passwords are logged, and an address that tried LOGIN_FAILS different ones in
+        LOGIN_WINDOW_S is locked out of both pages that long. The same wrong password again
+        (a browser resending one it saved, every refresh) counts once."""
         admin_pw = self.app["admin_password"]
         pp = paging_password(self.app)
         if not admin_pw and not (paging and pp.is_set()):
@@ -1501,9 +1523,7 @@ class Handler(BaseHTTPRequestHandler):
         ip = self.client_address[0]
         now = time.time()
         with self.login_lock:
-            fails = [t for t in self.login_fails.get(ip, []) if now - t < LOGIN_WINDOW_S]
-            self.login_fails[ip] = fails
-            if len(fails) >= LOGIN_FAILS:
+            if self._recent_fails(ip, now) >= LOGIN_FAILS:
                 return None
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Basic "):
@@ -1519,13 +1539,18 @@ class Handler(BaseHTTPRequestHandler):
                 # The paging password at the admin page is no guess: a browser that signed in to
                 # the paging page sends it to every page of this laptop. Just ask again.
                 return user if paging else None
+        digest = hmac.new(_LOGIN_KEY, ("\0" if given is None else given).encode("utf-8", "replace"),
+                          "sha256").digest()[:12]
         with self.login_lock:
-            fails = self.login_fails.setdefault(ip, [])
-            fails.append(now)
+            tried = self.login_fails.setdefault(ip, {})
+            new = digest not in tried
+            tried[digest] = now
+            n = self._recent_fails(ip, now)
             if len(self.login_fails) > 1000:          # keep the table small
                 self.login_fails.clear()
-        LOG.warning("wrong %s password from %s%s", "paging page" if paging else "admin", ip,
-                    "; locked out for %d min" % (LOGIN_WINDOW_S // 60) if len(fails) >= LOGIN_FAILS else "")
+        if new:                                       # (not again for every refresh of a page left open)
+            LOG.warning("wrong %s password from %s%s", "paging page" if paging else "admin", ip,
+                        "; locked out for %d min" % (LOGIN_WINDOW_S // 60) if n >= LOGIN_FAILS else "")
         return None
 
     def _admin_ok(self):
@@ -1536,7 +1561,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(503, b"The admin page is off: no admin password is set. On the laptop run: "
                                b"sudo bash install/install.sh", "text/plain")
         with self.login_lock:
-            locked = len(self.login_fails.get(self.client_address[0], [])) >= LOGIN_FAILS
+            locked = self._recent_fails(self.client_address[0]) >= LOGIN_FAILS
         if locked:
             return self._reply(429, b"Too many wrong passwords from this address. Try again in 10 minutes.",
                                "text/plain")
@@ -1548,10 +1573,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(503, b"The paging page is off: no password is set for it yet. The admin sets "
                                b"one on the admin page.", "text/plain")
         with self.login_lock:
-            locked = len(self.login_fails.get(self.client_address[0], [])) >= LOGIN_FAILS
+            locked = self._recent_fails(self.client_address[0]) >= LOGIN_FAILS
         if locked:
-            return self._reply(429, b"Too many wrong passwords from this address. Try again in 10 minutes.",
-                               "text/plain")
+            return self._reply(429, ("Too many wrong passwords from this address. Try again in 10 minutes.\n"
+                                     "Demasiadas contrase\u00f1as equivocadas desde esta direcci\u00f3n. Intente de nuevo "
+                                     "en 10 minutos.").encode("utf-8"), "text/plain; charset=utf-8")
         return self._reply(401, ("Paging page: sign in with your name as the user name and the paging password.\n"
                                  "P\u00e1gina de voceo: entre con su nombre como usuario y la contrase\u00f1a de voceo."
                                  ).encode("utf-8"), "text/plain; charset=utf-8",
@@ -2188,8 +2214,10 @@ def tls_context(cfg):
 
 
 class Server(socketserver.ThreadingMixIn, HTTPServer):
-    """One thread per connection, at most MAX_CONNECTIONS at once: more are closed straight
-    away, so a flood of idle connections can't use up the service (each also times out).
+    """One thread per connection, at most MAX_CONNECTIONS at once (MAX_PER_ADDRESS from one
+    address). Over that, a connection waits up to SLOT_WAIT_S for a free slot (several people
+    loading the page at the same moment), and at most MAX_WAITING wait: so a flood of idle
+    connections can't use up the service (each also times out).
 
     With a TLS context, each connection's first byte decides: a TLS hello (0x16) gets
     HTTPS, anything else plain HTTP. So the admin page can use HTTPS on the same port
@@ -2201,6 +2229,8 @@ class Server(socketserver.ThreadingMixIn, HTTPServer):
         self.tls = tls
         self.conn_lock = threading.Lock()
         self.open_by_ip = {}           # address -> open connections
+        self.slot_free = threading.Condition(self.conn_lock)
+        self.waiting = 0               # connections waiting for a free slot
         self.refused_logged = {}       # address -> when a refusal was last logged
         self._local = threading.local()
         super().__init__(*a, **k)
@@ -2214,39 +2244,79 @@ class Server(socketserver.ThreadingMixIn, HTTPServer):
         st = app.get("state")
         return bool(st) and any(b.get("ip") == ip for b in list(st.heard_info.values()))
 
-    def _take_slot(self, ip):
-        with self.conn_lock:
-            total = sum(self.open_by_ip.values())
-            mine = self.open_by_ip.get(ip, 0)
-            limit = MAX_CONNECTIONS if self._known(ip) else MAX_CONNECTIONS - RESERVED_FOR_BOARDS
-            if total >= limit or mine >= MAX_PER_ADDRESS:
-                now = time.time()
-                if now - self.refused_logged.get(ip, 0) > 60:
-                    self.refused_logged[ip] = now
-                    if len(self.refused_logged) > 1000:
-                        self.refused_logged.clear()
-                    LOG.warning("refused connections from %s: %d open from it, %d in all", ip, mine, total)
-                return False
-            self.open_by_ip[ip] = mine + 1
+    def _fits(self, ip):
+        """Room for one more connection from this address? (call with conn_lock held)"""
+        limit = MAX_CONNECTIONS if self._known(ip) else MAX_CONNECTIONS - RESERVED_FOR_BOARDS
+        return sum(self.open_by_ip.values()) < limit and self.open_by_ip.get(ip, 0) < MAX_PER_ADDRESS
+
+    def _take_slot(self, ip, wait=0.0):
+        """Take a connection slot for this address, waiting up to `wait` seconds for one."""
+        end = time.monotonic() + wait
+        with self.slot_free:
+            while not self._fits(ip):
+                left = end - time.monotonic()
+                if left <= 0:
+                    return False
+                self.slot_free.wait(left)
+            self.open_by_ip[ip] = self.open_by_ip.get(ip, 0) + 1
             return True
 
     def _free_slot(self, ip):
-        with self.conn_lock:
+        with self.slot_free:
             n = self.open_by_ip.get(ip, 1) - 1
             if n > 0:
                 self.open_by_ip[ip] = n
             else:
                 self.open_by_ip.pop(ip, None)
+            self.slot_free.notify_all()
+
+    def _refuse(self, request, ip):
+        with self.conn_lock:
+            mine, total, waiting = self.open_by_ip.get(ip, 0), sum(self.open_by_ip.values()), self.waiting
+            now = time.time()
+            log = now - self.refused_logged.get(ip, 0) > 60
+            if log:
+                self.refused_logged[ip] = now
+                if len(self.refused_logged) > 1000:
+                    self.refused_logged.clear()
+        if log:
+            LOG.warning("refused connections from %s: %d open from it, %d in all, %d waiting", ip, mine, total, waiting)
+        self.shutdown_request(request)
 
     def process_request(self, request, client_address):
-        if not self._take_slot(client_address[0]):
-            self.shutdown_request(request)
+        ip = client_address[0]
+        if self._take_slot(ip):
+            try:
+                super().process_request(request, client_address)       # in a thread of its own
+            except Exception:
+                self._free_slot(ip)
+                raise
             return
+        # Busy (several people loading the page at once): wait a moment for a free slot, in a
+        # thread of its own, so the boards and everyone else aren't held up meanwhile.
+        with self.conn_lock:
+            room = SLOT_WAIT_S > 0 and self.waiting < MAX_WAITING
+            if room:
+                self.waiting += 1
+        if not room:
+            return self._refuse(request, ip)
         try:
-            super().process_request(request, client_address)
+            threading.Thread(target=self._wait_for_slot, args=(request, client_address), daemon=True).start()
         except Exception:
-            self._free_slot(client_address[0])
-            raise
+            with self.conn_lock:
+                self.waiting -= 1
+            self._refuse(request, ip)
+
+    def _wait_for_slot(self, request, client_address):
+        ip = client_address[0]
+        try:
+            ok = self._take_slot(ip, SLOT_WAIT_S)
+        finally:
+            with self.conn_lock:
+                self.waiting -= 1
+        if not ok:
+            return self._refuse(request, ip)
+        self.process_request_thread(request, client_address)          # serves it, then frees the slot
 
     def process_request_thread(self, request, client_address):
         try:
@@ -2854,11 +2924,15 @@ TABS_JS = """<script>
 
 ADMIN_LIVE_JS = """<script>
 var dirty=false;   // (kept for the preview buttons; the admin page no longer reloads itself)
-setInterval(function(){
+var timer=setInterval(function(){
   if(document.hidden){return;}
   var a=document.activeElement, b=document.getElementById('boards');
   if(a&&b&&b.contains(a)){return;}     // typing a cell name in the board table: leave it
-  fetch('/admin/live',{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null;}).then(function(p){
+  fetch('/admin/live',{credentials:'same-origin'}).then(function(r){
+    if(r.status===401||r.status===429){clearInterval(timer);
+      var s=document.getElementById('statusline');s.className='msg';
+      s.textContent='This page stopped updating: its sign-in no longer works. Reload the page to sign in again.';return null;}
+    return r.ok?r.json():null;}).then(function(p){
     if(!p){return;}
     ['status','boards','calls','voicejob'].forEach(function(k){
       var el=document.getElementById(k==='status'?'statusline':k);

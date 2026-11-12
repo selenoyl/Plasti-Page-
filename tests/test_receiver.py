@@ -541,9 +541,12 @@ class Server(unittest.TestCase):
 
     def test_wrong_passwords_lock_the_address_out(self):
         self.addCleanup(R.Handler.login_fails.clear)
-        for _ in range(R.LOGIN_FAILS - 1):
-            self.assertEqual(self.admin("/admin", pw="wrong")[0], 401)
-        self.assertEqual(self.admin("/admin", pw="wrong")[0], 429)
+        for _ in range(3 * R.LOGIN_FAILS):                 # the same wrong one again and again (a page left
+            self.assertEqual(self.admin("/admin", pw="old-saved")[0], 401)   # open with an old saved password)
+        self.assertEqual(self.admin("/admin")[0], 200)     # ...counts once: nobody is locked out
+        for i in range(R.LOGIN_FAILS - 2):
+            self.assertEqual(self.admin("/admin", pw="wrong-%d" % i)[0], 401)
+        self.assertEqual(self.admin("/admin", pw="wrong-last")[0], 429)          # 10 different ones: locked
         st, _, body = self.admin("/admin")                 # even the right one, for a while
         self.assertEqual(st, 429)
         R.Handler.login_fails.clear()
@@ -657,8 +660,8 @@ class Server(unittest.TestCase):
 
     def test_connection_limit_and_idle_timeout(self):
         import socket
-        old_max, old_to = R.MAX_CONNECTIONS, R.Handler.timeout
-        R.MAX_CONNECTIONS, R.Handler.timeout = 2, 1
+        old_max, old_to, old_wait = R.MAX_CONNECTIONS, R.Handler.timeout, R.SLOT_WAIT_S
+        R.MAX_CONNECTIONS, R.Handler.timeout, R.SLOT_WAIT_S = 2, 1, 0
         srv = R.Server(("127.0.0.1", 0), R.Handler)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
@@ -677,7 +680,7 @@ class Server(unittest.TestCase):
             for c in idle:
                 c.close()
         finally:
-            R.MAX_CONNECTIONS, R.Handler.timeout = old_max, old_to
+            R.MAX_CONNECTIONS, R.Handler.timeout, R.SLOT_WAIT_S = old_max, old_to, old_wait
             srv.shutdown()
             srv.server_close()
 
@@ -707,7 +710,7 @@ class Server(unittest.TestCase):
 
     def test_one_address_cannot_take_every_connection(self):
         import socket
-        port = self.side_server(MAX_PER_ADDRESS=3, MAX_CONNECTIONS=64)
+        port = self.side_server(MAX_PER_ADDRESS=3, MAX_CONNECTIONS=64, SLOT_WAIT_S=0)
         mine = []
         for _ in range(3):
             c = socket.socket()
@@ -724,9 +727,41 @@ class Server(unittest.TestCase):
         for c in mine + [extra]:
             c.close()
 
+    def test_a_busy_moment_waits_for_a_free_slot(self):
+        import http.client
+        import socket
+        port = self.side_server(MAX_PER_ADDRESS=2, MAX_CONNECTIONS=64, SLOT_WAIT_S=5, MAX_WAITING=1)
+        held = []
+        for _ in range(2):                                     # this address's slots, both taken
+            c = socket.socket()
+            c.bind(("127.0.0.2", 0))
+            c.connect(("127.0.0.1", port))
+            held.append(c)
+        time.sleep(0.2)
+        got = {}
+
+        def ask():
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10, source_address=("127.0.0.2", 0))
+            conn.request("GET", "/status.json")
+            got["status"] = conn.getresponse().status
+            conn.close()
+        t = threading.Thread(target=ask)
+        t.start()
+        time.sleep(0.5)
+        extra = socket.socket()                                # one more while one already waits: no room
+        extra.bind(("127.0.0.2", 0))
+        extra.connect(("127.0.0.1", port))
+        self.assertTrue(self.closed_at_once(extra))
+        self.assertNotIn("status", got)                        # the first is still waiting...
+        held[0].close()                                        # ...a slot frees...
+        t.join(5)
+        self.assertEqual(got.get("status"), 200)               # ...and it is served, not refused
+        for c in held[1:] + [extra]:
+            c.close()
+
     def test_strangers_cannot_take_the_boards_slots(self):
         import socket
-        port = self.side_server(MAX_PER_ADDRESS=8, MAX_CONNECTIONS=4, RESERVED_FOR_BOARDS=2)
+        port = self.side_server(MAX_PER_ADDRESS=8, MAX_CONNECTIONS=4, RESERVED_FOR_BOARDS=2, SLOT_WAIT_S=0)
         held = []
         for src in ("127.0.0.2", "127.0.0.3"):
             c = socket.socket()
@@ -1531,7 +1566,7 @@ class Server(unittest.TestCase):
         # it doesn't open the admin page, and isn't counted as a wrong guess there
         R.Handler.login_fails.clear()
         self.assertEqual(self.admin("/admin", pw=self.PAGING_PW)[0], 401)
-        self.assertEqual(R.Handler.login_fails.get("127.0.0.1"), [])
+        self.assertFalse(R.Handler.login_fails.get("127.0.0.1"))
         # kept through a restart
         self.assertTrue(R.PagingPassword(path).check(self.PAGING_PW))
         self.assertFalse(R.PagingPassword(path).check("floor-pass-124"))
@@ -1680,6 +1715,8 @@ class Server(unittest.TestCase):
             self.assertIn('<link rel=icon href="data:image/svg+xml,', page)          # the browser tab's icon
             self.assertNotIn("http://www.w3.org/2000/svg\" viewBox", page.split("<body")[1])   # inline, no file to fetch
         self.assertIn('<h1 aria-label="PLASTI-PAGE">', self.home("/")[2])
+        self.assertIn("clearInterval(timer)", self.home("/")[2])            # pages stop refreshing when signed out
+        self.assertIn("clearInterval(timer)", self.admin("/admin")[2])
         ET.fromstring(LOGO.svg().replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1))   # well-formed
         with open(os.path.join(ROOT, "plasti-page-logo.svg"), encoding="utf-8") as f:
             logo = ET.fromstring(f.read())
