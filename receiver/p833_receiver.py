@@ -40,7 +40,7 @@ from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 import p833_sms  # noqa: E402
 
-VERSION = "0.9.1"
+VERSION = "0.10.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",

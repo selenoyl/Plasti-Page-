@@ -15,11 +15,11 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.9.1:** receiving, checking, logging, dry-run paging, the
-admin page, the editable phone settings and the recorded page audio are in and
-tested. The phone call to the HT813 is not built yet:
-with dry run off, every page is logged as FAILED ("phone pager not built yet").
-No real page can go out.
+**Status, version 0.10.0:** receiving, checking, logging, the admin page (HTTPS),
+paging through the HT813 (working on the floor), the recorded page audio, the voice
+lab and the optional voip.ms texts (off until set up) are in and tested. The whole
+project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
+in dry run: no real page goes out until dry run is turned off on the admin page.
 
 ## What it does
 
@@ -89,7 +89,7 @@ If you installed with `git clone`:
 cd ~/plasti-page && sudo bash install/update.sh
 ```
 
-It fetches the newest version from GitHub, shows what changed and runs the installer. The installer backs up the old install first. Your config, secrets, board list, dry-run setting and call log are kept.
+It fetches the newest version from GitHub, shows what changed, and **asks before installing** (`sudo bash install/update.sh -y` skips the question). The installer backs up the old install first and checks that the new version loads before replacing anything. Your config, secrets, board list, dry-run setting and call log are kept.
 
 Without internet: download the new zip on another PC, unzip it into a **new** folder on the laptop, and run `sudo bash install/install.sh` from there.
 
@@ -114,7 +114,7 @@ With dry run off, every test or custom page is really dialed (once the phone ste
 |---|---|
 | Is it running? | `systemctl status p833-receiver` |
 | Live log | `journalctl -u p833-receiver -f` |
-| Call log | `less /var/log/p833-receiver/calls.csv` |
+| Call log | `sudo less /var/log/p833-receiver/calls.csv` (only root and the service can read the logs) |
 | Status page | `http://<laptop IP>:8833/` |
 | After editing config.json | `sudo systemctl restart p833-receiver` |
 
@@ -275,7 +275,7 @@ match except where marked):
 | FXO PORT | Account Active | Yes |
 | FXO PORT | **SIP Registration** | **No** (no phone server) |
 | FXO PORT | Local SIP Port | 5062 (the admin page's "HT813 FXO SIP port") |
-| FXO PORT | Check SIP User ID for incoming INVITE / Allow Incoming SIP Messages from SIP Proxy Only / Authenticate incoming INVITE | No / No / No (direct calls allowed) |
+| FXO PORT | Check SIP User ID for incoming INVITE / Allow Incoming SIP Messages from SIP Proxy Only / Authenticate incoming INVITE | No / No / No (direct calls allowed). **Anyone who can reach the HT813 can then use the line: lock it down, see below.** |
 | FXO PORT | Stage Method | 2 |
 | FXO PORT | Preferred DTMF method | RFC2833 first, payload 101 |
 | FXO PORT | Send Hook Flash To PSTN | Yes (so `F` works) |
@@ -288,6 +288,25 @@ match except where marked):
 | ADVANCED | Automatic Upgrade | No; and **Always Skip the Firmware Check** |
 | BASIC | Reply to ICMP on WAN port | Yes (so it answers ping when troubleshooting) |
 | BASIC | Admin password | changed from the label's |
+| BASIC | End User Password | changed too (the default lets anyone log in and read the settings) |
+
+**Lock down the HT813.** As set up above, the HT813 takes a call from any device that can reach it, and
+that call can use the Norstar line: page the plant, or dial out. Do at least the first step:
+1. **Network (IT, UniFi):** put the HT813 and the laptop on the isolated IoT network, and add a firewall
+   rule so that only the laptop can reach the HT813 (its SIP port 5062, its audio ports and its web page).
+2. **A password on calls (optional, extra):** on the HT813's FXO PORT page set **Authenticate ID** (for
+   example `p833`) and an **Authenticate Password**, then set **Authenticate incoming INVITE** to **Yes**.
+   On the laptop add the same password to the secrets file and restart:
+   ```bash
+   echo 'P833_HT813_PASSWORD=<the password>' | sudo tee -a /etc/p833-receiver/secrets.env >/dev/null
+   ```
+   ```bash
+   sudo systemctl restart p833-receiver
+   ```
+   If the Authenticate ID isn't `p833`, also set `"ht813_auth_id"` in the `phone` part of `config.json`.
+   Then run **Test connection** on the admin page. If it fails, set Authenticate incoming INVITE back to No.
+3. **Its own web page:** change the admin and end-user passwords (above). If the ADVANCED page offers it,
+   turn SSH off and use HTTPS for the web page.
 
 **Catching pages that don't open (line check).** "Sent" means the HT813 answered and the audio played;
 it doesn't prove the Norstar opened the page. So after dialing, the laptop listens to what the line sends
@@ -320,6 +339,32 @@ It's the same as PAGE, SPEAKER, 1 on a Norstar desk phone. The ATA2 is extension
 
 Both work with dry run on.
 
+## Security
+
+What protects what (receiver 0.10.0, board firmware 1.1.3):
+
+| Part | Protection |
+|---|---|
+| Admin page | Password; **HTTPS** with the laptop's own certificate (same port; boards keep plain HTTP). 10 wrong passwords from one address lock it out for 10 minutes. Forms only from the page itself (Origin/Referer). Can't be framed by another site. |
+| Board calls | Board key (`secrets.env`); no key set = calls refused. Board IDs checked. Old messages sent again are never paged. At most 20 pages waiting and 6 calls a minute per board. |
+| Texts | voip.ms API password write-only, stored 0600, sent only to voip.ms over checked HTTPS (no redirects). Only boards on the list send texts. Queue and hourly caps. |
+| Phone line | The laptop uses only SIP and audio from the HT813's address that belong to the call, so other devices can't hang up or divert a page. Optional password on calls (above). |
+| Laptop | Service runs as `p833` in a systemd sandbox; logs and state readable only by root and the service; secrets root-only; SELinux on; firewalld opens only 8833/tcp. The installer checks a new version loads before installing it; `update.sh` asks first. |
+| Open status page | Shows no call details, dial digits, HT813 address or board addresses (those are on the admin page). |
+
+**To do on site** (see also the AAR's open points):
+1. Isolate the IoT network (boards, HT813, laptop) from the plant LAN, and lock down the HT813 (above).
+2. Let only the IoT network and your admin PC reach the receiver's port:
+   ```bash
+   sudo P833_ALLOW_FROM="192.168.83.0/24 192.168.1.50" bash install/install.sh
+   ```
+   Here 192.168.83.0/24 stands for the IoT network and 192.168.1.50 for the PC you use for the admin page:
+   put in your own. The choice is kept for later updates; `P833_ALLOW_FROM=any` undoes it.
+3. Put firmware 1.1.3 on each board (its update page now can't be used to restart the board), then turn
+   network updates off on each board between updates: `otapass` with nothing after it, on the USB console.
+4. The board key goes over the network as plain text in every call. On an isolated network with a strong
+   Wi-Fi password that is acceptable; signed calls would need new firmware on every board (AAR, open points).
+
 ## Cell boards
 
 Each cell's Waveshare ESP32-S3-ETH-8DI-8RO runs the firmware in `firmware/`.
@@ -346,13 +391,17 @@ Over Wi-Fi, by HTTP POST to `http://192.168.83.10:8833`, with the header
 | `press` | 0 to 999, from the pulses. |
 | `age_ms` | How long the call waited on the board before this send. |
 
-The laptop replies `200 {"ok": true, ...}`. The board resends the **same** body every few seconds until it gets a 200; repeats are dropped safely. A `400` reply means the message is wrong, so don't resend it. A `403` reply means the key is wrong.
+The laptop replies `200 {"ok": true, ...}`. The board resends the **same** body every few seconds until it gets a 200; repeats are dropped safely. A `400` reply means the message is wrong, so don't resend it. A `403` reply means the key is wrong. A `503` reply means the laptop is busy (too many pages waiting, or over 6 calls a minute from this board): resend later.
+
+The laptop remembers the highest `seq` it took from each board for each `boot` (in `/var/lib/p833-receiver/seen_calls.json`, kept through restarts). A message sent again later, even days later, is answered 200 "repeat" and not paged.
 
 **Heartbeat, every 60 s:** `POST /heartbeat`
 
 ```json
-{"board": "RSP_LH", "boot": "a91c", "fw": "1.0", "rssi": -58, "uptime_s": 3600}
+{"board": "RSP_LH", "boot": "a91c", "fw": "1.1.3", "rssi": -58, "uptime_s": 3600, "pending": 0, "dropped": 0}
 ```
+
+`dropped` (firmware 1.1.3 on) counts calls the board lost because its queue was full; the laptop logs any increase.
 
 ## Proposed addresses (IoT network, can be changed)
 
@@ -371,7 +420,8 @@ The laptop replies `200 {"ok": true, ...}`. The board resends the **same** body 
 | `receiver/config.example.json` | Default config. |
 | `tools/p833_test_sender.py` | Test sender that plays a board. |
 | `install/install.sh` | First setup, or reinstall from this folder. Safe to run again. |
-| `install/update.sh` | Fetch the newest version from GitHub and run the installer. |
+| `install/update.sh` | Fetch the newest version from GitHub, show the changes, ask, and run the installer. |
+| `install/voices.sha256` | Checksums the voice lab installer checks the downloaded voices against. |
 | `receiver/p833_audio.py` | Builds a page from the recorded sentences and tones. |
 | `receiver/p833_tts.py` | Voice lab helper: runs Piper (in its own environment) to speak any text. |
 | `install/install_tts.sh` | Sets up the Voice lab: Piper and voices. |
