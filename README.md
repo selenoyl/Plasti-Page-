@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.13.0:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.14.0:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -134,8 +134,11 @@ Open `https://<laptop IP>:8833/admin` (plain `http://` is sent there). The first
 
 The admin page doesn't reload itself: the mode line, the boards, the recent calls and the Make all progress update in place every 10 s, so what you're typing or listening to is left alone.
 
+The admin page is in tabs, so it isn't one long list: **Overview** (dry run, boards, recent calls, add a board), **Test and send** (test call, custom page), **Wording**, **Sound** (audio, PA clarity, page voice, voice lab), **Phone** (phone and paging setup) and **Texts** (only when texts are set up). The browser remembers the last tab you used.
+
 | Section | What it does |
 |---|---|
+| **Page wording** (Wording tab) | What each call type says, in English and Spanish, for example the camera fault message (code 8). Put `{press}` where the press number goes. Also the short reason shown on the admin page ("camera fault") and, under "when the press number is unknown", the text for press 0. Saved on the laptop on top of the config file's wording and kept through restarts and updates; **Back to the config file's wording** undoes it. A reworded message is spoken by Piper in the recordings' voice (or in the Page voice, if you use one) and then kept, so the next time plays at once; messages you didn't change keep their recordings. Without Piper on the laptop, the old recording plays and the Audio box says so. Texts use the new wording too. Check a change with the test call **Preview**. |
 | **Phone and paging setup** | HT813 address and ports, 1-stage or 2-stage dialing, the timing waits, each zone's **dial digits** (0-9 * #, comma = half-second pause, F = hook flash), which zone each code pages, each code's department tone, the tone once, twice or off, the silence at the start, and how many times the message plays. Saved on the laptop on top of the config file's values; **Reset** goes back to the config. |
 | **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
 | **Send a test call** | Pick a board, a call type (2 to 9) and a press. **1. Preview** shows the exact words and plays the exact audio, sending nothing. **2. Send** goes through exactly the same path as a real call from that board, and is logged with the detail "admin page test". |
@@ -143,7 +146,7 @@ The admin page doesn't reload itself: the mode line, the boards, the recent call
 | **Send a custom page** | Type your own English and, optionally, Spanish text and pick a zone. It is spoken by Piper with the page voice (see "Page voice"), and **Preview** lets you hear it. Without Piper installed, a live custom page fails. It is logged as code "custom". |
 | **Boards table** | **Remove** takes a board off the list. A board that calls in but isn't on the list shows an **Add** box in its row. |
 
-With dry run off, every test or custom page is really dialed (once the phone step exists).
+With dry run off, every test or custom page is really dialed.
 
 ## Everyday commands
 
@@ -231,7 +234,7 @@ then the **department tone**, English, Spanish, and the tone and message again
   - **Preview** (Send a test call) shows the exact words, tone and zone, and plays the exact audio in your browser. Nothing is sent or logged.
   - The **Audio** box shows whether every message is recorded and matches the config wording.
 - In dry run, **no page audio is saved** (use Preview to hear a message). To keep the audio of recent dry-run pages for troubleshooting, set "Keep audio of the last dry-run pages" on the admin page, for example to 20. They go in `/var/lib/p833-receiver/last_pages/`, and setting it back to 0 removes them at the next start.
-- If you change the wording, the voices or the number range, re-make the clips on a PC with internet, Python 3.9+ and ffmpeg. Then commit the `audio/` folder and update the laptop.
+- To reword a message, use **Page wording** on the admin page (see "The admin page"): Piper speaks the new words, no re-recording needed. To change the recorded voices or the number range, or to record new wording into the clips, re-make the clips on a PC with internet, Python 3.9+ and ffmpeg. Then commit the `audio/` folder and update the laptop.
 
   ```bash
   python3 -m pip install piper-tts
@@ -239,12 +242,10 @@ then the **department tone**, English, Spanish, and the tone and message again
 
   ```bash
   python3 tools/make_audio.py --config receiver/config.example.json --out audio --max-press 100
-
-  It takes about 6 minutes for all 1,616 sentences.
   ```
 
-  Until the clips are re-made, the Audio box flags any that no longer match, and the old clips play. A page with a missing clip fails.
-- Custom pages from the admin page have no audio, because they are free text. In dry run they are logged; live, they fail.
+  It takes about 6 minutes for all 1,616 sentences. Until the clips are re-made, a message whose wording changed is spoken by Piper (if installed); without Piper the Audio box flags it and the old clip plays. A page with a missing clip fails.
+- Custom pages from the admin page are free text, so they are spoken by Piper (see "Page voice"). Without Piper, a live custom page fails.
 
 ## Text messages (voip.ms), optional
 

@@ -527,6 +527,7 @@ class AudioLibrary:
         langs = [l for l in ("en", "es") if l in opts.get("languages", ["en", "es"])]
         end = time.monotonic() + (timeout or getattr(self.voice, "page_budget", 10))
         parts, notes = [], []
+        gave_up = False                     # Piper failed during this page: no more tries in it
         for lang in langs:
             if vs:
                 try:
@@ -540,11 +541,21 @@ class AudioLibrary:
                                      "no %s sentence" % (why, lang))
                         continue
                     notes.append("Piper voice failed (%s), so the %s sentence is the recorded clip" % (why, lang))
-                    vs = None                   # and the rest of this page uses the recordings at once
+                    vs, gave_up = None, True    # and the rest of this page uses the recordings at once
             if press > self.max_press and "press %d is above" % press not in " ".join(notes):
                 notes.append("press %d is above the recorded 1-%d, so the page says press number unknown"
                              % (press, self.max_press))
             keys, warn = self.pieces(cfg, code, press, lang)
+            if warn and not gave_up and self.voice is not None and self.voice.ready():
+                # The wording was changed after this was recorded: say the new words with
+                # Piper, in the recordings' voice. If that fails, the old recording plays.
+                try:
+                    parts.append(self.voice.sentence(lang, code, press, vs=self.voice.recording_settings(),
+                                                     urgent=urgent, timeout=max(0.0, end - time.monotonic())))
+                    continue
+                except Exception as e:
+                    gave_up = True
+                    notes.append("new %s wording couldn't be spoken (%s), so the old recording plays" % (lang, e))
             notes += ["clip %s no longer matches the config wording" % k for k in warn]
             parts.append(b"".join(self._frames(k) for k in keys))
         if not parts:
@@ -614,8 +625,9 @@ class AudioLibrary:
                     for k in keys:
                         if k not in self.clips or not os.path.exists(os.path.join(self.folder, k)):
                             problems.append("missing clip %s" % k)
-                    for k in warn:
-                        problems.append("clip %s no longer matches the config wording" % k)
+                    if self.voice is None or not self.voice.ready():     # (else Piper says the new words)
+                        for k in warn:
+                            problems.append("clip %s no longer matches the config wording" % k)
             style = tone_style(cfg)
             name = cfg["codes"][code].get("tone", "")
             if style != "off" and name:

@@ -432,6 +432,21 @@ class PageVoice:
     def active(self):
         return self.settings()["source"] == "piper"
 
+    def recording_settings(self):
+        """Piper settings that sound like the recorded clips (their voices and pace), for a
+        message whose wording was changed after it was recorded. A recording voice that isn't
+        installed is replaced by an installed voice for the same language."""
+        vs = voice_settings({"audio": {"speak_digits": self.cfg.get("audio", {}).get("speak_digits", ["en"])}},
+                            self.recorded)
+        vs["source"] = "piper"
+        installed = self.installed()
+        for lang in LANGS:
+            if installed and vs[lang]["voice"] not in installed:
+                other = [v for v in installed if v.startswith(lang + "_")]
+                if other:
+                    vs[lang] = dict(vs[lang], voice=other[0])
+        return vs
+
     def ready(self):
         return self.engine.ready()
 

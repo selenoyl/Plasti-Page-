@@ -5,6 +5,7 @@ import base64
 import csv
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1462,6 +1463,123 @@ class Server(unittest.TestCase):
         self.assertIn("NOT the API password", loc)
         self.assertFalse(sender.has_password())
         self.assertEqual(self.cfg["sms"]["api_username"], "boss@example.com")   # the rest is saved
+
+    # ---- page wording and the admin page's tabs
+    def wording_form(self, **change):
+        """The Page wording form as the page fills it in, with some fields changed."""
+        form = {"%s_%d" % (f, code): c.get(f, "") for code, c in self.cfg["codes"].items() for f in R.WORDING_FIELDS}
+        form.update(change)
+        return form
+
+    CAMERA = {"why_8": "vision fault", "en_8": "Maintenance to press {press}, the camera is down.",
+              "es_8": "Mantenimiento a la prensa {press}, la c\u00e1mara no funciona.",
+              "en_no_press_8": "Maintenance, the camera is down. Press number unknown."}
+
+    def test_page_wording_saved_used_kept_and_reset(self):
+        page = self.admin("/admin")[2]
+        self.assertIn("Page wording", page)
+        self.assertIn("value='Maintenance requested to press {press} for camera fault.'", page)
+        _, loc, _ = self.admin("/admin/wording", self.wording_form(**self.CAMERA))
+        self.assertIn("Wording saved", urllib.parse.unquote(loc))
+        self.assertIn("Saved wording in use", self.admin("/admin")[2])
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 8, "press": 12})
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 2, "code": 8, "press": 0})
+        self.wait_pages()
+        self.assertEqual(self.pager.sent[0][2:], ("Maintenance to press 12, the camera is down.",
+                                                  "Mantenimiento a la prensa 12, la c\u00e1mara no funciona."))
+        self.assertEqual(self.pager.sent[1][2:], ("Maintenance, the camera is down. Press number unknown.",
+                                                  "Se solicita mantenimiento por falla de c\u00e1mara. Prensa desconocida."))
+        self.assertEqual(self.cfg["codes"][8]["why"], "vision fault")
+        self.assertEqual(self.cfg["codes"][9]["en"], "Maintenance requested to press {press} for Red Rabbit failure.")
+        # kept through a restart
+        cfg2 = R.load_config(CONFIG)
+        R.State(cfg2, self.tmp, self.tmp)
+        self.assertEqual(cfg2["codes"][8]["en"], "Maintenance to press {press}, the camera is down.")
+        saved = json.loads(json.dumps(self.state.settings["wording"]))
+        del saved["9"]                                       # e.g. a code added to the config later
+        self.state.settings["wording"] = saved
+        self.state._save_settings()
+        cfg2 = R.load_config(CONFIG)
+        R.State(cfg2, self.tmp, self.tmp)
+        self.assertEqual((cfg2["codes"][8]["en"], cfg2["codes"][9]["why"]),
+                         ("Maintenance to press {press}, the camera is down.", "Red Rabbit failure"))
+        # an empty reason: none shown
+        self.admin("/admin/wording", self.wording_form(**dict(self.CAMERA, why_8="")))
+        self.assertNotIn("why", self.cfg["codes"][8])
+        # back to the config file's wording
+        _, loc, _ = self.admin("/admin/wording/reset", {})
+        self.assertIn("back to the config file", urllib.parse.unquote(loc))
+        self.assertEqual(self.cfg["codes"][8], R.load_config(CONFIG)["codes"][8])
+        with open(os.path.join(self.tmp, "settings.json"), encoding="utf-8") as f:
+            self.assertNotIn("wording", json.load(f))
+        self.assertEqual(self.admin("/admin/wording", self.wording_form(), pw=None)[0], 401)
+
+    def test_bad_wording_is_refused(self):
+        for bad in ({"en_8": "Camera fault."},                         # no {press}
+                    {"en_8": "Press {press} and {press}."},            # twice
+                    {"es_8": "Prensa {press} {oops}."},                # another { }
+                    {"why_8": "camera {press}"},                       # no {press} in the reason
+                    {"en_no_press_8": "Press {press}."},               # nor when there's no press number
+                    {"es_8": "{press}"},                               # no words
+                    {"why_8": "x" * 41}, {"en_8": "{press} " + "x" * 200}):
+            _, loc, _ = self.admin("/admin/wording", self.wording_form(**bad))
+            self.assertIn("Wording not saved", urllib.parse.unquote(loc), bad)
+        self.assertEqual(self.cfg["codes"][8], R.load_config(CONFIG)["codes"][8])
+        self.assertNotIn("wording", self.state.settings)
+        # a bad saved file (changed by hand) is not used at the next start
+        self.state.settings["wording"] = {"8": {"en": "no press here"}}
+        self.state._save_settings()
+        cfg2 = R.load_config(CONFIG)
+        R.State(cfg2, self.tmp, self.tmp)
+        self.assertEqual(cfg2["codes"][8]["en"], "Maintenance requested to press {press} for camera fault.")
+
+    def test_reworded_message_is_spoken_by_piper(self):
+        self.admin("/admin/wording", self.wording_form(**self.CAMERA))
+        _, notes = self.worker.audio.build(self.cfg, 8, 12)
+        self.assertIn("no longer matches the config wording", " ".join(notes))    # no Piper: the old recording
+        self.use_fake_tts()
+        _, notes = self.worker.audio.build(self.cfg, 8, 12)
+        self.assertNotIn("no longer matches", " ".join(notes))
+        said = self.spoken()
+        self.assertIn("Maintenance to press one, two, the camera is down.", said)
+        self.assertIn("Mantenimiento a la prensa 12, la c\u00e1mara no funciona.", said)
+        self.assertEqual(self.worker.audio.voice.settings()["source"], "recorded")   # pages still use the recordings
+        n = len(said)
+        _, notes = self.worker.audio.build(self.cfg, 9, 12)                       # not reworded: the recording
+        self.assertEqual(len(self.spoken()), n)
+        self.assertEqual(notes, [])
+        self.worker.audio.build(self.cfg, 8, 12)                                  # kept: not spoken again
+        self.assertEqual(len(self.spoken()), n)
+        # Piper fails: the old recordings play, and the page doesn't try Piper again for Spanish
+        self.admin("/admin/wording", self.wording_form(**dict(self.CAMERA, en_8="DIE at press {press}.",
+                                                              es_8="Prensa {press}, otra vez.")))
+        wav, notes = self.worker.audio.build(self.cfg, 8, 13)
+        self.assertTrue(wav.startswith(b"RIFF"))
+        self.assertEqual(len([x for x in notes if "old recording plays" in x]), 1, notes)
+        self.assertEqual(len([x for x in notes if "no longer matches" in x]), 2, notes)
+
+    def test_admin_page_in_tabs(self):
+        self.assertNotIn("data-for=texts", self.admin("/admin")[2])          # texts not set up: no Texts tab
+        self.use_sms(enabled=False)
+        page = self.admin("/admin")[2]
+        self.assertIn("<nav class=tabs>", page)
+        sections = dict(re.findall(r"<section data-tab=(\w+)>(.*?)</section>", page, re.S))
+        self.assertEqual(sorted(sections), sorted(k for k, _ in R.TABS))
+        where = {"Settings": "overview", "Boards": "overview", "Recent calls": "overview",
+                 "Add or rename a board": "overview", "Send a test call": "send", "Send a custom page": "send",
+                 "Page wording": "wording", "Audio": "sound", "PA clarity": "sound", "Page voice": "sound",
+                 "Voice lab": "sound", "Phone and paging setup": "phone", "Text messages (voip.ms)": "texts"}
+        for title, tab in where.items():
+            self.assertEqual([k for k, v in sections.items() if "<h2>" + title in v], [tab], title)
+        self.assertEqual(page.count("<div class=card"), sum(v.count("<div class=card") for v in sections.values()))
+        self.assertIn("id=boards", sections["overview"])                  # the live update still finds them
+        self.assertIn("id=calls", sections["overview"])
+        self.assertIn("localStorage", page)
+        self.assertNotIn("next build step", page)
+        public = self.get("/")
+        self.assertNotIn("<nav class=tabs>", public)
+        self.assertNotIn("<section", public)
+        self.assertIn("id=calls", public)
 
     def test_sms_settings_on_admin_page(self):
         sender, fake = self.use_sms(enabled=False)

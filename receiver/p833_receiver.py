@@ -43,7 +43,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -415,6 +415,17 @@ class State:
         self.defaults = json.loads(json.dumps(tuning_of(self.cfg)))
         if isinstance(self.settings.get("tuning"), dict):
             apply_tuning(self.cfg, self.settings["tuning"])
+        self.default_wording = {c: {f: self.cfg["codes"][c].get(f, "") for f in WORDING_FIELDS}
+                                for c in self.cfg["codes"]}
+        if isinstance(self.settings.get("wording"), dict):
+            form = {"%s_%d" % (f, c): v[f] for c, v in self.default_wording.items() for f in WORDING_FIELDS}
+            form.update({"%s_%s" % (f, c): v[f] for c, v in self.settings["wording"].items()
+                         if isinstance(v, dict) for f in WORDING_FIELDS if f in v})   # (a new code: the config's)
+            wording, errs = parse_wording(form, self.cfg)
+            if errs:
+                LOG.warning("saved page wording not used (%s); using the config file's", "; ".join(errs))
+            else:
+                apply_wording(self.cfg, wording)
         if isinstance(self.settings.get("clarity"), dict):
             self.cfg["audio"].update(p833_audio.clarity_of(self.settings["clarity"]))
             gap = self.settings["clarity"].get("tone_speech_gap_ms")
@@ -444,6 +455,20 @@ class State:
                 self.calls = list(csv.DictReader(f))[-RECENT_CALLS:]
         except OSError:
             self.calls = []
+
+    def set_wording(self, wording, who=""):
+        with self.lock:
+            apply_wording(self.cfg, wording)
+            self.settings["wording"] = wording
+            self._save_settings()
+        LOG.info("page wording saved on the admin page (%s)", who)
+
+    def reset_wording(self, who=""):
+        with self.lock:
+            apply_wording(self.cfg, self.default_wording)
+            self.settings.pop("wording", None)
+            self._save_settings()
+        LOG.info("page wording reset to the config file's (%s)", who)
 
     def set_clarity(self, c, who=""):
         with self.lock:
@@ -1252,6 +1277,16 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/admin/voice/"):
             return self._voice_post(path, form, who)
 
+        if path == "/admin/wording":
+            wording, errs = parse_wording(form, self.app["cfg"])
+            if errs:
+                return self._back("Wording not saved: " + "; ".join(errs[:4]) + ("; ..." if len(errs) > 4 else "") + ".")
+            st.set_wording(wording, who)
+            return self._back("Wording saved. Check it with the test call Preview.")
+        if path == "/admin/wording/reset":
+            st.reset_wording(who)
+            return self._back("Wording is back to the config file's.")
+
         if path in ("/admin/clarity/preview", "/admin/clarity/save"):
             c, errs = parse_clarity_form(form)
             if path == "/admin/clarity/save":
@@ -1684,6 +1719,10 @@ th{background:var(--head)} tr.bad td{background:var(--bad)} td.ok{color:var(--go
 input,select,button{font-size:15px;padding:4px 6px}
 button{cursor:pointer} .msg{padding:8px 12px;border:2px solid var(--good);margin-bottom:16px;max-width:820px}
 .small{font-size:13px;opacity:.8} form.inline{display:inline;margin:0}
+input.wtxt{width:100%;min-width:16em;box-sizing:border-box;margin:1px 0}
+nav.tabs{display:flex;flex-wrap:wrap;gap:6px;position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;margin:8px 0 14px;border-bottom:1px solid var(--line)}
+nav.tabs button{padding:7px 14px;font-size:15px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;cursor:pointer}
+nav.tabs button.on{background:var(--fg);color:var(--bg);font-weight:bold}
 footer.credit{margin:32px 0 8px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;letter-spacing:.08em;opacity:.7;text-align:center}
 .preview{margin-top:10px;padding:8px 10px;border-left:4px solid var(--good)} .preview:empty{display:none}
 .preview audio{margin-top:8px;width:100%;max-width:520px}
@@ -1806,6 +1845,86 @@ carrier doesn't flag a burst or a fixed rhythm as spam.</td></tr>
        "set: leave blank to keep" if sms.has_password() else "not set", e(s["did"]), e("\n".join(s["to"])),
        int(s["stagger_min_s"]), int(s["stagger_max_s"]), int(s["max_per_hour"]), e(s["prefix"]), e(s["template"]), " checked" if s["admin_tests"] else "",
        "\n".join(rows) or "<tr><td colspan=4>none yet</td></tr>")
+
+
+WORDING_FIELDS = ("why", "en", "es", "en_no_press", "es_no_press")
+
+
+def apply_wording(cfg, wording):
+    """Put checked wording (from parse_wording) into the config in use. An empty reason or
+    no-press text is removed (no reason shown; the main text is used for press 0)."""
+    for c, fields in wording.items():
+        code = int(c)
+        if code not in cfg["codes"]:
+            continue
+        for f, v in fields.items():
+            if f not in WORDING_FIELDS:
+                continue
+            if v:
+                cfg["codes"][code][f] = v
+            elif f != "en" and f != "es":
+                cfg["codes"][code].pop(f, None)
+
+
+def parse_wording(form, cfg):
+    """The page wording from the admin form: for each code, the reason shown on the admin
+    page, and the English and Spanish text with {press} where the press number goes (and,
+    optionally, the text used when the press number is unknown). Returns (wording, errors)."""
+    out, errs = {}, []
+    for code in sorted(cfg["codes"]):
+        fields = {}
+        for f in WORDING_FIELDS:
+            key = "%s_%d" % (f, code)
+            v = " ".join(str(form.get(key, "")).split())         # (an emptied field isn't sent)
+            label = "code %d %s" % (code, {"why": "reason", "en": "English", "es": "Spanish",
+                                            "en_no_press": "English (no press number)",
+                                            "es_no_press": "Spanish (no press number)"}[f])
+            limit = 40 if f == "why" else 200
+            if len(v) > limit or not v.isprintable():
+                errs.append("%s: up to %d characters" % (label, limit))
+            elif f in ("en", "es") and v.count("{press}") != 1:
+                errs.append("%s: keep {press} once, where the press number goes" % label)
+            elif f in ("en", "es") and not v.replace("{press}", "").strip(" ."):
+                errs.append("%s: some words are needed" % label)
+            elif ("{" in v.replace("{press}", "") or "}" in v.replace("{press}", "")) or \
+                    (f not in ("en", "es") and "{press}" in v):
+                errs.append("%s: no { } here (only {press}, in the main texts)" % label)
+            fields[f] = v
+        out[str(code)] = fields
+    return out, errs
+
+
+def wording_html(app):
+    """The Page wording card: reword each call type (the camera fault message, ...)."""
+    cfg, e = app["cfg"], html.escape
+    saved = "wording" in app["state"].settings
+    rows = []
+    for code in sorted(cfg["codes"]):
+        c = cfg["codes"][code]
+        rows.append(
+            "<tr><td><b>%d</b><br>%s</td><td><input name=why_%d value='%s' size=14 maxlength=40 placeholder='(none)'></td>"
+            "<td><input class=wtxt name=en_%d value='%s' maxlength=200 required><br>"
+            "<input class=wtxt name=es_%d value='%s' maxlength=200 required>"
+            "<details><summary class=small>when the press number is unknown</summary>"
+            "<input class=wtxt name=en_no_press_%d value='%s' maxlength=200 placeholder='(English: as above)'><br>"
+            "<input class=wtxt name=es_no_press_%d value='%s' maxlength=200 placeholder='(Spanish: as above)'>"
+            "</details></td></tr>"
+            % (code, e(c["who"]), code, e(c.get("why", "")), code, e(c["en"]), code, e(c["es"]),
+               code, e(c.get("en_no_press", "")), code, e(c.get("es_no_press", ""))))
+    return """
+<div class=card><h2>Page wording</h2>
+<p>%s</p>
+<p class=small>What each call type says. Put <b>{press}</b> where the press number goes. The reason is the
+short label shown on this page (for example "camera fault"). Texts follow the wording here too. A message you
+reword is spoken by Piper in the recordings' voice (or in the Page voice, if you use one); a message you leave
+alone keeps playing its recording. Check a change with the test call Preview.</p>
+<form method=post action='/admin/wording'><div class=w><table>
+<tr><th>Code</th><th>Reason</th><th>English, then Spanish</th></tr>
+%s</table></div><button>Save the wording</button></form>
+<form method=post action='/admin/wording/reset' style='margin-top:8px'
+ onsubmit="return confirm('Go back to the wording in the config file?')"><button>Back to the config file's wording</button></form>
+</div>
+""" % ("<b>Saved wording in use.</b>" if saved else "Now using the config file's wording.", "\n".join(rows))
 
 
 def parse_clarity_form(form):
@@ -2032,6 +2151,59 @@ function p833Preview(kind){
 }
 </script>"""
 
+# The admin page's categories (tabs), and which tab each card (by its title) goes in.
+TABS = [("overview", "Overview"), ("send", "Test and send"), ("wording", "Wording"), ("sound", "Sound"),
+        ("phone", "Phone"), ("texts", "Texts")]
+CARD_TABS = {"Settings": "overview", "Add or rename a board": "overview", "Send a test call": "send",
+             "Send a custom page": "send", "Page wording": "wording", "Audio": "sound", "PA clarity": "sound",
+             "Page voice": "sound", "Voice lab": "sound", "Phone and paging setup": "phone",
+             "Text messages (voip.ms)": "texts"}
+
+
+def tab_sections(cards_html, tables):
+    """The admin page in categories: a tab bar, and each card in its tab's section. The
+    Overview tab has the switch and warnings, then the board and call tables, then adding
+    a board. Without JavaScript, every section shows, one after another."""
+    by_tab = {k: [] for k, _ in TABS}
+    overview_end = []
+    for card in re.split(r"(?=<div class=card[ >])", cards_html):
+        if not card.strip():
+            continue
+        m = re.search(r"<h2>(.*?)</h2>", card)
+        title = m.group(1) if m else ""
+        if title == "Add or rename a board":
+            overview_end.append(card)
+        else:
+            by_tab[CARD_TABS.get(title, "overview")].append(card)
+    nav = "<nav class=tabs>%s</nav>" % "".join(
+        "<button type=button data-for=%s>%s</button>" % (k, label) for k, label in TABS
+        if by_tab[k] or k == "overview")
+    sections = []
+    for k, label in TABS:
+        if not by_tab[k] and k != "overview":
+            continue                     # e.g. Texts, when texts aren't set up on this laptop
+        inner = "".join(by_tab[k]) + (tables + "".join(overview_end) if k == "overview" else "")
+        sections.append("<section data-tab=%s>%s</section>" % (k, inner))
+    return nav + "\n".join(sections)
+
+
+TABS_JS = """<script>
+(function(){
+  var secs=document.querySelectorAll('section[data-tab]'), btns=document.querySelectorAll('nav.tabs button');
+  function show(t){
+    var found=false;
+    for(var i=0;i<secs.length;i++){var on=secs[i].getAttribute('data-tab')===t;secs[i].hidden=!on;found=found||on;}
+    if(!found){if(t!=='overview'){show('overview');}return;}
+    for(var j=0;j<btns.length;j++){btns[j].className=btns[j].getAttribute('data-for')===t?'on':'';}
+    try{localStorage.setItem('p833tab',t);}catch(e){}
+  }
+  for(var k=0;k<btns.length;k++){btns[k].addEventListener('click',function(ev){
+    show(ev.currentTarget.getAttribute('data-for'));window.scrollTo(0,0);});}
+  var t='overview';try{t=localStorage.getItem('p833tab')||t;}catch(e){}
+  show(t);
+})();
+</script>"""
+
 ADMIN_LIVE_JS = """<script>
 var dirty=false;   // (kept for the preview buttons; the admin page no longer reloads itself)
 setInterval(function(){
@@ -2224,8 +2396,7 @@ def page_html(app, admin, msg=""):
         phone_html = """
 <div class=card><h2>Phone and paging setup</h2>
 <p class=small>Change these here while tuning the phone side. They're saved on the laptop, kept through restarts
-and updates, and replace the config file's values. %s The HT813 call itself is the next build step;
-until then the zones, codes, tones and plays already apply (see Listen and the log).</p>
+and updates, and replace the config file's values. %s</p>
 <form method=post action='/admin/tuning'><div class=w><table>%s</table></div>
 <button>Save phone and paging settings</button></form>
 <form method=post action='/admin/tuning/reset' style='margin-top:8px'
@@ -2297,14 +2468,9 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
 Custom text is spoken by Piper with the page voice (Preview lets you hear it); without Piper on the laptop, a live custom page fails.</p></div>
 """ % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + sms_html(app) \
-            + clarity_html(app) + voice_html(app) + lab_html(app) + PREVIEW_JS
+            + wording_html(app) + clarity_html(app) + voice_html(app) + lab_html(app)
 
-    return """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PLASTI-PAGE Receiver</title><style>%s</style></head><body>
-<h1>PLASTI-PAGE RECEIVER%s</h1>
-<p id=statusline>%s</p>
-%s%s
+    tables = """
 <h2>Boards</h2>
 <div class=w><table><thead><tr><th>Cell</th><th>Board</th><th>Status</th><th>Last heard</th><th>Age</th><th>IP</th><th>Wi-Fi dBm</th>%s</tr></thead>
 <tbody id=boards>%s</tbody></table></div>
@@ -2312,13 +2478,20 @@ Custom text is spoken by Piper with the page voice (Preview lets you hear it); w
 <div class=w><table><thead><tr><th>Time</th><th>Cell</th><th>Press</th><th>Code</th><th>Who</th><th>Message</th><th>Result</th><th>Tries</th><th>Detail</th></tr></thead>
 <tbody id=calls>%s</tbody></table></div>
 <p class=small>%s The full log of every call is on the laptop: /var/log/p833-receiver/calls.csv</p>
+""" % ("<th></th>" if admin else "", live["boards"], RECENT_CALLS, live["calls"],
+       "The boards and calls above update by themselves every 10 s; the rest of the page stays as you left it."
+       if admin else "Refreshes every 10 s.")
+    body = tab_sections(admin_html, tables) + PREVIEW_JS + TABS_JS if admin else tables
+    return """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLASTI-PAGE Receiver</title><style>%s</style></head><body>
+<h1>PLASTI-PAGE RECEIVER%s</h1>
+<p id=statusline>%s</p>
+%s%s
 <footer class=credit>ETHAN BRADY &amp; RYAN RAIKES</footer>
 %s</body></html>""" % (
         PAGE_STYLE, " - Admin" if admin else "", live["status"],
-        "<div class=msg>%s</div>" % e(msg) if msg else "", admin_html,
-        "<th></th>" if admin else "", live["boards"], RECENT_CALLS, live["calls"],
-        "The boards and calls above update by themselves every 10 s; the rest of the page stays as you left it."
-        if admin else "Refreshes every 10 s.",
+        "<div class=msg>%s</div>" % e(msg) if msg else "", body,
         ADMIN_LIVE_JS if admin else REFRESH_JS)
 
 
