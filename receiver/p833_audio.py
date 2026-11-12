@@ -30,7 +30,7 @@ RATE = 8000
 # Pauses inside a page, in ms (defaults; lang_gap/repeat_gap/tone_gap can be set on
 # the admin page). Paging feedback eliminators end a page after a short silence, so
 # every pause stays well under a second.
-DEFAULT_GAPS = {"lang_gap_ms": 400, "repeat_gap_ms": 500, "tone_gap_ms": 250, "tone_speech_gap_ms": 500}
+DEFAULT_GAPS = {"lang_gap_ms": 400, "repeat_gap_ms": 500, "tone_gap_ms": 250, "tone_speech_gap_ms": 400}
 # PA clarity (admin page): shape the speech for a paging horn instead of for listening.
 # Cut the bass (mud through a horn), lift 2-4 kHz (where consonants are: "press" vs
 # "tech"), even out the loudness so every syllable is at the same level, and keep the
@@ -359,6 +359,10 @@ class AudioLibrary:
     def max_press(self):
         return int(self.manifest.get("max_press", 999))
 
+    def tone(self, name):
+        """A department tone, or "chime"."""
+        return self._frames("tones/single/%s.wav" % name if name != "chime" else "chime.wav")
+
     def tone_names(self):
         """Tones available (file names without .wav)."""
         try:
@@ -377,7 +381,7 @@ class AudioLibrary:
         if name:
             key = "tones/single/%s.wav" % name
             try:
-                tone = self._frames(key)
+                tone = self.tone(name)
                 if style == "twice":
                     # The single tone twice with a short gap (the "twice" files have long
                     # gaps inside that a feedback eliminator can take as the end of the page).
@@ -387,7 +391,7 @@ class AudioLibrary:
                 note = "tone %s missing, chime used" % key
         else:
             note = ""
-        return (self._level_tone(cfg, self._frames("chime.wav")) + silence(_gap(cfg, "tone_speech_gap_ms")),
+        return (self._level_tone(cfg, self.tone("chime")) + silence(_gap(cfg, "tone_speech_gap_ms")),
                 [note] if note else [])
 
     @staticmethod

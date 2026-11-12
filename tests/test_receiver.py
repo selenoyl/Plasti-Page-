@@ -126,23 +126,23 @@ class Audio(unittest.TestCase):
         cfg["codes"] = self.cfg["codes"]
         lead = 8 * self.cfg["audio"]["lead_silence_ms"]
         langgap, repgap = 8 * 400, 8 * 500           # default pauses: English->Spanish, before the repeat
-        # tone 100 frames + 0.5 s; per language: one whole-sentence clip (80 frames in the fake library)
+        # tone 100 frames + 0.4 s; per language: one whole-sentence clip (80 frames in the fake library)
         lang = 80
-        once = 100 + 4000 + lang + langgap + lang
+        once = 100 + 3200 + lang + langgap + lang
         cfg["audio"] = dict(self.cfg["audio"], repeat=1)
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=2)
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + repgap + once + 2400)
         # the pauses follow the settings
         cfg["audio"] = dict(self.cfg["audio"], repeat=2, lang_gap_ms=200, repeat_gap_ms=300)
-        once2 = 100 + 4000 + lang + 1600 + lang
+        once2 = 100 + 3200 + lang + 1600 + lang
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once2 + 2400 + once2 + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=0, tones="off", languages=["en"])
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 5)[0]), 80 + 2400)
         # twice = the single tone (100 frames) twice with the tone gap (250 ms) between
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=3000, tones="twice", languages=["en"])
-        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 24000 + 100 + 2000 + 100 + 4000 + 80 + 2400)
+        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 24000 + 100 + 2000 + 100 + 3200 + 80 + 2400)
         # older config: "chime": false means no tone; no lead silence set = none
         cfg["audio"] = {"repeat": 1, "chime": False, "languages": ["en"]}
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
@@ -184,10 +184,12 @@ class Audio(unittest.TestCase):
         self.assertEqual(set(start), {0})
 
     def test_tones(self):
-        self.assertEqual(self.lib.tone_names(), ["1_maintenance_bell", "2_technician_wood",
-                                                 "3_supervisor_glide", "4_quality_flute", "5_packaging_pluck"])
-        self.assertEqual(self.cfg["codes"][8]["tone"], "1_maintenance_bell")
-        self.assertEqual(self.cfg["codes"][7]["tone"], "3_supervisor_glide")
+        real = A.AudioLibrary(os.path.join(ROOT, "audio"))
+        self.assertEqual(real.tone_names(), ["1_maintenance_bell", "2_technician_wood", "3_supervisor_glide",
+                                             "4_quality_flute", "5_packaging_pluck", "6_maintenance_doorbell"])
+        # Maintenance has the doorbell, Supervisor the bell
+        self.assertEqual([self.cfg["codes"][c]["tone"] for c in (2, 8, 9)], ["6_maintenance_doorbell"] * 3)
+        self.assertEqual([self.cfg["codes"][c]["tone"] for c in (4, 7)], ["1_maintenance_bell"] * 2)
         # a missing tone falls back to the chime, with a note and a check problem
         cfg = dict(self.cfg, codes={c: dict(v) for c, v in self.cfg["codes"].items()})
         cfg["codes"][5]["tone"] = "nope"
@@ -275,6 +277,33 @@ class Messages(unittest.TestCase):
         self.assertEqual(S.pulses(2, 27), [1500, 500, 700, 1200])
 
 
+class SavedTones(unittest.TestCase):
+    """Tones saved on the admin page before 0.12.1 move once: Supervisor gets the bell,
+    Maintenance the doorbell. A tone picked on purpose is left alone."""
+
+    def test_saved_tones_changed_once(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            old = {"2": "1_maintenance_bell", "3": "2_technician_wood", "4": "3_supervisor_glide",
+                   "5": "4_quality_flute", "6": "5_packaging_pluck", "7": "4_quality_flute",
+                   "8": "1_maintenance_bell", "9": "1_maintenance_bell"}
+            with open(os.path.join(tmp, "settings.json"), "w") as f:
+                json.dump({"dry_run": False, "tuning": {"code_tone": old}}, f)
+            st = R.State(R.load_config(CONFIG), tmp, tmp)
+            tones = {c: st.cfg["codes"][c]["tone"] for c in range(2, 10)}
+            self.assertEqual([tones[c] for c in (2, 8, 9)], ["6_maintenance_doorbell"] * 3)
+            self.assertEqual(tones[4], "1_maintenance_bell")
+            self.assertEqual(tones[7], "4_quality_flute")             # chosen on purpose: kept
+            self.assertFalse(st.dry_run)                              # the rest of the settings kept
+            # done once: picking the bell again for Maintenance afterwards stays
+            st.settings["tuning"]["code_tone"]["2"] = "1_maintenance_bell"
+            st._save_settings()
+            again = R.State(R.load_config(CONFIG), tmp, tmp)
+            self.assertEqual(again.cfg["codes"][2]["tone"], "1_maintenance_bell")
+        finally:
+            shutil.rmtree(tmp)
+
+
 class ConfigUpdate(unittest.TestCase):
     """install/migrate_config.py brings an old installed config up to date."""
 
@@ -284,6 +313,9 @@ class ConfigUpdate(unittest.TestCase):
         try:
             with open(CONFIG, encoding="utf-8") as f:
                 cfg = json.load(f)
+            cfg["codes"]["4"]["tone"] = "3_supervisor_glide"           # tones as before 0.12.1
+            cfg["codes"]["2"]["tone"] = "1_maintenance_bell"
+            cfg["codes"]["7"]["tone"] = "4_quality_flute"              # changed by hand: kept
             # Make it look like a 0.1.0 install with one hand edit.
             cfg["codes"]["2"]["en"] = "Maintenance needed at press {press}."
             cfg["codes"]["8"]["es"] = "Se requiere mantenimiento en la prensa {press} por falla de cámara."
@@ -304,6 +336,8 @@ class ConfigUpdate(unittest.TestCase):
             self.assertEqual(new["codes"][3]["en"], "Tech to press {press} please.")
             self.assertEqual(new["codes"][4]["es"], "Se solicita un supervisor en la prensa {press}.")
             self.assertEqual(new["codes"][7]["why"], "audit check-in")
+            self.assertEqual((new["codes"][2]["tone"], new["codes"][4]["tone"], new["codes"][7]["tone"]),
+                             ("6_maintenance_doorbell", "1_maintenance_bell", "4_quality_flute"))
             self.assertEqual(new["zones"]["floor"]["dial"], "##61")
             self.assertEqual(new["audio"]["keep_dry_run_pages"], 0)
             with open(path, encoding="utf-8") as f:
@@ -948,12 +982,12 @@ class Server(unittest.TestCase):
         self.assertTrue(p["ok"])
         self.assertEqual(p["en"], "Maintenance requested to press 27 for camera fault.")
         self.assertEqual(p["es"], "Se solicita mantenimiento en la prensa 27 por falla de cámara.")
-        self.assertEqual((p["from"], p["zone"], p["tone"], p["plays"]), ("RSP LH (RSP_LH)", "floor", "maintenance bell", 2))
+        self.assertEqual((p["from"], p["zone"], p["tone"], p["plays"]), ("RSP LH (RSP_LH)", "floor", "maintenance doorbell", 2))
         self.assertEqual(p["audio"], "/admin/listen?code=8&press=27")
         self.assertEqual(p["notes"], [])
         self.assertEqual(self.pager.sent, [])                 # previewing never pages
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "calls.csv")))   # nor logs a call
-        self.assertEqual(self.preview("kind=test&board=RSP_LH&code=4&press=3")["tone"], "supervisor glide")
+        self.assertEqual(self.preview("kind=test&board=RSP_LH&code=4&press=3")["tone"], "maintenance bell")   # Supervisor has the bell now
 
     def test_preview_bad_and_password(self):
         self.assertFalse(self.preview("kind=test&board=RSP_LH&code=1&press=27")["ok"])
@@ -1118,7 +1152,7 @@ class Server(unittest.TestCase):
             return []
 
     CLARITY_FORM = {"pa_process": "on", "pa_highpass_hz": "300", "pa_presence_db": "4", "pa_compress": "medium",
-                    "pa_level_db": "-3", "tone_speech_gap_ms": "500"}
+                    "pa_level_db": "-3", "tone_speech_gap_ms": "400"}
 
     def test_pa_clarity_preview_and_save(self):
         page = self.admin("/admin")[2]

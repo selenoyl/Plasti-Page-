@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.12.0:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.12.1:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -250,8 +250,10 @@ The **PA clarity** box on the admin page shapes the speech for paging horns inst
 - **Output level**: the peaks are held smoothly at this level (-3 dB below the top to start) by a
   look-ahead limiter, so nothing is clipped. That includes the HT813, the ATA2, the Norstar and the PA
   amplifier further down the line.
-- **Pause after the tone**: half a second between the tone and the first word, so ears can turn to it
-  (0.3 s before; this one applies with PA clarity on or off).
+- **Pause after the tone**: 0.4 s between the tone and the first word (0.3 s before); with the quiet
+  start of the sentence, ears get about 0.7 s to turn to it. It applies with PA clarity on or off. Keep it
+  at 0.4 s or under: the longest silence that has worked on the floor is about 0.8 s, and the feedback
+  eliminator ends a page at a longer one.
 
 Why: the **Page volume** of +8 dB pushes every page into a limiter. Measured on the recordings, it bends
 13 to 19% of the speech and sends very hot peaks down the phone line. That gives "loud but mushy", and

@@ -43,7 +43,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -279,7 +279,7 @@ def load_config(path):
     audio.setdefault("lang_gap_ms", 400)
     audio.setdefault("repeat_gap_ms", 500)
     audio.setdefault("tone_gap_ms", 250)
-    audio.setdefault("tone_speech_gap_ms", 500)   # after the tone, before the first word
+    audio.setdefault("tone_speech_gap_ms", 400)   # after the tone, before the first word
     for k, v in p833_audio.CLARITY_DEFAULTS.items():  # PA clarity (admin page)
         audio.setdefault(k, v)
     audio.setdefault("speak_digits", ["en"])     # languages whose press numbers are read digit by digit
@@ -376,9 +376,35 @@ class State:
         LOG.warning("dry run turned %s on the admin page (%s)%s", "ON" if on else "OFF", who,
                     "" if on else ": PAGES WILL BE DIALED")
 
+    # One-time changes to settings saved on the admin page: (name, code, old value, new value).
+    # Only a value still at the old default changes, so a choice made on purpose stays.
+    SETTINGS_CHANGES = [
+        ("tones-2026-11-12", "2", "1_maintenance_bell", "6_maintenance_doorbell"),
+        ("tones-2026-11-12", "8", "1_maintenance_bell", "6_maintenance_doorbell"),
+        ("tones-2026-11-12", "9", "1_maintenance_bell", "6_maintenance_doorbell"),
+        ("tones-2026-11-12", "4", "3_supervisor_glide", "1_maintenance_bell"),
+        ("tones-2026-11-12", "7", "3_supervisor_glide", "1_maintenance_bell"),
+    ]
+
+    def _change_saved_settings(self):
+        done = self.settings.setdefault("changes_applied", [])
+        if not isinstance(done, list):
+            done = self.settings["changes_applied"] = []
+        names = sorted({n for n, _, _, _ in self.SETTINGS_CHANGES} - set(done))
+        if not names:
+            return
+        tones = self.settings.get("tuning", {}).get("code_tone") if isinstance(self.settings.get("tuning"), dict) else None
+        for name, code, old, new in self.SETTINGS_CHANGES:
+            if name in names and isinstance(tones, dict) and tones.get(code) == old:
+                tones[code] = new
+                LOG.info("saved setting: code %s tone is now %s (was %s)", code, new, old)
+        done.extend(names)
+        self._save_settings()
+
     def _load(self):
         # Dry run: the admin page's choice wins; the config value is the default.
         self.settings = self._read_json(self.settings_file) or {}
+        self._change_saved_settings()
         self.dry_run = bool(self.settings.get("dry_run", self.cfg["dry_run"]))
         # Phone and paging settings: config values are the defaults; the admin
         # page's saved values (if any) go on top.
@@ -388,7 +414,7 @@ class State:
         if isinstance(self.settings.get("clarity"), dict):
             self.cfg["audio"].update(p833_audio.clarity_of(self.settings["clarity"]))
             gap = self.settings["clarity"].get("tone_speech_gap_ms")
-            if isinstance(gap, int) and 0 <= gap <= 800:
+            if isinstance(gap, int) and 0 <= gap <= 500:
                 self.cfg["audio"]["tone_speech_gap_ms"] = gap
         if isinstance(self.settings.get("voice"), dict):
             self.cfg["audio"]["voice"] = self.settings["voice"]
@@ -886,8 +912,8 @@ def lab_wav(app, form):
     if tone:
         if tone not in lib.tone_names():
             raise AudioError("unknown tone")
-        lead = lib._level_tone(cfg, lib._frames("tones/single/%s.wav" % tone)) + \
-            p833_audio.silence(cfg["audio"].get("tone_speech_gap_ms", 500))
+        lead = lib._level_tone(cfg, lib.tone(tone)) + \
+            p833_audio.silence(cfg["audio"].get("tone_speech_gap_ms", 400))
     return lib._wrap(lead, lib.speech(cfg, body), dict(cfg["audio"], repeat=plays, lead_silence_ms=0))
 
 
@@ -1170,7 +1196,7 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         # The first code's department tone (the maintenance bell), twice.
                         tone = self.app["cfg"]["codes"][2].get("tone", "")
-                        one = lib._frames("tones/single/%s.wav" % tone) if tone else lib._frames("chime.wav")
+                        one = lib.tone(tone) if tone else lib.tone("chime")
                         gap = b"\x00\x00" * (8 * int(self.app["cfg"]["audio"].get("tone_gap_ms", 250)))
                         wav = lib._wrap(b"", lib._level_tone(self.app["cfg"], one + gap + one),
                                         dict(self.app["cfg"]["audio"], repeat=1, lead_silence_ms=0))
@@ -1786,7 +1812,7 @@ def parse_clarity_form(form):
     for key, label, lo, hi in (("pa_highpass_hz", "Cut the bass below", 0, 600),
                                ("pa_presence_db", "Clarity boost", 0, 10),
                                ("pa_level_db", "Output level", -20, 0),
-                               ("tone_speech_gap_ms", "Pause after the tone", 0, 800)):
+                               ("tone_speech_gap_ms", "Pause after the tone", 0, 500)):
         try:
             c[key] = int(form.get(key, "") or 0)
             if not lo <= c[key] <= hi:
@@ -1824,9 +1850,10 @@ understand it". With it on, the Page volume setting isn't used: Output level set
 <tr><td>Output level (dB)</td><td><input name=pa_level_db type=number min=-20 max=0 step=1 value='%d' style='width:5em'></td>
 <td class=small>How high the peaks go (0 = the top). If pages sound crunchy or buzzy on the floor, lower
 this and turn the paging amplifier up instead. -3 is a safe start.</td></tr>
-<tr><td>Pause after the tone (ms)</td><td><input name=tone_speech_gap_ms type=number min=0 max=800 step=10 value='%d' style='width:5em'></td>
-<td class=small>Time for ears to turn to the speaker before the first word. 500 is usual; keep it under 800
-(a longer silence can end the page). This one applies with PA clarity on or off.</td></tr>
+<tr><td>Pause after the tone (ms)</td><td><input name=tone_speech_gap_ms type=number min=0 max=500 step=10 value='%d' style='width:5em'></td>
+<td class=small>Time for ears to turn to the speaker before the first word (with the quiet start of the
+sentence, about 0.7 s at 400). Keep it at 400 or under: the longest silence that has worked on the floor
+is about 0.8 s, and the feedback eliminator ends a page at a longer one. Applies with PA clarity on or off.</td></tr>
 </table></div>
 <label>Hear code <select name=code>%s</select></label>
 <label>at press <input name=press type=number min=0 max=999 value=27 style='width:5em'></label>
@@ -1836,7 +1863,7 @@ this and turn the paging amplifier up instead. -3 is a safe start.</td></tr>
 <p class=small>Preview uses the settings above without saving, so you can tick and untick and compare.
 A laptop or phone speaker isn't a paging horn: the real test is a page on the floor.</p></div>
 """ % ("ON" if c["pa_process"] else "off", " checked" if c["pa_process"] else "", c["pa_highpass_hz"],
-       c["pa_presence_db"], sel, c["pa_level_db"], int(a.get("tone_speech_gap_ms", 500)), copts)
+       c["pa_presence_db"], sel, c["pa_level_db"], int(a.get("tone_speech_gap_ms", 400)), copts)
 
 
 def voice_job_line(pv):

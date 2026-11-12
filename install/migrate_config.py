@@ -79,6 +79,12 @@ OLD_DEFAULTS = [
     ("8", "es", "Se solicita mantenimiento en la prensa número {press} por falla de cámara."),
     ("9", "en", "Maintenance requested to press number {press} for Red Rabbit failure."),
     ("9", "es", "Se solicita mantenimiento en la prensa número {press} por falla de Red Rabbit."),
+    # Department tones up to 0.12.0: Supervisor now has the bell, Maintenance the doorbell.
+    ("2", "tone", "1_maintenance_bell"),
+    ("8", "tone", "1_maintenance_bell"),
+    ("9", "tone", "1_maintenance_bell"),
+    ("4", "tone", "3_supervisor_glide"),
+    ("7", "tone", "3_supervisor_glide"),
 ]
 
 
