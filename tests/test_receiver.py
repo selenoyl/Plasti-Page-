@@ -1117,6 +1117,23 @@ class Server(unittest.TestCase):
         except OSError:
             return []
 
+    def test_admin_page_updates_in_place_instead_of_reloading(self):
+        page = self.admin("/admin")[2]
+        self.assertNotIn("location.replace", page)                  # no whole-page reload on the admin page
+        self.assertIn("/admin/live", page)
+        self.assertIn("location.replace", self.get("/"))            # the open status page still reloads
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        self.wait_row()
+        st, _, body = self.admin("/admin/live")
+        live = json.loads(body)
+        self.assertEqual(st, 200)
+        self.assertIn("Maintenance requested to press 27.", live["calls"])
+        self.assertIn("RSP LH", live["boards"])
+        self.assertIn("DRY RUN" if self.state.dry_run else "LIVE", live["status"])
+        self.assertIn("voicejob", live)
+        self.assertEqual(self.admin("/admin/live", pw=None)[0], 401)
+
     def test_listen_and_preview_only_from_the_admin_page(self):
         q = "/admin/preview?" + urllib.parse.urlencode({"kind": "test", "code": "2", "press": "5", "board": "RSP_LH"})
         self.assertEqual(self.admin(q)[0], 200)

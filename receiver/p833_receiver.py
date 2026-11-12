@@ -42,7 +42,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.11.0"
+VERSION = "0.11.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -1321,6 +1321,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(200, status_obj(self.app))
         if parts.path in ("/", "/index.html"):
             return self._reply(200, page_html(self.app, False).encode(), "text/html; charset=utf-8")
+        if parts.path == "/admin/live":
+            if not self._admin_ok():
+                return self._ask_password()
+            return self._reply(200, live_parts(self.app, True))
         if parts.path == "/admin/preview":
             if not self._admin_ok():
                 return self._ask_password()
@@ -1732,6 +1736,19 @@ carrier doesn't flag a burst or a fixed rhythm as spam.</td></tr>
        "\n".join(rows) or "<tr><td colspan=4>none yet</td></tr>")
 
 
+def voice_job_line(pv):
+    """How "Make all messages" is getting on (updated live on the admin page)."""
+    job, e = dict(pv.job), html.escape
+    if job.get("running"):
+        return ("Making messages ahead of time: %d of %d checked, %d made, %d failed. "
+                "<form class=inline method=post action='/admin/voice/stop'><button>Stop</button></form>"
+                % (job.get("done", 0), job.get("total", 0), job.get("made", 0), job.get("failed", 0)))
+    if job.get("finished"):
+        return "Last run of Make all messages: %d made, %d failed%s." % (
+            job.get("made", 0), job.get("failed", 0), " (%s)" % e(job["error"]) if job.get("error") else "")
+    return ""
+
+
 def voice_html(app):
     """The Page voice card: tune Piper settings, hear a page with them, save them for pages."""
     cfg, e = app["cfg"], html.escape
@@ -1748,16 +1765,7 @@ def voice_html(app):
                 "first time):</p><pre>sudo bash install/install_tts.sh</pre></div>" % (using, back))
     missing = [vs[l]["voice"] for l in ("en", "es") if vs[l]["voice"] not in voices]
     kept, mb = pv.stats()
-    job = dict(pv.job)
-    if job.get("running"):
-        jobline = ("Making messages ahead of time: %d of %d checked, %d made, %d failed. "
-                   "<form class=inline method=post action='/admin/voice/stop'><button>Stop</button></form>"
-                   % (job.get("done", 0), job.get("total", 0), job.get("made", 0), job.get("failed", 0)))
-    elif job.get("finished"):
-        jobline = "Last run of Make all messages: %d made, %d failed%s." % (
-            job.get("made", 0), job.get("failed", 0), " (%s)" % e(job["error"]) if job.get("error") else "")
-    else:
-        jobline = ""
+    jobline = "<span id=voicejob>%s</span>" % voice_job_line(pv)
     rows = []
     for lang, name, eg in (("en", "English", "two, seven"), ("es", "Spanish", "dos, siete")):
         lv = vs[lang]
@@ -1877,6 +1885,22 @@ function p833Preview(kind){
 }
 </script>"""
 
+ADMIN_LIVE_JS = """<script>
+var dirty=false;   // (kept for the preview buttons; the admin page no longer reloads itself)
+setInterval(function(){
+  if(document.hidden){return;}
+  var a=document.activeElement, b=document.getElementById('boards');
+  if(a&&b&&b.contains(a)){return;}     // typing a cell name in the board table: leave it
+  fetch('/admin/live',{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null;}).then(function(p){
+    if(!p){return;}
+    ['status','boards','calls','voicejob'].forEach(function(k){
+      var el=document.getElementById(k==='status'?'statusline':k);
+      if(el&&p[k]!==undefined&&el.innerHTML!==p[k]){el.innerHTML=p[k];}
+    });
+  }).catch(function(){});
+},10000);
+</script>"""
+
 REFRESH_JS = """<script>
 var dirty=false;document.addEventListener('input',function(){dirty=true;});
 setInterval(function(){var a=document.activeElement;
@@ -1884,11 +1908,12 @@ if(!dirty&&!(a&&/INPUT|SELECT|TEXTAREA|BUTTON/.test(a.tagName)))location.replace
 </script>"""
 
 
-def page_html(app, admin, msg=""):
-    s = status_obj(app, admin)
-    cfg = app["cfg"]
+def live_parts(app, admin, s=None):
+    """The parts of the status/admin page that change by themselves: the mode line, the
+    board table and the recent calls. The admin page fetches these every 10 s and swaps
+    them in place, so forms, previews and the scroll position are left alone."""
+    s = s or status_obj(app, admin)
     e = html.escape
-
     brows = []
     for b in s["boards"]:
         ago = "never" if b["seconds_ago"] is None else "%d s ago" % b["seconds_ago"]
@@ -1916,11 +1941,24 @@ def page_html(app, admin, msg=""):
         crow.append("<tr class='%s'>%s</tr>" % (cls, "".join(
             "<td>%s</td>" % e(str(c.get(k, ""))) for k in
             ("time", "cell", "press", "code", "who", "message", "result", "attempts", "detail"))))
-
     mode = ("DRY RUN: pages are logged, not dialed" if s["dry_run"] else "LIVE: pages are dialed")
     mode_color = "var(--warn)" if s["dry_run"] else "var(--good)"
     nav = ("<a href='/'>Back to status page</a>" if admin
            else "<a href='/admin'>Admin: test calls and boards</a>")
+    out = {"status": "<span class=\"mode\" style=\"background:%s\">%s</span> &nbsp; version %s &nbsp; "
+                     "pages waiting: %d &nbsp; %s" % (mode_color, mode, VERSION, s["pages_waiting"], nav),
+           "boards": "\n".join(brows) or "<tr><td colspan=8>none</td></tr>",
+           "calls": "\n".join(crow) or "<tr><td colspan=9>none yet</td></tr>"}
+    if admin and app.get("voice") is not None:
+        out["voicejob"] = voice_job_line(app["voice"])
+    return out
+
+
+def page_html(app, admin, msg=""):
+    s = status_obj(app, admin)
+    cfg = app["cfg"]
+    e = html.escape
+    live = live_parts(app, admin, s)
 
     admin_html = ""
     if admin:
@@ -2118,21 +2156,22 @@ Custom text is spoken by Piper with the page voice (Preview lets you hear it); w
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>P833 Call Receiver</title><style>%s</style></head><body>
 <h1>P833 Call Receiver%s</h1>
-<p><span class="mode" style="background:%s">%s</span> &nbsp; version %s &nbsp; pages waiting: %d &nbsp; %s</p>
+<p id=statusline>%s</p>
 %s%s
 <h2>Boards</h2>
-<div class=w><table><tr><th>Cell</th><th>Board</th><th>Status</th><th>Last heard</th><th>Age</th><th>IP</th><th>Wi-Fi dBm</th>%s</tr>
-%s</table></div>
+<div class=w><table><thead><tr><th>Cell</th><th>Board</th><th>Status</th><th>Last heard</th><th>Age</th><th>IP</th><th>Wi-Fi dBm</th>%s</tr></thead>
+<tbody id=boards>%s</tbody></table></div>
 <h2>Recent calls (newest first)</h2>
-<div class=w><table><tr><th>Time</th><th>Cell</th><th>Press</th><th>Code</th><th>Who</th><th>Message</th><th>Result</th><th>Tries</th><th>Detail</th></tr>
-%s</table></div>
-<p class=small>Refreshes every 10 s (paused while you type). Full log: /var/log/p833-receiver/calls.csv</p>
+<div class=w><table><thead><tr><th>Time</th><th>Cell</th><th>Press</th><th>Code</th><th>Who</th><th>Message</th><th>Result</th><th>Tries</th><th>Detail</th></tr></thead>
+<tbody id=calls>%s</tbody></table></div>
+<p class=small>%s Full log: /var/log/p833-receiver/calls.csv</p>
 %s</body></html>""" % (
-        PAGE_STYLE, " - Admin" if admin else "", mode_color, mode, VERSION, s["pages_waiting"], nav,
+        PAGE_STYLE, " - Admin" if admin else "", live["status"],
         "<div class=msg>%s</div>" % e(msg) if msg else "", admin_html,
-        "<th></th>" if admin else "",
-        "\n".join(brows) or "<tr><td colspan=8>none</td></tr>",
-        "\n".join(crow) or "<tr><td colspan=9>none yet</td></tr>", REFRESH_JS)
+        "<th></th>" if admin else "", live["boards"], live["calls"],
+        "The boards and calls above update by themselves every 10 s; the rest of the page stays as you left it."
+        if admin else "Refreshes every 10 s.",
+        ADMIN_LIVE_JS if admin else REFRESH_JS)
 
 
 # ------------------------------------------------------------------ main ---

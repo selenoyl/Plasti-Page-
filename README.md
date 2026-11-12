@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.11.0:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.11.1:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -97,6 +97,8 @@ Without internet: download the new zip on another PC, unzip it into a **new** fo
 ## The admin page
 
 Open `https://<laptop IP>:8833/admin` (plain `http://` is sent there). The first time, the browser warns about the certificate: the installer made it on the laptop, so no outside company vouches for it. Check that the fingerprint matches the one the installer printed (`sudo openssl x509 -in /etc/p833-receiver/tls/cert.pem -noout -fingerprint -sha256`), then choose **Advanced > Proceed**. The browser asks for a user name and password: any user name works, and the password is `P833_ADMIN_PASSWORD` from `secrets.env`. The status page at `/` stays open and read-only.
+
+The admin page doesn't reload itself: the mode line, the boards, the recent calls and the Make all progress update in place every 10 s, so what you're typing or listening to is left alone.
 
 | Section | What it does |
 |---|---|
