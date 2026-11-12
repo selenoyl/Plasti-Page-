@@ -44,6 +44,21 @@ LOG = logging.getLogger("p833")
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
               "result", "attempts", "detail"]
 BOARD_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+BOOT_ID = re.compile(r"^[A-Za-z0-9_-]{0,32}$")
+MAX_CONNECTIONS = 64      # open web connections at once; more are closed at once
+MAX_WAITING_PAGES = 20    # pages queued but not yet sent; calls over it get "busy" and the board retries
+MAX_CALLS_PER_MIN = 6     # accepted calls from one board ID in a minute
+MAX_UNKNOWN_BOARDS = 50   # boards not on the list that are remembered on the status page
+LOGIN_FAILS = 10          # wrong admin passwords from one address...
+LOGIN_WINDOW_S = 600      # ...in this many seconds lock that address out for this long
+
+
+csv_safe = p833_sms.csv_safe
+
+
+def plain(v, n=32):
+    """Text from the network, made safe for logs and pages: printable, no control characters."""
+    return re.sub(r"[^A-Za-z0-9 ._:/+-]", "?", str(v))[:n]
 
 
 # ---------------------------------------------------------------- config ---
@@ -285,15 +300,17 @@ def check_call(body):
     if not isinstance(body, dict):
         return None, "body must be a JSON object"
     board = body.get("board")
-    if not isinstance(board, str) or not board or len(board) > 32:
-        return None, "board must be a short text ID"
+    if not isinstance(board, str) or not BOARD_ID.match(board):
+        return None, "board must be 1 to 32 letters, numbers, _ or -"
     out = {"board": board}
     for name, lo, hi in (("code", 2, 9), ("press", 0, 999), ("seq", 0, 2**31)):
         v = body.get(name)
         if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
             return None, "%s must be a whole number %d to %d" % (name, lo, hi)
         out[name] = v
-    out["boot"] = str(body.get("boot", ""))[:32]
+    out["boot"] = str(body.get("boot", ""))
+    if not BOOT_ID.match(out["boot"]):
+        return None, "boot must be up to 32 letters, numbers, _ or -"
     age = body.get("age_ms", 0)
     out["age_ms"] = age if isinstance(age, int) and 0 <= age < 86400000 else 0
     return out, None
@@ -321,7 +338,11 @@ class State:
         self.registry = {}    # board -> {"cell": name}
         self.calls = []       # last 50 call records, newest last
         self.ui_seq = 0
+        self.ui_boot = "admin-%x" % int(time.time())   # admin test calls: unique per start
+        self.boots = {}       # board -> [[boot, highest seq accepted], ...] newest last (kept across restarts)
+        self.rate = {}        # board -> times of accepted calls in the last minute
         self.heard_file = os.path.join(state_dir, "boards.json")
+        self.boots_file = os.path.join(state_dir, "seen_calls.json")
         self.registry_file = os.path.join(state_dir, "board_list.json")
         self.settings_file = os.path.join(state_dir, "settings.json")
         self.csv_file = os.path.join(log_dir, "calls.csv")
@@ -348,11 +369,14 @@ class State:
         if isinstance(self.settings.get("tuning"), dict):
             apply_tuning(self.cfg, self.settings["tuning"])
         if isinstance(self.settings.get("sms"), dict):
-            self.cfg["sms"].update({k: v for k, v in self.settings["sms"].items() if k in p833_sms.DEFAULTS})
+            self.cfg["sms"].update({k: v for k, v in self.settings["sms"].items()
+                                    if k in p833_sms.DEFAULTS and k != "api_url"})
 
         self.heard_info = self._read_json(self.heard_file) or {}
         for b in self.heard_info.values():
             b["silent_logged"] = False
+        boots = self._read_json(self.boots_file) or {}
+        self.boots = {k: v for k, v in boots.items() if isinstance(v, list)}
         reg = self._read_json(self.registry_file)
         if reg is None:
             reg = {k: {"cell": v.get("cell", k)} for k, v in self.cfg["boards"].items()}
@@ -435,6 +459,9 @@ class State:
     # -- calls and heartbeats
     def heard(self, board, ip, extra=None):
         with self.lock:
+            if board not in self.heard_info and board not in self.registry and \
+                    sum(1 for k in self.heard_info if k not in self.registry) >= MAX_UNKNOWN_BOARDS:
+                return          # don't let made-up board IDs grow the list without end
             b = self.heard_info.setdefault(board, {})
             if b.get("silent_logged"):
                 LOG.info("board %s is back after being silent", board)
@@ -442,6 +469,44 @@ class State:
             if extra:
                 b.update(extra)
             self._write_json(self.heard_file, self.heard_info)
+
+    def replayed(self, call):
+        """True if this board already sent this message (same boot, same or higher seq).
+        Boards number their calls 1, 2, 3... after each start (boot is random per start),
+        so an old message sent again, even days later, is caught. Kept across restarts."""
+        with self.lock:
+            hist = self.boots.get(call["board"], [])
+            for boot, top in hist:
+                if boot == call["boot"]:
+                    return call["seq"] <= top
+            return False
+
+    def remember(self, call):
+        with self.lock:
+            hist = [x for x in self.boots.get(call["board"], []) if x[0] != call["boot"]]
+            top = max([call["seq"]] + [t for b, t in self.boots.get(call["board"], []) if b == call["boot"]])
+            self.boots[call["board"]] = (hist + [[call["boot"], top]])[-20:]
+            if len(self.boots) > 200:
+                for k in list(self.boots)[:len(self.boots) - 200]:
+                    del self.boots[k]
+            self._write_json(self.boots_file, self.boots)
+
+    def seen_recently(self, call):
+        with self.lock:
+            t = self.seen.get((call["board"], call["boot"], call["seq"]))
+            return t is not None and time.time() - t < self.cfg["repeat_window_s"]
+
+    def too_fast(self, board):
+        """True if this board ID already had MAX_CALLS_PER_MIN calls accepted in the last minute."""
+        now = time.time()
+        with self.lock:
+            times = [t for t in self.rate.get(board, []) if now - t < 60]
+            self.rate = {k: v for k, v in self.rate.items() if v and now - v[-1] < 60}
+            self.rate[board] = times
+            if len(times) >= MAX_CALLS_PER_MIN:
+                return True
+            times.append(now)
+            return False
 
     def is_repeat(self, call):
         """True if this exact message, or the same call, was already accepted."""
@@ -474,7 +539,7 @@ class State:
                     w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
                     if new:
                         w.writeheader()
-                    w.writerow({k: rec.get(k, "") for k in CSV_FIELDS})
+                    w.writerow({k: csv_safe(rec.get(k, "")) for k in CSV_FIELDS})
             except OSError as e:
                 LOG.error("could not write call log: %s", e)
             self.calls.append({k: str(rec.get(k, "")) for k in CSV_FIELDS})
@@ -492,11 +557,27 @@ class State:
                     b["silent_logged"] = True
 
 
+class Busy(Exception):
+    """Too many calls: the board should try again later (HTTP 503)."""
+
+
 def accept_call(app, call, ip, note=""):
     """Handle one checked call from a board or the admin page.
 
-    Returns (repeat: bool, english text)."""
+    Returns (repeat: bool, english text); raises Busy when it can't take the call now."""
     st, cfg = app["state"], app["cfg"]
+    if st.replayed(call) and not st.seen_recently(call):
+        # handled long ago (inside the window it's logged as a repeat below): journal only
+        LOG.info("old message dropped: %s seq %d (boot %s) was already handled", call["board"],
+                 call["seq"], call["boot"])
+        return True, ""
+    if app["worker"].jobs.qsize() >= MAX_WAITING_PAGES:
+        LOG.warning("call from %s refused for now: %d pages already waiting", call["board"], MAX_WAITING_PAGES)
+        raise Busy("too many pages waiting")
+    if not note and st.too_fast(call["board"]):
+        LOG.warning("call from %s refused for now: more than %d calls in a minute", call["board"],
+                    MAX_CALLS_PER_MIN)
+        raise Busy("too many calls from this board")
     if ip:
         st.heard(call["board"], ip)
     cell = st.cell_name(call["board"])
@@ -506,7 +587,10 @@ def accept_call(app, call, ip, note=""):
            "code": call["code"], "who": cfg["codes"][call["code"]]["who"],
            "message": en, "en": en, "es": es, "note": note,
            "zone": cfg["codes"][call["code"]]["zone"]}
-    if st.is_repeat(call):
+    repeat = st.is_repeat(call)
+    if call["boot"]:
+        st.remember(call)
+    if repeat:
         LOG.info("repeat dropped: %s code %d press %d seq %d",
                  call["board"], call["code"], call["press"], call["seq"])
         rec.update(result="repeat dropped", attempts=0,
@@ -663,21 +747,37 @@ class PageWorker(threading.Thread):
 LAB_DEFAULT_TEXT = "Maintenance requested to press two. [350] Seven."
 
 
+def tts_env():
+    """A plain environment for Piper: none of the service's secrets."""
+    return {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "HOME": os.environ.get("STATE_DIRECTORY", "/tmp")}
+
+
 def tts_ready(cfg):
     a = cfg["audio"]
     return os.path.exists(a["tts_python"]) and os.path.exists(a["tts_script"]) and os.path.isdir(a["tts_voices"])
 
 
+TTS_LOCK = threading.Lock()      # one Piper at a time: it is heavy on the laptop
+_voices_cache = {"at": 0, "key": None, "list": []}
+
+
 def tts_voices(cfg):
+    """Installed voices; asked of Piper at most once a minute (the admin page reloads often)."""
     if not tts_ready(cfg):
         return []
     a = cfg["audio"]
+    key = (a["tts_python"], a["tts_script"], a["tts_voices"])
+    if _voices_cache["key"] == key and time.time() - _voices_cache["at"] < 60:
+        return _voices_cache["list"]
     try:
         out = subprocess.run([a["tts_python"], a["tts_script"], "list", a["tts_voices"]],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
-        return json.loads(out.stdout.decode() or "[]") if out.returncode == 0 else []
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=tts_env())
+        voices = json.loads(out.stdout.decode() or "[]") if out.returncode == 0 else []
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        return []
+        voices = []
+    _voices_cache.update(at=time.time(), key=key, list=voices)
+    return voices
 
 
 def lab_segments(text):
@@ -700,13 +800,17 @@ def tts_speak(cfg, voice, length_scale, text):
         raise AudioError("there is no text to speak")
     a = cfg["audio"]
     req = json.dumps({"voice": voice, "length_scale": length_scale, "segments": segs}).encode()
+    if not TTS_LOCK.acquire(timeout=5):
+        raise AudioError("the voice lab is busy with another request; try again in a moment")
     try:
         out = subprocess.run([a["tts_python"], a["tts_script"], "speak", a["tts_voices"]], input=req,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, env=tts_env())
     except subprocess.TimeoutExpired:
         raise AudioError("speaking took too long")
     except OSError as e:
         raise AudioError("could not run Piper: %s" % e)
+    finally:
+        TTS_LOCK.release()
     if out.returncode != 0 or not out.stdout.startswith(b"RIFF"):
         err = out.stderr.decode("utf-8", "replace").strip().splitlines()
         raise AudioError("Piper failed: %s" % (err[-1] if err else "no output"))
@@ -733,6 +837,8 @@ def lab_wav(app, form):
     lead = b""
     tone = form.get("tone", "")
     if tone:
+        if tone not in lib.tone_names():
+            raise AudioError("unknown tone")
         lead = lib._frames("tones/single/%s.wav" % tone) + b"\x00\x00" * 2400
     return lib._wrap(lead, body, {"repeat": plays, "lead_silence_ms": 0,
                                   "repeat_gap_ms": cfg["audio"].get("repeat_gap_ms", 500),
@@ -744,6 +850,9 @@ def lab_wav(app, form):
 class Handler(BaseHTTPRequestHandler):
     server_version = "P833Receiver/" + VERSION
     app = None  # set in main()
+    timeout = 20          # seconds a connection may sit idle or trickle in; then it's closed
+    login_fails = {}      # address -> times of wrong admin passwords
+    login_lock = threading.Lock()
 
     def log_message(self, fmt, *args):  # keep the journal quiet
         pass
@@ -754,6 +863,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("Referrer-Policy", "same-origin")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -778,35 +891,64 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def _key_ok(self):
+        """The board key must be set and match. No key set means no calls (fail closed)."""
         key = self.app["key"]
-        return not key or hmac.compare_digest(self.headers.get("X-P833-Key", ""), key)
+        given = self.headers.get("X-P833-Key", "")
+        return bool(key) and hmac.compare_digest(given.encode("utf-8", "replace"), key.encode("utf-8"))
 
     # -- admin password (HTTP Basic; any user name, the password is checked)
     def _admin_ok(self):
+        """No password set means no admin page (fail closed). Wrong passwords are logged,
+        and an address with LOGIN_FAILS of them in LOGIN_WINDOW_S is locked out that long."""
         pw = self.app["admin_password"]
         if not pw:
-            return True
+            return False
+        ip = self.client_address[0]
+        now = time.time()
+        with self.login_lock:
+            fails = [t for t in self.login_fails.get(ip, []) if now - t < LOGIN_WINDOW_S]
+            self.login_fails[ip] = fails
+            if len(fails) >= LOGIN_FAILS:
+                return False
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Basic "):
             return False
         try:
             given = base64.b64decode(auth[6:]).decode("utf-8").split(":", 1)[1]
         except (ValueError, IndexError, UnicodeDecodeError):
-            return False
-        return hmac.compare_digest(given, pw)
+            given = None
+        if given is not None and hmac.compare_digest(given.encode("utf-8"), pw.encode("utf-8")):
+            return True
+        with self.login_lock:
+            fails = self.login_fails.setdefault(ip, [])
+            fails.append(now)
+            if len(self.login_fails) > 1000:          # keep the table small
+                self.login_fails.clear()
+        LOG.warning("wrong admin password from %s%s", ip,
+                    "; locked out for %d min" % (LOGIN_WINDOW_S // 60) if len(fails) >= LOGIN_FAILS else "")
+        return False
 
     def _ask_password(self):
+        if not self.app["admin_password"]:
+            return self._reply(503, b"The admin page is off: no admin password is set. On the laptop run: "
+                               b"sudo bash install/install.sh", "text/plain")
+        with self.login_lock:
+            locked = len(self.login_fails.get(self.client_address[0], [])) >= LOGIN_FAILS
+        if locked:
+            return self._reply(429, b"Too many wrong passwords from this address. Try again in 10 minutes.",
+                               "text/plain")
         return self._reply(401, b"Admin password needed.", "text/plain",
                            {"WWW-Authenticate": 'Basic realm="P833 receiver admin"'})
 
     def _same_site(self):
-        """Refuse admin form posts that come from another web site."""
+        """Refuse admin form posts that don't come from the admin page itself. Browsers send
+        Origin (or at least Referer) with a form post; a post with neither is refused."""
         host = self.headers.get("Host", "")
         for h in ("Origin", "Referer"):
             v = self.headers.get(h)
             if v:
-                return urlsplit(v).netloc == host
-        return True
+                return bool(host) and urlsplit(v).netloc == host
+        return False
 
     def _back(self, msg):
         return self._reply(303, b"", "text/plain", {"Location": "/admin?msg=" + quote(msg)})
@@ -834,21 +976,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def _heartbeat(self, body):
         board = body.get("board")
-        if not isinstance(board, str) or not board or len(board) > 32:
+        if not isinstance(board, str) or not BOARD_ID.match(board):
             return self._reply(400, {"ok": False, "error": "board missing"})
         extra = {}
         for k in ("fw", "rssi", "uptime_s", "boot"):
             if k in body:
-                extra[k] = body[k] if isinstance(body[k], (int, float)) else str(body[k])[:32]
+                v = body[k]
+                extra[k] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else plain(v)
         self.app["state"].heard(board, self.client_address[0], extra)
         return self._reply(200, {"ok": True})
 
     def _call(self, body):
         call, err = check_call(body)
         if err:
-            LOG.warning("bad call from %s: %s (%s)", self.client_address[0], err, body)
+            LOG.warning("bad call from %s: %s (%s)", self.client_address[0], err, json.dumps(body)[:200])   # escaped: no line breaks
             return self._reply(400, {"ok": False, "error": err})
-        repeat, _ = accept_call(self.app, call, self.client_address[0])
+        try:
+            repeat, _ = accept_call(self.app, call, self.client_address[0])
+        except Busy as e:
+            return self._reply(503, {"ok": False, "error": str(e)}, headers={"Retry-After": "10"})
         return self._reply(200, {"ok": True, "repeat": repeat})
 
     def _admin_post(self, path):
@@ -869,12 +1015,15 @@ class Handler(BaseHTTPRequestHandler):
             board = form.get("board", "")
             if not BOARD_ID.match(board):
                 return self._back("Test call not sent: pick a board.")
-            call, err = check_call({"board": board, "boot": "admin", "seq": st.next_ui_seq(),
+            call, err = check_call({"board": board, "boot": st.ui_boot, "seq": st.next_ui_seq(),
                                     "code": code, "press": press})
             if err:
                 return self._back("Test call not sent: " + err)
             LOG.info("test call from admin page (%s)", who)
-            repeat, en = accept_call(self.app, call, None, note="admin page test")
+            try:
+                repeat, en = accept_call(self.app, call, None, note="admin page test")
+            except Busy as e:
+                return self._back("Test call not sent: %s; try again in a moment." % e)
             if repeat:
                 return self._back("Dropped as a repeat (same board, code and press within %d s): %s"
                                   % (self.app["cfg"]["same_call_window_s"], en))
@@ -904,6 +1053,8 @@ class Handler(BaseHTTPRequestHandler):
             rec = {"time": now_text(), "board": "admin", "cell": "Admin page", "press": "",
                    "code": "custom", "who": "Custom", "message": en, "en": en, "es": es,
                    "zone": zone, "note": "custom page from admin page"}
+            if self.app["worker"].jobs.qsize() >= MAX_WAITING_PAGES:
+                return self._back("Custom page not sent: too many pages waiting; try again in a moment.")
             LOG.info("CUSTOM page from admin page (%s) zone %s: %s | %s", who, zone, en, es)
             self.app["worker"].jobs.put(rec)
             if self.app.get("sms"):
@@ -954,6 +1105,10 @@ class Handler(BaseHTTPRequestHandler):
             if ok and getattr(live, "last_check", ""):
                 detail += " WARNING: " + live.last_check
             LOG.info("phone connection test: %s", detail)
+            st.record({"time": now_text(), "board": "admin", "cell": "Admin page (%s)" % who,
+                       "code": "phone test", "who": "Admin", "message": "phone test: " + what,
+                       "result": "sent" if ok else "FAILED", "attempts": 1,
+                       "detail": "dialed %s; %s" % (digits or "nothing", detail)})
             rec = getattr(live, "last_recording", b"")
             note = ""
             if rec:
@@ -983,6 +1138,9 @@ class Handler(BaseHTTPRequestHandler):
             LOG.info("voice lab page from admin page (%s), voice %s: %s", who, form.get("voice"),
                      form.get("text", "")[:200])
             ok, detail = live.connection_test(digits=dial, wav=wav, what="the voice lab text")
+            st.record({"time": now_text(), "board": "admin", "cell": "Admin page (%s)" % who,
+                       "code": "voice lab", "who": "Admin", "message": form.get("text", "")[:200],
+                       "result": "sent" if ok else "FAILED", "attempts": 1, "detail": detail})
             return self._back(("Voice lab page OK: " if ok else "Voice lab page FAILED: ") + detail)
 
         if path == "/admin/sms":
@@ -1016,6 +1174,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._back(("Test text OK: " if ok else "Test text FAILED: ") + detail)
 
         if path == "/admin/dryrun":
+            if form.get("dry_run") not in ("on", "off"):
+                return self._back("Dry run not changed.")
             on = form.get("dry_run") == "on"
             st.set_dry_run(on, who)
             return self._back("Dry run is now %s." % ("ON: pages are logged, not dialed" if on
@@ -1110,13 +1270,37 @@ def preview_obj(app, q):
 
 
 class Server(socketserver.ThreadingMixIn, HTTPServer):
+    """One thread per connection, at most MAX_CONNECTIONS at once: more are closed straight
+    away, so a flood of idle connections can't use up the service (each also times out)."""
     daemon_threads = True
     allow_reuse_address = True
+
+    def __init__(self, *a, **k):
+        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*a, **k)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 # ------------------------------------------------------------------ pages ---
 
-def status_obj(app):
+def status_obj(app, admin=False):
+    """The status for the pages. The open (no password) version leaves out board addresses
+    and each call's detail, which names the phone line and the digits that page the floor."""
     st, cfg = app["state"], app["cfg"]
     now = time.time()
     with st.lock:
@@ -1127,13 +1311,15 @@ def status_obj(app):
             last = b.get("last_heard")
             boards.append({
                 "board": name, "cell": st.cell_name(name), "listed": name in st.registry,
-                "ip": b.get("ip", ""),
+                "ip": b.get("ip", "") if admin else "",
                 "last_heard": now_text(last) if last else "never",
                 "seconds_ago": int(now - last) if last else None,
                 "ok": bool(last) and now - last <= cfg["board_silent_after_s"],
                 "fw": b.get("fw", ""), "rssi": b.get("rssi", ""),
             })
         calls = list(reversed(st.calls))
+    if not admin:
+        calls = [dict(c, detail="", note="") for c in calls]
     return {"version": VERSION, "dry_run": st.dry_run,
             "phone_pager_built": getattr(app["worker"].live, "built", True),
             "audio_voices": app["worker"].audio.manifest.get("voices", {}),
@@ -1191,11 +1377,12 @@ def parse_sms_form(form):
     out["prefix"] = prefix
     template = " ".join(form.get("template", "{prefix} {message}").split())
     try:
-        names = [f for _, f, _, _ in string.Formatter().parse(template) if f is not None]
+        parts = [(f, spec, conv) for _, f, spec, conv in string.Formatter().parse(template) if f is not None]
     except ValueError:
-        names = None
-    if names is None or len(template) > 200 or "message" not in names or \
-            any(n not in ("prefix", "message", "cell", "press", "who", "code") for n in names):
+        parts = None
+    names = [f for f, _, _ in parts or []]
+    if parts is None or len(template) > 200 or "message" not in names or any(spec or conv for _, spec, conv in parts) \
+            or any(n not in ("prefix", "message", "cell", "press", "who", "code") for n in names):
         errs.append("the template must contain {message} and only {prefix} {message} {cell} {press} {who} {code}")
     out["template"] = template
     for key, label, lo, hi, default in (("stagger_min_s", "the shortest pause between texts", 0, 120, 1),
@@ -1350,7 +1537,7 @@ if(!dirty&&!(a&&/INPUT|SELECT|TEXTAREA|BUTTON/.test(a.tagName)))location.replace
 
 
 def page_html(app, admin, msg=""):
-    s = status_obj(app)
+    s = status_obj(app, admin)
     cfg = app["cfg"]
     e = html.escape
 
@@ -1362,9 +1549,9 @@ def page_html(app, admin, msg=""):
         if admin:
             if b["listed"]:
                 action = ("<td><form class=inline method=post action='/admin/board/remove' "
-                          "onsubmit=\"return confirm('Remove board %s?')\">"
+                          "onsubmit=\"return confirm(%s)\">"
                           "<input type=hidden name=board value='%s'><button>Remove</button></form></td>"
-                          % (e(b["board"]), e(b["board"])))
+                          % (e(json.dumps("Remove board %s?" % b["board"])), e(b["board"])))
             else:
                 action = ("<td><form class=inline method=post action='/admin/board/add'>"
                           "<input type=hidden name=board value='%s'>"
@@ -1614,12 +1801,14 @@ def main(argv=None):
     os.makedirs(args.state_dir, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
 
-    key = os.environ.get("P833_BOARD_KEY", "")
+    key = os.environ.pop("P833_BOARD_KEY", "").strip()
     if not key:
-        LOG.warning("P833_BOARD_KEY is not set: any device can send calls")
-    admin_pw = os.environ.get("P833_ADMIN_PASSWORD", "")
+        LOG.error("P833_BOARD_KEY is not set: calls from boards are REFUSED. Run: sudo bash install/install.sh")
+    admin_pw = os.environ.pop("P833_ADMIN_PASSWORD", "").strip()
     if not admin_pw:
-        LOG.warning("P833_ADMIN_PASSWORD is not set: the admin page is open to anyone")
+        LOG.error("P833_ADMIN_PASSWORD is not set: the admin page is OFF. Run: sudo bash install/install.sh")
+    elif len(admin_pw) < 12:
+        LOG.warning("the admin password is short (%d characters); 12 or more is safer", len(admin_pw))
 
     state = State(cfg, args.state_dir, args.log_dir)
     if args.dry_run:

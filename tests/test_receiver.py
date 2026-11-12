@@ -316,6 +316,7 @@ class ConfigUpdate(unittest.TestCase):
 
 class Server(unittest.TestCase):
     def setUp(self):
+        R.Handler.login_fails.clear()
         self.tmp = tempfile.mkdtemp()
         cfg = R.load_config(CONFIG)
         cfg["page_retry_wait_s"] = 0
@@ -449,13 +450,151 @@ class Server(unittest.TestCase):
         self.assertNotIn("<b>x</b>", self.get("/"))
 
 
+    # ---- security
+    def call(self, board="RSP_LH", boot="b1", seq=1, code=2, press=27, key=KEY):
+        return self.post("/call", {"board": board, "boot": boot, "seq": seq, "code": code, "press": press}, key)
+
+    def test_no_key_set_refuses_calls(self):
+        R.Handler.app["key"] = ""
+        self.assertEqual(self.call(key="")[0], 403)
+        self.assertEqual(self.call(key="anything")[0], 403)
+
+    def test_no_admin_password_set_closes_admin(self):
+        R.Handler.app["admin_password"] = ""
+        st, _, body = self.admin("/admin", pw="")
+        self.assertEqual(st, 503)
+        self.assertIn("no admin password", body)
+
+    def test_odd_header_characters_dont_crash(self):
+        import http.client
+        for hdr, val in (("X-P833-Key", "cl\u00e9"), ("Authorization", "Basic " + base64.b64encode(
+                "a:\u00e9".encode("latin-1")).decode())):
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.putrequest("POST" if hdr == "X-P833-Key" else "GET", "/call" if hdr == "X-P833-Key" else "/admin")
+            c.putheader(hdr, val.encode("latin-1"))
+            c.putheader("Content-Length", "2")
+            c.endheaders(b"{}")
+            self.assertIn(c.getresponse().status, (401, 403))
+            c.close()
+
+    def test_wrong_passwords_lock_the_address_out(self):
+        self.addCleanup(R.Handler.login_fails.clear)
+        for _ in range(R.LOGIN_FAILS - 1):
+            self.assertEqual(self.admin("/admin", pw="wrong")[0], 401)
+        self.assertEqual(self.admin("/admin", pw="wrong")[0], 429)
+        st, _, body = self.admin("/admin")                 # even the right one, for a while
+        self.assertEqual(st, 429)
+        R.Handler.login_fails.clear()
+        self.assertEqual(self.admin("/admin")[0], 200)
+
+    def test_admin_post_needs_origin_or_referer(self):
+        st, _, _ = self.admin("/admin/board/add", {"board": "X1", "cell": "X"}, origin=None)
+        self.assertEqual(st, 403)
+        self.assertNotIn("X1", self.state.registry)
+
+    def test_dry_run_needs_a_clear_choice(self):
+        self.state.dry_run = True
+        _, loc, _ = self.admin("/admin/dryrun", {})
+        self.assertIn("not changed", urllib.parse.unquote(loc))
+        self.assertTrue(self.state.dry_run)
+
+    def test_security_headers(self):
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port) as r:
+            self.assertEqual(r.headers["X-Frame-Options"], "DENY")
+            self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
+            self.assertIn("frame-ancestors 'none'", r.headers["Content-Security-Policy"])
+
+    def test_board_ids_checked(self):
+        for bad in ("../x", "a b", "x" * 33, "<b>", "=1+1"):
+            self.assertEqual(self.call(board=bad)[0], 400, bad)
+            self.assertEqual(self.post("/heartbeat", {"board": bad}, KEY)[0], 400, bad)
+        self.assertEqual(self.call(boot="bad boot!")[0], 400)
+
+    def test_old_message_sent_again_is_not_paged(self):
+        self.assertEqual(self.call(seq=4)[0], 200)
+        self.wait_pages()
+        self.state.seen.clear()                              # as if the repeat window had passed
+        self.state.recent.clear()
+        st, txt = self.call(seq=4)
+        self.assertEqual((st, json.loads(txt)["repeat"]), (200, True))     # the board stops resending
+        self.assertEqual(self.call(seq=3, code=3)[0], 200)                # older seq from that boot too
+        self.wait_pages()
+        self.assertEqual(len(self.pager.sent), 1)
+        # remembered across a restart
+        again = R.State(self.cfg, self.tmp, self.tmp)
+        self.assertTrue(again.replayed({"board": "RSP_LH", "boot": "b1", "seq": 4}))
+        self.assertFalse(again.replayed({"board": "RSP_LH", "boot": "b2", "seq": 1}))
+
+    def test_busy_when_too_many_pages_wait_or_one_board_floods(self):
+        old = R.MAX_WAITING_PAGES
+        R.MAX_WAITING_PAGES = 0
+        try:
+            st, txt = self.call(seq=1)
+            self.assertEqual(st, 503)                          # the board keeps it and tries again
+        finally:
+            R.MAX_WAITING_PAGES = old
+        self.assertEqual(self.call(seq=1)[0], 200)
+        for i, code in enumerate((3, 4, 5, 6, 7), 2):
+            self.assertEqual(self.call(seq=i, code=code)[0], 200)
+        self.assertEqual(self.call(seq=7, code=8)[0], 503)    # 7th call in a minute from one board
+        self.assertEqual(self.call(board="RSP_RH", seq=1, code=8)[0], 200)   # others unaffected
+
+    def test_public_status_leaves_out_details(self):
+        self.post("/heartbeat", {"board": "RSP_LH"}, KEY)
+        self.assertEqual(self.call(seq=9)[0], 200)
+        self.wait_pages()
+        self.wait_row()
+        pub = json.loads(self.get("/status.json"))
+        self.assertEqual(pub["calls"][0]["detail"], "")
+        self.assertEqual([b["ip"] for b in pub["boards"] if b["board"] == "RSP_LH"], [""])
+        adm = R.status_obj(R.Handler.app, admin=True)
+        self.assertNotEqual(adm["calls"][0]["detail"], "")
+        self.assertIn("127.0.0.1", [b["ip"] for b in adm["boards"]])
+
+    def test_csv_log_is_spreadsheet_safe(self):
+        self.state.dry_run = True
+        _, loc, _ = self.admin("/admin/custom", {"zone": "floor", "en": "=HYPERLINK(1)", "es": ""})
+        self.wait_pages()
+        self.assertEqual(self.wait_row()["message"], "'=HYPERLINK(1)")
+        self.assertEqual(R.csv_safe("-"), "-")
+        self.assertEqual(R.csv_safe(-5), -5)
+
+    def test_connection_limit_and_idle_timeout(self):
+        import socket
+        old_max, old_to = R.MAX_CONNECTIONS, R.Handler.timeout
+        R.MAX_CONNECTIONS, R.Handler.timeout = 2, 1
+        srv = R.Server(("127.0.0.1", 0), R.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(2)]
+            time.sleep(0.2)
+            extra = socket.create_connection(("127.0.0.1", port))
+            extra.settimeout(2)
+            self.assertEqual(extra.recv(10), b"")              # closed at once: no slot
+            extra.close()
+            time.sleep(1.5)                                    # the idle ones time out...
+            idle[0].settimeout(2)
+            self.assertEqual(idle[0].recv(10), b"")
+            with urllib.request.urlopen("http://127.0.0.1:%d/status.json" % port, timeout=5) as r:
+                self.assertEqual(r.status, 200)                # ...and the slots are free again
+            for c in idle:
+                c.close()
+        finally:
+            R.MAX_CONNECTIONS, R.Handler.timeout = old_max, old_to
+            srv.shutdown()
+            srv.server_close()
+
     # ---- admin page
-    def admin(self, path, form=None, pw=ADMIN_PW, origin=None):
+    def admin(self, path, form=None, pw=ADMIN_PW, origin="self"):
+        """Like a browser: a form post carries the page's own Origin (origin="self")."""
         url = "http://127.0.0.1:%d%s" % (self.port, path)
         data = urllib.parse.urlencode(form).encode() if form is not None else None
         req = urllib.request.Request(url, data=data)
         if pw is not None:
             req.add_header("Authorization", "Basic " + base64.b64encode(("admin:" + pw).encode()).decode())
+        if origin == "self":
+            origin = "http://127.0.0.1:%d" % self.port if data is not None else None
         if origin:
             req.add_header("Origin", origin)
         opener = urllib.request.build_opener(NoRedirect)
@@ -789,7 +928,9 @@ class Server(unittest.TestCase):
         self.assertIn("Nothing was dialed", msg)
         self.assertEqual(ht.digits, [])
         self.assertTrue(ht.wait_bye())
-        self.assertFalse(os.path.exists(os.path.join(self.tmp, "calls.csv")))   # not a page, not logged
+        row = self.wait_row()                          # logged, so the call log shows every use of the line
+        self.assertEqual((row["code"], row["who"], row["result"]), ("phone test", "Admin", "sent"))
+        self.assertIn("dialed nothing", row["detail"])
 
     def test_try_page_digits(self):
         ht = self.use_fake_ht813()
@@ -849,10 +990,17 @@ sys.stdout.buffer.write(b.getvalue())
         self.cfg["audio"].update(tts_python=sys.executable, tts_script=stub,
                                  tts_voices=os.path.join(self.tmp, "voices"))
 
+    def test_piper_gets_no_secrets(self):
+        os.environ["P833_TEST_SECRET"] = "x"
+        self.addCleanup(os.environ.pop, "P833_TEST_SECRET", None)
+        self.assertNotIn("P833_TEST_SECRET", R.tts_env())
+        self.assertEqual(sorted(R.tts_env()), ["HOME", "LANG", "LC_ALL", "PATH"])
+
     def lab_post(self, **form):
         url = "http://127.0.0.1:%d/admin/voicelab" % self.port
         req = urllib.request.Request(url, data=urllib.parse.urlencode(form).encode(), headers={
-            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode()})
+            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode(),
+            "Origin": "http://127.0.0.1:%d" % self.port})
         try:
             with urllib.request.urlopen(req) as r:
                 return r.status, r.headers.get("Content-Type"), r.read()
@@ -886,6 +1034,8 @@ sys.stdout.buffer.write(b.getvalue())
         st, _, body = self.lab_post(voice="en_US-test-voice", pace="9", text="hi", action="preview")
         self.assertEqual(st, 400)
         self.assertEqual(self.pager.sent, [])                            # previews never page
+        st, _, body = self.lab_post(voice="en_US-test-voice", tone="../../../etc/x", text="hi", action="preview")
+        self.assertEqual((st, body), (400, b"Voice lab: unknown tone"))    # only the listed tones
 
     def test_voice_lab_page_it(self):
         self.use_fake_tts()
@@ -975,7 +1125,8 @@ sys.stdout.buffer.write(b.getvalue())
         # bad values are refused
         for bad in ({"to": "12345"}, {"did": "999"}, {"api_username": "not-an-email"},
                     {"stagger_min_s": "8", "stagger_max_s": "2"},
-                    {"template": "{oops}"}, {"template": "no message field"}):
+                    {"template": "{oops}"}, {"template": "no message field"},
+                    {"template": "{message:>999999999}"}, {"template": "{message!r}"}):
             form = {"enabled": "on", "api_username": "boss@example.com", "did": "5552223333",
                     "to": "5550001111", "prefix": "Chapar:", "template": "{prefix} {message}"}
             form.update(bad)

@@ -53,6 +53,7 @@ DEFAULTS = {
     "max_per_hour": 60,          # cap on texts sent in any hour (cost and spam guard)
 }
 MAX_SMS = 160                    # voip.ms sendSMS limit (characters)
+MAX_QUEUED = 30                  # texts waiting to go out; more are dropped (and logged)
 CSV_FIELDS = ["time", "to", "text", "result", "detail"]
 API_HOSTS = ("voip.ms",)         # the password is only ever sent here
 
@@ -96,6 +97,14 @@ def finish(text):
     return text if len(text) <= MAX_SMS else text[:MAX_SMS - 3].rstrip() + "..."
 
 
+def csv_safe(v):
+    """A value as it goes in a CSV log: text that a spreadsheet would run as a formula
+    (=, +, -, @ at the start) gets a leading apostrophe."""
+    if isinstance(v, str) and len(v) > 1 and v[0] in "=+-@\t\r":
+        return "'" + v
+    return v
+
+
 def mask(n):
     """A number as it goes in the system log: only the last 4 digits."""
     return "..." + n[-4:] if len(n) > 4 else n
@@ -112,10 +121,11 @@ def compose(cfg, rec):
     s = settings_of(cfg)
     fields = {"prefix": s["prefix"], "message": rec.get("message", ""), "cell": rec.get("cell", ""),
               "press": rec.get("press", ""), "who": rec.get("who", ""), "code": rec.get("code", "")}
-    try:
-        text = s["template"].format(**fields)
-    except (KeyError, IndexError, ValueError):
-        text = "%s %s" % (s["prefix"], fields["message"])
+    # Plain {name} swaps only: str.format would also obey format codes like {message:>999999999}.
+    template = str(s["template"])[:200]
+    if "{message}" not in template or re.search(r"\{(?!(%s)\})" % "|".join(fields), template):
+        template = "{prefix} {message}"
+    text = re.sub(r"\{(%s)\}" % "|".join(fields), lambda m: str(fields[m.group(1)]), template)
     return finish(text)
 
 
@@ -168,11 +178,18 @@ class SmsSender(threading.Thread):
         os.replace(tmp, self.secret_file)
 
     # -- queueing
+    def _queue(self, text, dsts):
+        if self.jobs.qsize() >= MAX_QUEUED:
+            self._record("-", text, "SKIPPED", "skipped: %d texts already waiting" % MAX_QUEUED)
+            return False
+        self.jobs.put((text, dsts))
+        return True
+
     def text_for_call(self, rec, test_call=False):
         s = settings_of(self.cfg)
         if not s["enabled"] or (test_call and not s["admin_tests"]):
             return
-        self.jobs.put((compose(self.cfg, rec), None))
+        self._queue(compose(self.cfg, rec), None)
 
     def test_text(self):
         """Queue a test text to every number (even when texts are switched off).
@@ -182,7 +199,8 @@ class SmsSender(threading.Thread):
         if not n:
             return False, "no numbers to text"
         text = finish("%s Test text from the paging system." % s["prefix"])
-        self.jobs.put((text, None))
+        if not self._queue(text, None):
+            return False, "too many texts already waiting"
         return True, ("queued for %d number(s), %s to %s s apart; refresh in a moment and see Recent texts"
                       % (n, s["stagger_min_s"], s["stagger_max_s"]))
 
@@ -198,7 +216,8 @@ class SmsSender(threading.Thread):
             return False, "type a message"
         s = settings_of(self.cfg)
         text = finish("%s %s" % (s["prefix"], message) if add_prefix and s["prefix"] else message)
-        self.jobs.put((text, [dst]))
+        if not self._queue(text, [dst]):
+            return False, "too many texts already waiting"
         return True, "queued to %s: %s" % (dst, text)
 
     def run(self):
@@ -360,6 +379,6 @@ class SmsSender(threading.Thread):
                     w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
                     if new:
                         w.writeheader()
-                    w.writerow(row)
+                    w.writerow({k: csv_safe(v) for k, v in row.items()})
             except OSError as e:
                 LOG.warning("could not write the text log: %s", e)
