@@ -143,7 +143,7 @@ class Sms(unittest.TestCase):
         ok, detail = s.test_text()
         self.assertTrue(ok)
         self.assertIn("queued for 2", detail)
-        self.assertEqual(s.jobs.get_nowait(), "Chapar: Test text from the paging system.")
+        self.assertEqual(s.jobs.get_nowait(), ("Chapar: Test text from the paging system.", None))
         self.assertFalse(self.sender(cfg_with(to=[]), fake).test_text()[0])
 
     def test_https_only(self):
@@ -162,6 +162,21 @@ class Sms(unittest.TestCase):
         cfg["sms"]["admin_tests"] = True
         s.text_for_call({"message": "m"}, test_call=True)
         self.assertEqual(s.jobs.qsize(), 1)
+
+    def test_manual_text(self):
+        fake = FakeVoipMs()
+        s = self.sender(cfg_with(enabled=False), fake)       # works with automatic texts off
+        ok, detail = s.manual_text("(555) 444-3333", "  Lunch  truck   is here ")
+        self.assertTrue(ok, detail)
+        text, dsts = s.jobs.get_nowait()
+        self.assertEqual((text, dsts), ("Chapar: Lunch truck is here", ["5554443333"]))
+        ok, detail = s.send(text, dsts)
+        self.assertTrue(ok)
+        self.assertEqual([r[1]["dst"] for r in fake.requests], ["5554443333"])   # only that number
+        self.assertEqual(s.manual_text("5554443333", "no prefix", add_prefix=False)[1], "queued to 5554443333: no prefix")
+        self.assertFalse(s.manual_text("123", "hi")[0])
+        self.assertFalse(s.manual_text("5554443333", "   ")[0])
+        self.assertEqual(len(s.manual_text("5554443333", "x" * 300)[1].split(": ", 1)[1]), T.MAX_SMS)
 
 
 if __name__ == "__main__":

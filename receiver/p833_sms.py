@@ -119,7 +119,7 @@ class SmsSender(threading.Thread):
         s = settings_of(self.cfg)
         if not s["enabled"] or (test_call and not s["admin_tests"]):
             return
-        self.jobs.put(compose(self.cfg, rec))
+        self.jobs.put((compose(self.cfg, rec), None))
 
     def test_text(self):
         """Queue a test text to every number (even when texts are switched off).
@@ -129,23 +129,38 @@ class SmsSender(threading.Thread):
         if not n:
             return False, "no numbers to text"
         text = " ".join(("%s Test text from the paging system." % s["prefix"]).split())[:MAX_SMS]
-        self.jobs.put(text)
+        self.jobs.put((text, None))
         return True, ("queued for %d number(s), %s s apart; refresh in a moment and see Recent texts"
                       % (n, s["stagger_s"]))
 
+    def manual_text(self, number, message, add_prefix=True):
+        """Queue one text to one number, typed on the admin page (works with texts off).
+        Returns (ok, detail)."""
+        dst = clean_number(number)
+        if not dst:
+            return False, "the number must be 10 digits"
+        message = " ".join(str(message).split())
+        if not message or not message.isprintable():
+            return False, "type a message"
+        s = settings_of(self.cfg)
+        text = ("%s %s" % (s["prefix"], message) if add_prefix and s["prefix"] else message)[:MAX_SMS]
+        self.jobs.put((text, [dst]))
+        return True, "queued to %s: %s" % (dst, text)
+
     def run(self):
         while True:
-            text = self.jobs.get()
+            text, dsts = self.jobs.get()
             try:
-                self.send(text)
+                self.send(text, dsts)
             except Exception as e:      # a bug here must never stop the thread
                 LOG.exception("text: unexpected error: %s", e)
 
     # -- sending
-    def send(self, text):
+    def send(self, text, dsts=None):
+        """Send to the given numbers, or to the configured list when dsts is None."""
         s = settings_of(self.cfg)
         user, pw, did = s["api_username"].strip(), self.password(), clean_number(s["did"])
-        dsts = [clean_number(n) for n in s["to"]]
+        dsts = [clean_number(n) for n in (s["to"] if dsts is None else dsts)]
         dsts = [n for n in dsts if n]
         problem = ("no voip.ms account e-mail" if not user else "no voip.ms API password" if not pw
                    else "no sending number (DID)" if not did else "no numbers to text" if not dsts else "")

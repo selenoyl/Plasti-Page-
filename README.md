@@ -221,6 +221,7 @@ Each call from a cell can also go out as a one-way text, for example
 - Enter your **SMS-enabled voip.ms number** (DID) to send from, and up to 20 numbers to text. Each number gets its own text, because the voip.ms API doesn't do group chats.
 - **Pause between texts** (default 3 s) spreads one call's texts out, so the carrier doesn't flag a burst as spam. **Most texts per hour** (default 60) caps cost and spam; texts over it are skipped and logged.
 - Set the prefix (default "Chapar:") and the message pattern, then click **Send a test text**.
+- **Send a text** at the top of the box sends one text to any number you type, with or without the prefix. It works even while automatic texts are off.
 
 **How it behaves:**
 - Texts go out from a separate queue, so a slow or failed text never delays a page.

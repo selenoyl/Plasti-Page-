@@ -1000,6 +1000,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._back("Text message settings saved. Texts are %s." % (
                 "ON" if sms_form["enabled"] else "off"))
 
+        if path == "/admin/sms/send":
+            message = form.get("message", "")
+            if len(message) > 300:
+                return self._back("Text not sent: the message is too long.")
+            ok, detail = self.app["sms"].manual_text(form.get("number", ""), message,
+                                                     add_prefix=form.get("add_prefix") == "on")
+            if ok:
+                LOG.info("manual text from the admin page (%s): %s", who, detail)
+            return self._back(("Text " if ok else "Text not sent: ") + detail)
+
         if path == "/admin/sms/test":
             LOG.info("test text from the admin page (%s)", who)
             ok, detail = self.app["sms"].test_text()
@@ -1213,6 +1223,15 @@ def sms_html(app):
                                             "cell": "RSP LH", "press": 27, "who": "Maintenance", "code": 8})
     return """
 <div class=card><h2>Text messages (voip.ms)</h2>
+<h3>Send a text</h3>
+<form method=post action='/admin/sms/send'>
+<label>To <input name=number required maxlength=20 size=14 placeholder='5551234567'></label>
+<label>Message <input name=message required maxlength=160 size=48></label>
+<label><input type=checkbox name=add_prefix checked> start with the prefix</label>
+<button>Send text</button></form>
+<p class=small>One text to one number, through the voip.ms account below. Works even with automatic texts off.
+Up to 160 characters, counted against the hourly limit; the result shows under Recent texts.</p>
+<h3>Automatic texts for calls</h3>
 <p>Texts are <b>%s</b>. When on, every call from a cell is also sent as a text, one way, for example:<br>
 <i>%s</i></p>
 <form method=post action='/admin/sms'><div class=w><table>

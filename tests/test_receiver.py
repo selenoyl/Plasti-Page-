@@ -985,6 +985,19 @@ sys.stdout.buffer.write(b.getvalue())
                                   "prefix": "Chapar:", "template": "{prefix} {message}", "clear_password": "on"})
         self.assertFalse(sender.has_password())
 
+    def test_manual_text_form(self):
+        sender, fake = self.use_sms(enabled=False)
+        self.assertIn("Send a text", self.admin("/admin")[2])
+        _, loc, _ = self.admin("/admin/sms/send", {"number": "555-444-3333", "message": "Forklift at dock 2",
+                                                   "add_prefix": "on"})
+        self.assertIn("queued to 5554443333", urllib.parse.unquote(loc))
+        self.wait_texts(fake, 1)
+        self.assertEqual((fake.requests[0][1]["dst"], fake.requests[0][1]["message"]),
+                         ("5554443333", "Chapar: Forklift at dock 2"))
+        _, loc, _ = self.admin("/admin/sms/send", {"number": "12", "message": "x"})
+        self.assertIn("not sent", urllib.parse.unquote(loc))
+        self.assertEqual(self.admin("/admin/sms/send", {"number": "5554443333", "message": "x"}, pw=None)[0], 401)
+
     def test_sms_test_button(self):
         sender, fake = self.use_sms(enabled=False)
         _, loc, _ = self.admin("/admin/sms/test", {})
