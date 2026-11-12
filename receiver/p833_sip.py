@@ -188,12 +188,20 @@ def sdp_target(body):
     return (ip, port) if ip and port and 0 < port < 65536 else None
 
 
+def _md5_hex(text):
+    data = text.encode("utf-8")
+    try:
+        return hashlib.md5(data, usedforsecurity=False).hexdigest()   # novm: allowed in FIPS mode (3.9+)
+    except TypeError:                                                   # Python before 3.9
+        return hashlib.md5(data).hexdigest()
+
+
 def digest_header(challenge, method, uri, user, password):
     """The Authorization value answering a SIP Digest challenge (RFC 2617, MD5)."""
     f = dict(re.findall(r'(\w+)="?([^",]*)"?', challenge))
     if f.get("algorithm", "MD5").upper() != "MD5":
         raise CallFailed("the HT813 asked for a %s password check, which isn't supported" % f["algorithm"])
-    md5 = lambda x: hashlib.md5(x.encode("utf-8")).hexdigest()   # noqa: E731 (required by SIP Digest)
+    md5 = _md5_hex                                     # SIP Digest is defined with MD5
     ha1 = md5("%s:%s:%s" % (user, f.get("realm", ""), password))
     ha2 = md5("%s:%s" % (method, uri))
     out = 'Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=MD5' % (
