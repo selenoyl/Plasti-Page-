@@ -140,5 +140,17 @@
       "en_no_press": "Maintenance requested for Red Rabbit failure. Press number unknown.",
       "es_no_press": "Se solicita mantenimiento por falla de Red Rabbit. Prensa desconocida."
     }
+  },
+  "sms": {
+    "_note": "Optional texts through the voip.ms API. Easier to set on the admin page (Text messages); the API password is entered there and stored apart from this file.",
+    "enabled": false,
+    "api_url": "https://voip.ms/api/v1/rest.php",
+    "api_username": "",
+    "did": "",
+    "to": [],
+    "prefix": "Chapar:",
+    "template": "{prefix} {message}",
+    "timeout_s": 15,
+    "admin_tests": false
   }
 }

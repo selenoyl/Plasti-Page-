@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.8.1:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.9.0:** receiving, checking, logging, dry-run paging, the
 admin page, the editable phone settings and the recorded page audio are in and
 tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
@@ -204,6 +204,28 @@ then the **department tone**, English, Spanish, and the tone and message again
 
   Until the clips are re-made, the Audio box flags any that no longer match, and the old clips play. A page with a missing clip fails.
 - Custom pages from the admin page have no audio, because they are free text. In dry run they are logged; live, they fail.
+
+## Text messages (voip.ms), optional
+
+Each call from a cell can also go out as a one-way text, for example
+"Chapar: Maintenance requested to press 27 for camera fault." It's **off** until you switch it on in the
+**Text messages (voip.ms)** box on the admin page.
+
+**voip.ms setup:**
+1. Go to **Main Menu > SOAP and REST/JSON API**.
+2. Enable the API and set an **API password**. This isn't your voip.ms login password.
+3. Add the laptop's **public internet IP address** to the allowed list.
+
+**On the admin page:**
+- Enter the voip.ms account e-mail and the API password. The password is write-only: it's stored in `/var/lib/p833-receiver/sms_secret.json` (mode 0600, readable only by the paging service) and is never shown again or written to a log.
+- Enter your **SMS-enabled voip.ms number** (DID) to send from, and up to 20 numbers to text. Each number gets its own text.
+- Set the prefix (default "Chapar:") and the message pattern, then click **Send a test text**.
+
+**How it behaves:**
+- Texts go out from a separate queue, so a slow or failed text never delays a page.
+- Repeats aren't texted. Test calls from the admin page are texted only if "Text test calls too" is ticked.
+- Results show under **Recent texts**; the full log is `/var/log/p833-receiver/texts.csv`.
+- The laptop needs to reach voip.ms on the internet (HTTPS, port 443), even if the rest of the IoT network is isolated.
 
 ## Voice lab (try voices, speed and pauses)
 

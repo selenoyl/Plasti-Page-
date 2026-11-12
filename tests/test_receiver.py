@@ -909,6 +909,88 @@ sys.stdout.buffer.write(b.getvalue())
         self.assertEqual(st, 500)
         self.assertIn(b"ZeroDivisionError", body)
 
+    # ---- text messages (voip.ms), with a fake voip.ms
+    def use_sms(self, **sms):
+        import p833_sms
+        from test_sms import FakeVoipMs
+        fake = FakeVoipMs()
+        self.cfg["sms"].update(dict(enabled=True, api_username="ops@example.com", did="5551234567",
+                                    to=["5550001111"]), **sms)
+        sender = p833_sms.SmsSender(self.cfg, self.tmp, self.tmp, opener=fake)
+        sender.set_password("api-secret-123")
+        sender.start()
+        R.Handler.app["sms"] = sender
+        self.addCleanup(R.Handler.app.pop, "sms", None)
+        return sender, fake
+
+    def wait_texts(self, fake, n):
+        for _ in range(200):
+            if len(fake.requests) >= n:
+                return
+            time.sleep(0.02)
+
+    def test_board_call_sends_a_text(self):
+        sender, fake = self.use_sms()
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 8, "press": 27})
+        self.wait_texts(fake, 1)
+        self.assertEqual(fake.requests[0][1]["message"], "Chapar: Maintenance requested to press 27 for camera fault.")
+        # a repeat of the same call doesn't text again
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 8, "press": 27})
+        time.sleep(0.3)
+        self.assertEqual(len(fake.requests), 1)
+
+    def test_texts_off_or_admin_tests(self):
+        sender, fake = self.use_sms(enabled=False)
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 5})
+        self.cfg["sms"]["enabled"] = True
+        self.admin("/admin/test", {"board": "RSP_LH", "code": "3", "press": "9"})
+        time.sleep(0.4)
+        self.assertEqual(fake.requests, [])                    # off; then an admin test (not asked for)
+
+    def test_sms_settings_on_admin_page(self):
+        sender, fake = self.use_sms(enabled=False)
+        page = self.admin("/admin")[2]
+        self.assertIn("Text messages (voip.ms)", page)
+        self.assertNotIn("api-secret-123", page)              # the password is never shown
+        self.assertIn("set: leave blank to keep", page)
+        st, loc, _ = self.admin("/admin/sms", {
+            "enabled": "on", "api_username": "boss@example.com", "api_password": "",
+            "did": "(555) 222-3333", "to": "555 000 1111\n5550002222\n5550002222", "prefix": "Chapar:",
+            "template": "{prefix} {message}"})
+        self.assertIn("saved", urllib.parse.unquote(loc))
+        self.assertEqual((self.cfg["sms"]["api_username"], self.cfg["sms"]["did"], self.cfg["sms"]["to"],
+                          self.cfg["sms"]["enabled"]),
+                         ("boss@example.com", "5552223333", ["5550001111", "5550002222"], True))
+        self.assertEqual(sender.password(), "api-secret-123")    # blank kept the old password
+        self.admin("/admin/sms", {"enabled": "on", "api_username": "boss@example.com", "api_password": "new-pw",
+                                  "did": "5552223333", "to": "5550001111", "prefix": "Chapar:",
+                                  "template": "{prefix} {message}"})
+        self.assertEqual(sender.password(), "new-pw")
+        with open(os.path.join(self.tmp, "settings.json"), encoding="utf-8") as f:
+            self.assertNotIn("new-pw", f.read())                 # not in the saved settings
+        # kept through a restart (password in its own file)
+        cfg2 = R.load_config(CONFIG)
+        R.State(cfg2, self.tmp, self.tmp)
+        self.assertEqual(cfg2["sms"]["to"], ["5550001111"])
+        # bad values are refused
+        for bad in ({"to": "12345"}, {"did": "999"}, {"api_username": "not-an-email"},
+                    {"template": "{oops}"}, {"template": "no message field"}):
+            form = {"enabled": "on", "api_username": "boss@example.com", "did": "5552223333",
+                    "to": "5550001111", "prefix": "Chapar:", "template": "{prefix} {message}"}
+            form.update(bad)
+            _, loc, _ = self.admin("/admin/sms", form)
+            self.assertIn("not saved", urllib.parse.unquote(loc), bad)
+        # remove the password
+        self.admin("/admin/sms", {"api_username": "boss@example.com", "did": "5552223333", "to": "5550001111",
+                                  "prefix": "Chapar:", "template": "{prefix} {message}", "clear_password": "on"})
+        self.assertFalse(sender.has_password())
+
+    def test_sms_test_button(self):
+        sender, fake = self.use_sms(enabled=False)
+        _, loc, _ = self.admin("/admin/sms/test", {})
+        self.assertIn("Test text OK", urllib.parse.unquote(loc))
+        self.assertEqual(fake.requests[0][1]["message"], "Chapar: Test text from the paging system.")
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):

@@ -36,8 +36,9 @@ from urllib.parse import parse_qs, quote, urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
+import p833_sms  # noqa: E402
 
-VERSION = "0.8.1"
+VERSION = "0.9.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -254,6 +255,9 @@ def load_config(path):
     audio.setdefault("tts_python", os.path.join(here, "tts", "bin", "python"))
     audio.setdefault("tts_script", os.path.join(here, "p833_tts.py"))
     audio.setdefault("tts_voices", os.path.join(here, "voices"))
+    sms = cfg.setdefault("sms", {})
+    for k, v in p833_sms.DEFAULTS.items():
+        sms.setdefault(k, v)
     phone = cfg.setdefault("phone", {})
     for k, v in PHONE_DEFAULTS.items():
         phone.setdefault(k, v)
@@ -343,6 +347,8 @@ class State:
         self.defaults = json.loads(json.dumps(tuning_of(self.cfg)))
         if isinstance(self.settings.get("tuning"), dict):
             apply_tuning(self.cfg, self.settings["tuning"])
+        if isinstance(self.settings.get("sms"), dict):
+            self.cfg["sms"].update({k: v for k, v in self.settings["sms"].items() if k in p833_sms.DEFAULTS})
 
         self.heard_info = self._read_json(self.heard_file) or {}
         for b in self.heard_info.values():
@@ -360,6 +366,14 @@ class State:
                 self.calls = list(csv.DictReader(f))[-50:]
         except OSError:
             self.calls = []
+
+    def set_sms(self, sms, who=""):
+        with self.lock:
+            self.cfg["sms"].update(sms)
+            self.settings["sms"] = dict(self.settings.get("sms", {}), **sms)
+            self._save_settings()
+        LOG.info("text message settings saved on the admin page (%s): enabled=%s, %d number(s)", who,
+                 self.cfg["sms"]["enabled"], len(self.cfg["sms"]["to"]))
 
     def set_tuning(self, t, who=""):
         with self.lock:
@@ -504,6 +518,8 @@ def accept_call(app, call, ip, note=""):
     LOG.info("CALL %s (%s) code %d press %d: %s%s", call["board"], cell,
              call["code"], call["press"], en, " [%s]" % note if note else "")
     app["worker"].jobs.put(rec)
+    if app.get("sms"):
+        app["sms"].text_for_call(rec, test_call=bool(note))
     return False, en
 
 
@@ -890,6 +906,8 @@ class Handler(BaseHTTPRequestHandler):
                    "zone": zone, "note": "custom page from admin page"}
             LOG.info("CUSTOM page from admin page (%s) zone %s: %s | %s", who, zone, en, es)
             self.app["worker"].jobs.put(rec)
+            if self.app.get("sms"):
+                self.app["sms"].text_for_call(rec, test_call=True)
             return self._back("Custom page sent to zone %s: %s" % (zone, en))
 
         if path == "/admin/tuning":
@@ -966,6 +984,26 @@ class Handler(BaseHTTPRequestHandler):
                      form.get("text", "")[:200])
             ok, detail = live.connection_test(digits=dial, wav=wav, what="the voice lab text")
             return self._back(("Voice lab page OK: " if ok else "Voice lab page FAILED: ") + detail)
+
+        if path == "/admin/sms":
+            sms_form, errs = parse_sms_form(form)
+            if errs:
+                return self._back("Text settings not saved: " + "; ".join(errs) + ".")
+            pw = form.get("api_password", "")
+            if form.get("clear_password") == "on":
+                self.app["sms"].set_password("")
+                LOG.info("voip.ms API password removed on the admin page (%s)", who)
+            elif pw:
+                self.app["sms"].set_password(pw)
+                LOG.info("voip.ms API password changed on the admin page (%s)", who)
+            st.set_sms(sms_form, who)
+            return self._back("Text message settings saved. Texts are %s." % (
+                "ON" if sms_form["enabled"] else "off"))
+
+        if path == "/admin/sms/test":
+            LOG.info("test text from the admin page (%s)", who)
+            ok, detail = self.app["sms"].test_text()
+            return self._back(("Test text OK: " if ok else "Test text FAILED: ") + detail)
 
         if path == "/admin/dryrun":
             on = form.get("dry_run") == "on"
@@ -1111,6 +1149,96 @@ button{cursor:pointer} .msg{padding:8px 12px;border:2px solid var(--good);margin
 .preview{margin-top:10px;padding:8px 10px;border-left:4px solid var(--good)} .preview:empty{display:none}
 .preview audio{margin-top:8px;width:100%;max-width:520px}
 """
+
+def parse_sms_form(form):
+    """Check the admin page's text message settings. Returns (settings, errors). The
+    password is handled separately and never put in the settings."""
+    import string
+    errs = []
+    out = {"enabled": form.get("enabled") == "on", "admin_tests": form.get("admin_tests") == "on"}
+    user = form.get("api_username", "").strip()
+    if len(user) > 100 or (user and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", user)):
+        errs.append("the voip.ms account must be an e-mail address")
+    out["api_username"] = user
+    did = form.get("did", "").strip()
+    if did and not p833_sms.clean_number(did):
+        errs.append("the sending number must be a 10-digit number")
+    out["did"] = p833_sms.clean_number(did) if did else ""
+    to = []
+    for line in re.split(r"[\n,;]+", form.get("to", "")):
+        if line.strip():
+            n = p833_sms.clean_number(line)
+            if not n:
+                errs.append("not a 10-digit number: %s" % line.strip()[:20])
+            elif n not in to:
+                to.append(n)
+    if len(to) > 20:
+        errs.append("at most 20 numbers")
+    out["to"] = to
+    prefix = form.get("prefix", "").strip()
+    if len(prefix) > 30 or not prefix.isprintable():
+        errs.append("the prefix must be up to 30 characters")
+    out["prefix"] = prefix
+    template = " ".join(form.get("template", "{prefix} {message}").split())
+    try:
+        names = [f for _, f, _, _ in string.Formatter().parse(template) if f is not None]
+    except ValueError:
+        names = None
+    if names is None or len(template) > 200 or "message" not in names or \
+            any(n not in ("prefix", "message", "cell", "press", "who", "code") for n in names):
+        errs.append("the template must contain {message} and only {prefix} {message} {cell} {press} {who} {code}")
+    out["template"] = template
+    return out, errs
+
+
+def sms_html(app):
+    e = html.escape
+    sms = app.get("sms")
+    if not sms:
+        return ""
+    s = p833_sms.settings_of(app["cfg"])
+    rows = []
+    for r in reversed(sms.recent[-10:]):
+        rows.append("<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            "bad" if r["result"] != "sent" else "", e(r["time"]), e(r["to"]), e(r["result"]), e(r["detail"])))
+    example = p833_sms.compose(app["cfg"], {"message": "Maintenance requested to press 27 for camera fault.",
+                                            "cell": "RSP LH", "press": 27, "who": "Maintenance", "code": 8})
+    return """
+<div class=card><h2>Text messages (voip.ms)</h2>
+<p>Texts are <b>%s</b>. When on, every call from a cell is also sent as a text, one way, for example:<br>
+<i>%s</i></p>
+<form method=post action='/admin/sms'><div class=w><table>
+<tr><td>Send texts</td><td><input type=checkbox name=enabled%s></td><td class=small>Off until you're ready.
+Pages don't depend on texts: a text that fails never holds up a page.</td></tr>
+<tr><td>voip.ms account e-mail</td><td><input name=api_username value='%s' size=28 maxlength=100></td>
+<td class=small>voip.ms: Main Menu, SOAP and REST/JSON API. Enable the API there and add this laptop's
+public internet address to its allowed IP list.</td></tr>
+<tr><td>voip.ms API password</td><td><input name=api_password type=password size=28 maxlength=200
+ autocomplete=new-password placeholder='%s'><br><label class=small><input type=checkbox name=clear_password>
+ remove the stored password</label></td><td class=small>The API password set on that voip.ms page (not your
+login password). It's stored on the laptop, readable only by the paging service, and never shown here again.
+Leave blank to keep the current one.</td></tr>
+<tr><td>Send from (voip.ms number)</td><td><input name=did value='%s' size=14 maxlength=20></td>
+<td class=small>Your SMS-enabled voip.ms number (DID), 10 digits.</td></tr>
+<tr><td>Text these numbers</td><td><textarea name=to rows=4 cols=18>%s</textarea></td>
+<td class=small>One 10-digit number per line, up to 20. Each number gets its own text.</td></tr>
+<tr><td>Prefix</td><td><input name=prefix value='%s' size=14 maxlength=30></td><td></td></tr>
+<tr><td>Message</td><td><input name=template value='%s' size=28 maxlength=200></td>
+<td class=small>{prefix} {message} and optionally {cell} {press} {who} {code}. Up to 160 characters are sent.</td></tr>
+<tr><td>Text test calls too</td><td><input type=checkbox name=admin_tests%s></td>
+<td class=small>Also text for test calls and custom pages sent from this admin page.</td></tr>
+</table></div><button>Save text settings</button></form>
+<form method=post action='/admin/sms/test' style='margin-top:8px'
+ onsubmit="return confirm('Send a test text to every number on the list now? (Works even with texts off.)')">
+<button>Send a test text</button></form>
+<h3>Recent texts</h3><div class=w><table><tr><th>Time</th><th>To</th><th>Result</th><th>Detail</th></tr>%s</table></div>
+<p class=small>Full log: /var/log/p833-receiver/texts.csv. The laptop needs to reach voip.ms on the internet
+(HTTPS, port 443) for texts to go out.</p></div>
+""" % ("ON" if s["enabled"] else "off", e(example), " checked" if s["enabled"] else "", e(s["api_username"]),
+       "set: leave blank to keep" if sms.has_password() else "not set", e(s["did"]), e("\n".join(s["to"])),
+       e(s["prefix"]), e(s["template"]), " checked" if s["admin_tests"] else "",
+       "\n".join(rows) or "<tr><td colspan=4>none yet</td></tr>")
+
 
 def lab_html(app):
     cfg, e = app["cfg"], html.escape
@@ -1408,8 +1536,8 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <div id=prev-custom class=preview></div>
 <p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
 Custom text has no recorded audio yet, so with dry run off a custom page fails until on-laptop speech is added.</p></div>
-""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + lab_html(app) \
-            + PREVIEW_JS
+""" % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + sms_html(app) \
+            + lab_html(app) + PREVIEW_JS
 
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1472,8 +1600,10 @@ def main(argv=None):
                  worker.audio.manifest.get("voices"),
                  "; %d problem(s), see the admin page" % len(problems) if problems else "")
     worker.start()
+    sms = p833_sms.SmsSender(cfg, args.state_dir, args.log_dir)
+    sms.start()
     Handler.app = {"cfg": cfg, "state": state, "worker": worker, "key": key,
-                   "admin_password": admin_pw, "state_dir": args.state_dir}
+                   "admin_password": admin_pw, "state_dir": args.state_dir, "sms": sms}
 
     def watch():
         while True:
