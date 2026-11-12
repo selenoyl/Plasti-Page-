@@ -11,7 +11,8 @@
 #
 # Optional: let only some networks reach the receiver's port (firewalld), e.g. the
 # IoT network the boards are on and the PC you use for the admin page:
-#   sudo P833_ALLOW_FROM="192.168.83.0/24 10.180.0.25" bash install/install.sh
+#   sudo P833_ALLOW_FROM="BOARDS_NETWORK ADMIN_PC" bash install/install.sh
+# with real addresses in place of the two words (for example 10.180.0.0/24 for a network).
 # The choice is saved in /etc/p833-receiver/allow_from and used by later updates.
 # P833_ALLOW_FROM=any opens the port to every network again.
 
@@ -37,10 +38,20 @@ else
 fi
 echo "Python: $PY ($($PY --version 2>&1))"
 
+# --- Check P833_ALLOW_FROM now, before anything changes (a typo must not lock the boards out).
+if [ -n "${P833_ALLOW_FROM:-}" ] && [ "$P833_ALLOW_FROM" != any ]; then
+    for src in $P833_ALLOW_FROM; do
+        if ! "$PY" -I -c 'import ipaddress, sys; ipaddress.ip_network(sys.argv[1], strict=False)' "$src" 2>/dev/null; then
+            echo "STOPPED: P833_ALLOW_FROM has '$src', which isn't an address or network (like 10.180.0.0/24"
+            echo "or 10.180.0.25). Nothing was changed."
+            exit 1
+        fi
+    done
+fi
+
 # --- Back up anything already installed into a new, empty folder.
 if [ -e "$APP" ] || [ -e "$ETC" ] || [ -e "$UNIT" ]; then
-    BK=/root/p833-backup-$(date +%Y%m%d-%H%M%S)
-    mkdir "$BK"          # fails if it already exists, so it is always new and empty
+    BK=$(mktemp -d "/root/p833-backup-$(date +%Y%m%d-%H%M%S)-XXXX")   # always a new, empty folder
     # The program and settings; not the recordings, Piper or its voices (large, and
     # not changed by this installer).
     if [ -e "$APP" ]; then
@@ -92,7 +103,7 @@ install -d -m 755 "$ETC"
 if [ -e "$ETC/config.json" ]; then
     install -m 644 receiver/config.example.json "$ETC/config.json.new"
     echo "Kept your $ETC/config.json (new example saved as config.json.new)"
-    "$PY" install/migrate_config.py "$ETC/config.json" receiver/config.example.json
+    "$PY" -I install/migrate_config.py "$ETC/config.json" receiver/config.example.json
     chmod 644 "$ETC/config.json"
 else
     install -m 644 receiver/config.example.json "$ETC/config.json"
@@ -108,14 +119,14 @@ chown root:root "$ETC/secrets.env"
 chmod 600 "$ETC/secrets.env"
 if ! grep -Eq '^P833_BOARD_KEY=.+' "$ETC/secrets.env"; then
     sed -i '/^P833_BOARD_KEY=/d' "$ETC/secrets.env"
-    KEY=$($PY -c 'import secrets; print(secrets.token_hex(16))')
+    KEY=$("$PY" -I -c 'import secrets; print(secrets.token_hex(16))')
     printf 'P833_BOARD_KEY=%s\n' "$KEY" >> "$ETC/secrets.env"
     echo "Made a new board key in $ETC/secrets.env (see it with: sudo cat $ETC/secrets.env)."
     echo "  Every board needs this key: set it on each board's serial console ('key ...')."
 fi
 if ! grep -Eq '^P833_ADMIN_PASSWORD=.+' "$ETC/secrets.env"; then
     sed -i '/^P833_ADMIN_PASSWORD=/d' "$ETC/secrets.env"
-    PW=$($PY -c 'import secrets; print(secrets.token_urlsafe(12))')
+    PW=$("$PY" -I -c 'import secrets; print(secrets.token_urlsafe(12))')
     printf 'P833_ADMIN_PASSWORD=%s\n' "$PW" >> "$ETC/secrets.env"
     echo
     echo "  Admin page password: $PW"
@@ -195,7 +206,9 @@ if systemctl is-active --quiet firewalld; then
     done
     if [ "$ALLOW" = "any" ]; then
         firewall-cmd --quiet --permanent --add-port=${PORT}/tcp
-        echo "firewalld: opened ${PORT}/tcp to every network (to limit it, see the top of this script)"
+        echo "firewalld: opened ${PORT}/tcp to EVERY network."
+        echo "  WARNING: any PC on the network can reach the receiver. Once the boards' network and your"
+        echo "  admin PC are known, limit it: sudo P833_ALLOW_FROM=\"<boards' network> <admin PC>\" bash install/install.sh"
     else
         for src in $ALLOW; do
             fam=ipv4; case "$src" in *:*) fam=ipv6 ;; esac
@@ -205,7 +218,8 @@ if systemctl is-active --quiet firewalld; then
     fi
     firewall-cmd --quiet --reload
 else
-    echo "firewalld is not running; nothing opened"
+    echo "WARNING: firewalld is not running, so port ${PORT} is open to every host."
+    echo "  Turn it on and run this installer again: sudo systemctl enable --now firewalld"
 fi
 
 systemctl daemon-reload

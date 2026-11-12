@@ -15,7 +15,9 @@
 #
 # The voip.ms API password is entered on the admin page and stored in
 # <state dir>/sms_secret.json, mode 0600, readable only by the service user
-# (and root). It is never shown back, written to a log or put in a URL.
+# (and root). It is never shown back or written to a log. voip.ms's API needs it
+# in the HTTPS query string, so it is sent only to https://voip.ms, with the
+# certificate checked and redirects refused.
 #
 # Standard library only; Python 3.6+.
 
@@ -147,9 +149,27 @@ class SmsSender(threading.Thread):
         self.csv_file = os.path.join(log_dir, "texts.csv")
         self.jobs = queue.Queue()
         self.recent = []
-        self.sent_times = collections.deque()      # when each text went out, for the hourly cap
+        self.sent_times = collections.deque(self._sent_last_hour())   # for the hourly cap (wall clock)
         self.lock = threading.Lock()
         self.opener = opener or self._https
+
+    def _sent_last_hour(self):
+        """Times of texts sent in the last hour, from the text log, so a restart doesn't reset the cap."""
+        out, now = [], time.time()
+        try:
+            with open(self.csv_file, encoding="utf-8", newline="") as f:
+                for row in csv.DictReader(f):
+                    if row.get("result") != "sent":
+                        continue
+                    try:
+                        t = time.mktime(datetime.strptime(row.get("time", ""), "%Y-%m-%d %H:%M:%S").timetuple())
+                    except ValueError:
+                        continue
+                    if 0 <= now - t < 3600:
+                        out.append(t)
+        except OSError:
+            pass
+        return sorted(out)
 
     # -- the API password (stored apart from the config, never shown)
     def password(self):
@@ -257,7 +277,7 @@ class SmsSender(threading.Thread):
             ok, detail, stop_all = self._send_one(s, user, pw, did, dst, text)
             if ok:
                 with self.lock:
-                    self.sent_times.append(time.monotonic())
+                    self.sent_times.append(time.time())
             elif stop_all:
                 stop = detail
             self._record(dst, text, "sent" if ok else "FAILED", detail)
@@ -274,7 +294,7 @@ class SmsSender(threading.Thread):
         return random.uniform(lo, hi)
 
     def _under_cap(self, per_hour):
-        now = time.monotonic()
+        now = time.time()
         with self.lock:
             while self.sent_times and now - self.sent_times[0] > 3600:
                 self.sent_times.popleft()

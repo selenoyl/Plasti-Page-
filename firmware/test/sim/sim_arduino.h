@@ -75,6 +75,7 @@ class String {
   char operator[](size_t i) const { return s_[i]; }
   String& operator+=(char c) { s_ += c; return *this; }
   String& operator+=(const String& o) { s_ += o.s_; return *this; }
+  bool startsWith(const char* p) const { return s_.compare(0, strlen(p), p) == 0; }
   bool operator==(const char* o) const { return s_ == o; }
   bool operator==(const String& o) const { return s_ == o.s_; }
   bool operator!=(const char* o) const { return s_ != o; }
@@ -243,7 +244,7 @@ inline void xTaskCreatePinnedToCore(void (*fn)(void*), const char*, int, void* a
 // ---- WebServer and Update: stand-ins. The main sim doesn't serve pages; the update test
 // (test_update_main.cpp) sets the sim* fields to play one request into the handlers.
 enum HTTPMethod { HTTP_GET, HTTP_POST };
-enum HTTPAuthMethod { BASIC_AUTH };
+enum HTTPAuthMethod { BASIC_AUTH, DIGEST_AUTH };
 enum HTTPUploadStatus { UPLOAD_FILE_START, UPLOAD_FILE_WRITE, UPLOAD_FILE_END, UPLOAD_FILE_ABORTED };
 struct HTTPUpload { HTTPUploadStatus status; String filename; uint8_t buf[1024]; size_t currentSize; };
 class WebServer {
@@ -263,11 +264,20 @@ class WebServer {
     if (name == "Origin") return !simOrigin.empty();
     return false;
   }
-  String header(const String& name) { return name == "Origin" ? String(simOrigin.c_str()) : String(""); }
+  String header(const String& name) {
+    if (name == "Origin") return String(simOrigin.c_str());
+    if (name == "Content-Type") return String(simContentType.c_str());
+    return String("");
+  }
   String hostHeader() { return String(simHost.c_str()); }
-  HTTPUpload& upload() { return up_; }
-  bool simAuthOk = false, simHasAuthHeader = false;
-  std::string simOrigin, simHost;
+  // A non-multipart POST goes down the real server's raw-body path, where the upload
+  // object isn't set up: touching it there crashes the board, so it aborts here too.
+  HTTPUpload& upload() {
+    if (simRaw) { std::printf("[sim] CRASH: web.upload() used for a raw (non-multipart) POST\n"); std::fflush(stdout); std::abort(); }
+    return up_;
+  }
+  bool simAuthOk = false, simHasAuthHeader = false, simRaw = false;
+  std::string simOrigin, simHost, simContentType = "multipart/form-data; boundary=x";
   int simLastCode = 0;
  private:
   HTTPUpload up_{};

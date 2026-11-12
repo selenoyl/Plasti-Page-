@@ -105,7 +105,7 @@ reboot
    - Press any key to stop `watch`.
 6. **Test the path to the laptop** without the PLC: type `test 2 27`. The laptop's status page should show the call, from this board, as code 2, press 27.
 7. **Test from the PLC.** Make a call from the cell's panel. The LED turns blue during the pulses, the buzzer chirps, and `CALL code ... queued` then `sent` appear.
-8. **Set an update password:** `otapass <password>`, at least 8 characters. Keep it with the laptop's passwords. Until it's set, network updates are off.
+8. **Set an update password:** `otapass <password>`. Make it random and different on each board, and never the same as the admin password; for example, run `openssl rand -hex 16` on the laptop and paste the result. Keep it with the laptop's passwords. Until it's set, network updates are off.
 
 ## Update over the network
 
@@ -114,16 +114,27 @@ After the first USB upload, later versions can go in over Wi-Fi from any browser
 1. Make the file. In the Arduino IDE, with the same Tools settings as above, choose **Sketch > Export Compiled Binary**.
    - Use the file named `p833_board.ino.bin` in the sketch folder's `build` subfolder.
    - Don't use the `.bootloader.bin` or `.merged.bin` files.
-2. Open `http://<board IP>/update` and log in. The user name is `p833` and the password is the board's `otapass`.
+2. Open `http://<board IP>/update` and log in. The user name is `p833` and the password is the board's `otapass`. From 1.1.3 the board asks with Digest login, so the password itself doesn't cross the network. Do this from the laptop's browser.
 3. Choose the `.bin` file and click **Upload and restart**. After about 15 s, check the version on `http://<board IP>/`.
 
 - If a call is waiting to be sent, the board refuses the update ("a call is waiting"). Try again a minute later.
 - A failed or wrong upload leaves the old firmware running.
-- From 1.1.3, the board restarts only after the whole file arrived with the right password. Five wrong passwords lock updates for 5 minutes. An upload posted by a page on another web site is refused.
+- From 1.1.3, the board restarts only after the whole file arrived with the right password. Five wrong passwords lock updates for 5 minutes. An upload posted by a page on another web site is refused, and so is any POST that isn't a file upload. (On the esp32 package before 3.3.12, such a POST could crash and restart the board.)
 - **Security:** the update page is plain HTTP and the firmware isn't signed, so anyone who knows `otapass` and can reach the board can put any program on it. Keep the boards on the isolated IoT network. Turn updates off between updates by typing `otapass` with nothing after it on the USB console, then set it again when you next update.
 - Settings (ID, Wi-Fi, key and so on) are kept through an update.
 
 Settings stay in the board's flash through power cuts and reflashing. To start clean, erase the flash when uploading (Tools > Erase All Flash Before Sketch Upload > Enabled).
+
+## Physical security
+
+Anyone at a board with a USB-C cable can use the setup console without a password. The settings in the
+board's flash (the board key, the IoT Wi-Fi password and `otapass`) aren't encrypted. So:
+- Mount each board in a locked panel, with the USB-C port out of reach.
+- Use an IoT Wi-Fi password that isn't used anywhere else.
+- If a board goes missing or looks tampered with: change the board key (on the laptop and every board),
+  the IoT Wi-Fi password and that board's `otapass`.
+- The ESP32 can encrypt its flash and lock out reading it over USB, but that is permanent (it burns
+  fuses in the chip) and makes recovery harder; not done here.
 
 ## Commands
 

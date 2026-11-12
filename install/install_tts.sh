@@ -43,12 +43,12 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 # Pinned to the version this was built and tested with (not "newest").
 PIPER_VERSION=1.8.0
-if ! "$VENV/bin/python" -m pip install --quiet "piper-tts==$PIPER_VERSION"; then
+if ! "$VENV/bin/python" -I -m pip install --quiet "piper-tts==$PIPER_VERSION"; then
     # an old pip may not know the newer package formats; update pip once and retry
-    "$VENV/bin/python" -m pip install --quiet --upgrade "pip<26"
-    "$VENV/bin/python" -m pip install --quiet "piper-tts==$PIPER_VERSION"
+    "$VENV/bin/python" -I -m pip install --quiet --upgrade "pip<26"
+    "$VENV/bin/python" -I -m pip install --quiet "piper-tts==$PIPER_VERSION"
 fi
-echo "Piper: $("$VENV/bin/python" -m pip show piper-tts | sed -n 's/^Version: //p')"
+echo "Piper: $("$VENV/bin/python" -I -m pip show piper-tts | sed -n 's/^Version: //p')"
 
 # --- Voices.
 mkdir -p "$VOICES"
@@ -58,7 +58,7 @@ for v in $WANT; do
         echo "voice $v: already installed"
     else
         echo "voice $v: downloading..."
-        "$VENV/bin/python" -m piper.download_voices --download-dir "$VOICES" "$v" \
+        "$VENV/bin/python" -I -m piper.download_voices --download-dir "$VOICES" "$v" \
             || echo "  could not download $v (check the name and the internet connection)"
     fi
     # Check the files against the checksums on file (install/voices.sha256).

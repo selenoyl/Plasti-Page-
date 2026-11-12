@@ -435,7 +435,8 @@ bool updateAllowed() {
     return false;
   }
   if (!otaPasswordOk()) {
-    web.requestAuthentication(BASIC_AUTH, "P833 board update");
+    // Digest: the browser proves it knows the password without sending it over the network.
+    web.requestAuthentication(DIGEST_AUTH, "P833 board update");
     return false;
   }
   return true;
@@ -469,6 +470,11 @@ void webUpdateForm() {
 }
 
 void webUpdateUpload() {
+  // Only a multipart form upload may go on. For any other POST the web server calls this
+  // in its raw-body mode, where web.upload() isn't set up and touching it crashes the board.
+  if (!web.header("Content-Type").startsWith("multipart/")) {
+    updateRefused = true; updateError = "not a firmware upload"; return;
+  }
   HTTPUpload& up = web.upload();
   if (up.status == UPLOAD_FILE_START) {
     updateError = "";
@@ -528,8 +534,8 @@ void webTask(void*) {
 }
 
 void startWeb() {
-  static const char* headers[] = {"Origin"};
-  web.collectHeaders(headers, 1);      // Authorization is always collected too
+  static const char* headers[] = {"Origin", "Content-Type"};
+  web.collectHeaders(headers, 2);      // Authorization is always collected too
   web.on("/", HTTP_GET, webStatus);
   web.on("/update", HTTP_GET, webUpdateForm);
   web.on("/update", HTTP_POST, webUpdateDone, webUpdateUpload);

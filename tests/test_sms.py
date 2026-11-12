@@ -200,6 +200,14 @@ class Sms(unittest.TestCase):
         self.assertEqual([r["result"] for r in s.recent], ["sent", "sent", "SKIPPED"])
         self.assertIn("hourly limit", detail)
 
+    def test_hourly_cap_survives_a_restart(self):
+        s = self.sender(cfg_with(to=["5550001111", "5550002222"], max_per_hour=3), FakeVoipMs())
+        self.assertTrue(s.send("hi")[0])                               # 2 sent
+        again = self.sender(cfg_with(to=["5550001111", "5550002222"], max_per_hour=3), FakeVoipMs())
+        ok, detail = again.send("hi")                                   # a "restart": only 1 more allowed
+        self.assertFalse(ok)
+        self.assertEqual([r["result"] for r in again.recent], ["sent", "SKIPPED"])
+
     def test_test_text_is_queued(self):
         fake = FakeVoipMs()
         s = self.sender(cfg_with(), fake)

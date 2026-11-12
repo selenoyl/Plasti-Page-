@@ -235,6 +235,9 @@ Each call from a cell can also go out as a one-way text, for example
 - If voip.ms can't be reached, the text is tried once more. If the request went out but no answer came back, it is **not** retried, because that could text everyone twice.
 - Texts are plain ASCII: accents are dropped ("Mañana" becomes "Manana"). Anything over 160 characters is cut and ends in "...".
 - The laptop needs to reach voip.ms on the internet (HTTPS, port 443), even if the rest of the IoT network is isolated.
+- voip.ms's API takes the password in the HTTPS address, so if the plant has a firewall that opens HTTPS traffic to inspect it, exempt voip.ms (or the laptop) from that.
+- On the voip.ms account, turn off international and premium-rate calling if you don't use them, and keep a small prepaid balance with automatic recharge off, so a stolen API password can't run up a big bill.
+- The API password can only be saved over HTTPS (the normal admin page). If the admin page ever shows "not encrypted", the password field is ignored.
 
 ## Voice lab (try voices, speed and pauses)
 
@@ -244,7 +247,7 @@ made with), so you can hear what works on your speakers before the full set is r
 - **Pick** a voice, the speed (1 = normal, higher = slower), an optional department tone and how many plays.
 - **Write the text.** Put a pause anywhere as **[350]** (milliseconds). Each part between pauses is spoken on its own, which gives digits a clear, separate sound. For example: `Maintenance requested to press two. [350] Seven.`
 - **Preview** plays it in your browser at the page volume; nothing is sent.
-- **Page it** dials the zone and plays it on the speakers. It works with dry run on, and it isn't logged as a call.
+- **Page it** dials the zone and plays it on the speakers. It works with dry run on, and it is written to the call log (code "voice lab", with the whole text).
 - When something sounds right, tell whoever maintains the recordings the voice, speed and pause, and the full set is re-recorded to match (`tools/make_audio.py`).
 
 **Set up once** (needs internet, and Python 3.9 or newer; on AlmaLinux 8 run `sudo dnf install -y python3.11` first):
@@ -277,7 +280,7 @@ match except where marked):
 | FXO PORT | Account Active | Yes |
 | FXO PORT | **SIP Registration** | **No** (no phone server) |
 | FXO PORT | Local SIP Port | 5062 (the admin page's "HT813 FXO SIP port") |
-| FXO PORT | Check SIP User ID for incoming INVITE / Allow Incoming SIP Messages from SIP Proxy Only / Authenticate incoming INVITE | No / No / No (direct calls allowed). **Anyone who can reach the HT813 can then use the line: lock it down, see below.** |
+| FXO PORT | Check SIP User ID for incoming INVITE / Allow Incoming SIP Messages from SIP Proxy Only / Authenticate incoming INVITE | No / No / No (direct calls allowed): for first bring-up only. **Anyone who can reach the HT813 can then use the line: lock it down, see below.** |
 | FXO PORT | Stage Method | 2 |
 | FXO PORT | Preferred DTMF method | RFC2833 first, payload 101 |
 | FXO PORT | Send Hook Flash To PSTN | Yes (so `F` works) |
@@ -293,10 +296,13 @@ match except where marked):
 | BASIC | End User Password | changed too (the default lets anyone log in and read the settings) |
 
 **Lock down the HT813.** As set up above, the HT813 takes a call from any device that can reach it, and
-that call can use the Norstar line: page the plant, or dial out. Do at least the first step:
+that call can use the Norstar line: page the plant, or dial out. Do steps 1 and 2 as soon as you can:
+0. **Norstar (phone admin):** check whether extension 5912 (the ATA2 line) can get an outside line or a
+   line pool. If it can, remove that access and give 5912 a restriction filter that allows only the page
+   feature codes. Then even a misused call can only page.
 1. **Network (IT, UniFi):** put the HT813 and the laptop on the isolated IoT network, and add a firewall
    rule so that only the laptop can reach the HT813 (its SIP port 5062, its audio ports and its web page).
-2. **A password on calls (optional, extra):** on the HT813's FXO PORT page set **Authenticate ID** (for
+2. **A password on calls:** on the HT813's FXO PORT page set **Authenticate ID** (for
    example `p833`) and an **Authenticate Password**, then set **Authenticate incoming INVITE** to **Yes**.
    On the laptop add the same password to the secrets file and restart:
    ```bash
@@ -358,10 +364,11 @@ What protects what (receiver 0.10.0, board firmware 1.1.3):
 1. Isolate the IoT network (boards, HT813, laptop) from the plant LAN, and lock down the HT813 (above).
 2. Let only the IoT network and your admin PC reach the receiver's port:
    ```bash
-   sudo P833_ALLOW_FROM="192.168.83.0/24 192.168.1.50" bash install/install.sh
+   sudo P833_ALLOW_FROM="BOARDS_NETWORK ADMIN_PC" bash install/install.sh
    ```
-   Here 192.168.83.0/24 stands for the IoT network and 192.168.1.50 for the PC you use for the admin page:
-   put in your own. The choice is kept for later updates; `P833_ALLOW_FROM=any` undoes it.
+   Replace BOARDS_NETWORK with the network the boards are on (like `10.180.0.0/24`) and ADMIN_PC with the
+   address of the PC you use for the admin page. The installer stops, changing nothing, if an entry isn't
+   an address. The choice is kept for later updates; `P833_ALLOW_FROM=any` undoes it.
 3. Put firmware 1.1.3 on each board (its update page now can't be used to restart the board), then turn
    network updates off on each board between updates: `otapass` with nothing after it, on the USB console.
 4. The board key goes over the network as plain text in every call. On an isolated network with a strong
@@ -407,9 +414,12 @@ The laptop remembers the highest `seq` it took from each board for each `boot` (
 
 ## Proposed addresses (IoT network, can be changed)
 
+The plan. **Today the laptop, the HT813 and the boards are on the plant network, not isolated yet**
+(see "Security").
+
 | Device | Address |
 |---|---|
-| Network | 192.168.83.0/24, isolated, off the plant LAN |
+| Network | 192.168.83.0/24, to be isolated from the plant LAN |
 | Laptop (receiver) | 192.168.83.10, fixed |
 | Grandstream HT813 | 192.168.83.20, fixed |
 | Cell boards | 192.168.83.101 RSP LH, .102 RSP RH, .103 FSP LH, .104 FSP RH |

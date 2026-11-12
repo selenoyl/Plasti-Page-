@@ -22,6 +22,8 @@ CASES = [  # (case, should it restart?, reply code if not)
     ("wrong-password-upload", False, 401),
     ("other-site", False, 400),
     ("lockout", False, 429),
+    ("raw-post", False, 400),
+    ("raw-post-no-type", False, 400),
     ("good-upload", True, None),
     ("good-upload-no-origin", True, None),
 ]

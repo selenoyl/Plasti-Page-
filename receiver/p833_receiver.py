@@ -48,6 +48,9 @@ CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
 BOARD_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 BOOT_ID = re.compile(r"^[A-Za-z0-9_-]{0,32}$")
 MAX_CONNECTIONS = 64      # open web connections at once; more are closed at once
+MAX_PER_ADDRESS = 8       # ...from any one address
+RESERVED_FOR_BOARDS = 16  # ...of which this many are kept for boards (and the laptop itself)
+REQUEST_DEADLINE_S = 15   # the whole request (TLS hello, headers, body) must arrive in this time
 MAX_WAITING_PAGES = 20    # pages queued but not yet sent; calls over it get "busy" and the board retries
 MAX_CALLS_PER_MIN = 6     # accepted calls from one board ID in a minute
 MAX_UNKNOWN_BOARDS = 50   # boards not on the list that are remembered on the status page
@@ -499,6 +502,13 @@ class State:
                     del self.boots[k]
             self._write_json(self.boots_file, self.boots)
 
+    def seq_jump(self, call):
+        """True if seq is far beyond what this board sent in this boot (a forged message that
+        would otherwise make every real call after it look like an old one)."""
+        with self.lock:
+            top = next((t for b, t in self.boots.get(call["board"], []) if b == call["boot"]), 0)
+            return call["seq"] > top + MAX_SEQ_JUMP
+
     def seen_recently(self, call):
         with self.lock:
             t = self.seen.get((call["board"], call["boot"], call["seq"]))
@@ -569,11 +579,22 @@ class Busy(Exception):
     """Too many calls: the board should try again later (HTTP 503)."""
 
 
+class Refused(Exception):
+    """A call that will never be paged (HTTP 400): the board drops it."""
+
+
+MAX_SEQ_JUMP = 1000   # a board numbers its calls 1, 2, 3...; a far bigger jump is a forged message
+
+
 def accept_call(app, call, ip, note=""):
     """Handle one checked call from a board or the admin page.
 
     Returns (repeat: bool, english text); raises Busy when it can't take the call now."""
     st, cfg = app["state"], app["cfg"]
+    if call["boot"] and not note and st.seq_jump(call):
+        LOG.warning("call from %s refused: seq %d jumps more than %d past the last one from that boot "
+                    "(forged?)", call["board"], call["seq"], MAX_SEQ_JUMP)
+        raise Refused("seq jumps too far")
     if st.replayed(call) and not st.seen_recently(call):
         # handled long ago (inside the window it's logged as a repeat below): journal only
         LOG.info("old message dropped: %s seq %d (boot %s) was already handled", call["board"],
@@ -889,8 +910,16 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return None
         if n <= 0 or n > limit:
+            self._request_read()
             return None
-        return self.rfile.read(n)
+        data = self.rfile.read(n)
+        self._request_read()
+        return data
+
+    def _request_read(self):
+        f = getattr(self.server, "request_read", None)
+        if f:
+            f()
 
     def _json_body(self):
         raw = self._raw_body()
@@ -1026,6 +1055,8 @@ class Handler(BaseHTTPRequestHandler):
             repeat, _ = accept_call(self.app, call, self.client_address[0])
         except Busy as e:
             return self._reply(503, {"ok": False, "error": str(e)}, headers={"Retry-After": "10"})
+        except Refused as e:
+            return self._reply(400, {"ok": False, "error": str(e)})
         return self._reply(200, {"ok": True, "repeat": repeat})
 
     def _admin_post(self, path):
@@ -1167,10 +1198,10 @@ class Handler(BaseHTTPRequestHandler):
             if not hasattr(live, "connection_test") or not dial:
                 return self._back("Voice lab: zone %s has no dial digits set." % zone)
             LOG.info("voice lab page from admin page (%s), voice %s: %s", who, form.get("voice"),
-                     form.get("text", "")[:200])
+                     form.get("text", "")[:1500])
             ok, detail = live.connection_test(digits=dial, wav=wav, what="the voice lab text")
             st.record({"time": now_text(), "board": "admin", "cell": "Admin page (%s)" % who,
-                       "code": "voice lab", "who": "Admin", "message": form.get("text", "")[:200],
+                       "code": "voice lab", "who": "Admin", "message": form.get("text", "")[:1500],
                        "result": "sent" if ok else "FAILED", "attempts": 1, "detail": detail})
             return self._back(("Voice lab page OK: " if ok else "Voice lab page FAILED: ") + detail)
 
@@ -1182,6 +1213,11 @@ class Handler(BaseHTTPRequestHandler):
             if form.get("clear_password") == "on":
                 self.app["sms"].set_password("")
                 LOG.info("voip.ms API password removed on the admin page (%s)", who)
+            elif pw and not (self._https() or who in ("127.0.0.1", "::1")):
+                st.set_sms(sms_form, who)
+                return self._back("Text settings saved, but NOT the API password: this admin page isn't "
+                                  "encrypted (no HTTPS certificate), so it would cross the network as plain "
+                                  "text. Run sudo bash install/install.sh on the laptop, then enter it again.")
             elif pw:
                 self.app["sms"].set_password(pw)
                 LOG.info("voip.ms API password changed on the admin page (%s)", who)
@@ -1215,6 +1251,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._reply(404, {"ok": False, "error": "not found"})
 
     def do_GET(self):
+        self._request_read()
         parts = urlsplit(self.path)
         if (parts.path == "/admin" or parts.path.startswith("/admin/")) and self._needs_https():
             return self._to_https()
@@ -1332,11 +1369,95 @@ class Server(socketserver.ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
     def __init__(self, *a, tls=None, **k):
-        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self.tls = tls
+        self.conn_lock = threading.Lock()
+        self.open_by_ip = {}           # address -> open connections
+        self.refused_logged = {}       # address -> when a refusal was last logged
+        self._local = threading.local()
         super().__init__(*a, **k)
 
+    # -- how many connections, from whom
+    def _known(self, ip):
+        """Boards the receiver has heard from, and the laptop itself, get the reserved slots."""
+        if ip in ("127.0.0.1", "::1"):
+            return True
+        app = getattr(self.RequestHandlerClass, "app", None) or {}
+        st = app.get("state")
+        return bool(st) and any(b.get("ip") == ip for b in list(st.heard_info.values()))
+
+    def _take_slot(self, ip):
+        with self.conn_lock:
+            total = sum(self.open_by_ip.values())
+            mine = self.open_by_ip.get(ip, 0)
+            limit = MAX_CONNECTIONS if self._known(ip) else MAX_CONNECTIONS - RESERVED_FOR_BOARDS
+            if total >= limit or mine >= MAX_PER_ADDRESS:
+                now = time.time()
+                if now - self.refused_logged.get(ip, 0) > 60:
+                    self.refused_logged[ip] = now
+                    if len(self.refused_logged) > 1000:
+                        self.refused_logged.clear()
+                    LOG.warning("refused connections from %s: %d open from it, %d in all", ip, mine, total)
+                return False
+            self.open_by_ip[ip] = mine + 1
+            return True
+
+    def _free_slot(self, ip):
+        with self.conn_lock:
+            n = self.open_by_ip.get(ip, 1) - 1
+            if n > 0:
+                self.open_by_ip[ip] = n
+            else:
+                self.open_by_ip.pop(ip, None)
+
+    def process_request(self, request, client_address):
+        if not self._take_slot(client_address[0]):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._free_slot(client_address[0])
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._free_slot(client_address[0])
+
+    def handle_error(self, request, client_address):
+        """A connection cut off (deadline, client gone) is normal: no traceback for it."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, socket.timeout, ssl.SSLError)):
+            return
+        LOG.exception("web request from %s failed", client_address[0])
+
+    # -- the whole request must arrive within REQUEST_DEADLINE_S (a client that trickles a
+    # byte now and then can't hold a slot); the handler says when it has read the request.
+    def request_read(self):
+        t = getattr(self._local, "deadline", None)
+        if t:
+            t.cancel()
+
+    @staticmethod
+    def _cut(box):
+        try:
+            box[0].shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def finish_request(self, request, client_address):
+        box = [request]
+        timer = threading.Timer(REQUEST_DEADLINE_S, self._cut, args=(box,))
+        timer.daemon = True
+        self._local.deadline = timer
+        timer.start()
+        try:
+            self._serve(request, client_address, box)
+        finally:
+            timer.cancel()
+
+    def _serve(self, request, client_address, box):
         if self.tls is None:
             return super().finish_request(request, client_address)
         request.settimeout(Handler.timeout)
@@ -1350,6 +1471,7 @@ class Server(socketserver.ThreadingMixIn, HTTPServer):
             conn = self.tls.wrap_socket(request, server_side=True)
         except (ssl.SSLError, OSError):
             return                      # e.g. the browser said no to the certificate this time
+        box[0] = conn
         try:
             self.RequestHandlerClass(conn, client_address, self)
         finally:
@@ -1357,22 +1479,6 @@ class Server(socketserver.ThreadingMixIn, HTTPServer):
                 conn.close()
             except OSError:
                 pass
-
-    def process_request(self, request, client_address):
-        if not self.slots.acquire(blocking=False):
-            self.shutdown_request(request)
-            return
-        try:
-            super().process_request(request, client_address)
-        except Exception:
-            self.slots.release()
-            raise
-
-    def process_request_thread(self, request, client_address):
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self.slots.release()
 
 
 # ------------------------------------------------------------------ pages ---

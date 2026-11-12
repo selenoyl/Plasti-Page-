@@ -538,6 +538,15 @@ class Server(unittest.TestCase):
         self.assertTrue(again.replayed({"board": "RSP_LH", "boot": "b1", "seq": 4}))
         self.assertFalse(again.replayed({"board": "RSP_LH", "boot": "b2", "seq": 1}))
 
+    def test_forged_huge_seq_cannot_silence_a_board(self):
+        self.assertEqual(self.call(boot="live", seq=1)[0], 200)
+        st, txt = self.call(boot="live", seq=2 ** 31, code=3)          # forged, with the board's boot
+        self.assertEqual(st, 400)
+        self.assertEqual(self.call(boot="live", seq=2, code=4)[0], 200)   # the real next call still pages
+        self.wait_pages()
+        self.assertEqual(len(self.pager.sent), 2)
+        self.assertEqual(self.call(boot="fresh", seq=5000)[0], 400)     # a new boot starts near 1 too
+
     def test_busy_when_too_many_pages_wait_or_one_board_floods(self):
         old = R.MAX_WAITING_PAGES
         R.MAX_WAITING_PAGES = 0
@@ -597,6 +606,92 @@ class Server(unittest.TestCase):
             R.MAX_CONNECTIONS, R.Handler.timeout = old_max, old_to
             srv.shutdown()
             srv.server_close()
+
+    def side_server(self, **limits):
+        """A second server with small limits for one test (restored after)."""
+        old = {k: getattr(R, k) for k in limits}
+        for k, v in limits.items():
+            setattr(R, k, v)
+        srv = R.Server(("127.0.0.1", 0), R.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        def undo():
+            for k, v in old.items():
+                setattr(R, k, v)
+            srv.shutdown()
+            srv.server_close()
+        self.addCleanup(undo)
+        return srv.server_address[1]
+
+    @staticmethod
+    def closed_at_once(sock):
+        sock.settimeout(2)
+        try:
+            return sock.recv(10) == b""
+        except OSError:
+            return True
+
+    def test_one_address_cannot_take_every_connection(self):
+        import socket
+        port = self.side_server(MAX_PER_ADDRESS=3, MAX_CONNECTIONS=64)
+        mine = []
+        for _ in range(3):
+            c = socket.socket()
+            c.bind(("127.0.0.2", 0))
+            c.connect(("127.0.0.1", port))
+            mine.append(c)
+        time.sleep(0.2)
+        extra = socket.socket()
+        extra.bind(("127.0.0.2", 0))
+        extra.connect(("127.0.0.1", port))
+        self.assertTrue(self.closed_at_once(extra))            # 4th from the same address: refused
+        body = {"board": "RSP_LH", "boot": "b1", "seq": 1, "code": 2, "press": 27}
+        self.assertEqual(S.post("http://127.0.0.1:%d/call" % port, body, KEY)[0], 200)   # others fine
+        for c in mine + [extra]:
+            c.close()
+
+    def test_strangers_cannot_take_the_boards_slots(self):
+        import socket
+        port = self.side_server(MAX_PER_ADDRESS=8, MAX_CONNECTIONS=4, RESERVED_FOR_BOARDS=2)
+        held = []
+        for src in ("127.0.0.2", "127.0.0.3"):
+            c = socket.socket()
+            c.bind((src, 0))
+            c.connect(("127.0.0.1", port))
+            held.append(c)
+        time.sleep(0.2)
+        c = socket.socket()
+        c.bind(("127.0.0.4", 0))
+        c.connect(("127.0.0.1", port))
+        self.assertTrue(self.closed_at_once(c))                 # unknown: only 4 - 2 slots
+        with urllib.request.urlopen("http://127.0.0.1:%d/status.json" % port, timeout=5) as r:
+            self.assertEqual(r.status, 200)                    # the laptop (a known address) still gets in
+        for x in held + [c]:
+            x.close()
+
+    def test_trickling_request_is_cut_off(self):
+        import socket
+        old = R.Handler.timeout
+        R.Handler.timeout = 5                                  # each byte comes well within this...
+        self.addCleanup(setattr, R.Handler, "timeout", old)
+        port = self.side_server(REQUEST_DEADLINE_S=1)
+        c = socket.create_connection(("127.0.0.1", port))
+        t0 = time.monotonic()
+        cut = False
+        for ch in b"GET /status.json HTTP/1.1\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaa":
+            try:
+                c.sendall(bytes([ch]))
+            except OSError:
+                cut = True
+                break
+            time.sleep(0.2)
+            if time.monotonic() - t0 > 4:
+                break
+        if not cut:
+            cut = self.closed_at_once(c)
+        self.assertTrue(cut)                                   # ...but the whole request must arrive in 1 s
+        self.assertLess(time.monotonic() - t0, 4)
+        c.close()
 
     # ---- admin page
     def admin(self, path, form=None, pw=ADMIN_PW, origin="self"):
@@ -1117,6 +1212,25 @@ sys.stdout.buffer.write(b.getvalue())
         self.admin("/admin/test", {"board": "RSP_LH", "code": "3", "press": "9"})
         time.sleep(0.4)
         self.assertEqual(fake.requests, [])                    # off; then an admin test (not asked for)
+
+    def test_api_password_not_taken_over_plain_http_from_another_pc(self):
+        import http.client
+        sender, fake = self.use_sms(enabled=False)
+        sender.set_password("")
+        R.Handler.app["https_problem"] = "no certificate"
+        self.addCleanup(R.Handler.app.pop, "https_problem", None)
+        form = urllib.parse.urlencode({"api_username": "boss@example.com", "did": "5552223333",
+                                       "to": "5550001111", "prefix": "Chapar:", "template": "{prefix} {message}",
+                                       "api_password": "new-secret"})
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5, source_address=("127.0.0.2", 0))
+        c.request("POST", "/admin/sms", form, {
+            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode(),
+            "Origin": "http://127.0.0.1:%d" % self.port, "Content-Type": "application/x-www-form-urlencoded"})
+        loc = urllib.parse.unquote(c.getresponse().getheader("Location", ""))
+        c.close()
+        self.assertIn("NOT the API password", loc)
+        self.assertFalse(sender.has_password())
+        self.assertEqual(self.cfg["sms"]["api_username"], "boss@example.com")   # the rest is saved
 
     def test_sms_settings_on_admin_page(self):
         sender, fake = self.use_sms(enabled=False)

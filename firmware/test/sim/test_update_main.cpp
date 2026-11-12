@@ -42,6 +42,12 @@ int main(int argc, char** argv) {
     web.simHasAuthHeader = true;
     for (int i = 0; i < 5; i++) { web.simAuthOk = false; uploadFile(); webUpdateDone(); }
     web.simAuthOk = true; uploadFile(); webUpdateDone();
+  } else if (t == "raw-post") {                    // curl -X POST, or a text/plain form: no crash
+    web.simAuthOk = false; web.simRaw = true; web.simContentType = "text/plain";
+    webUpdateUpload(); webUpdateDone();
+  } else if (t == "raw-post-no-type") {            // a POST with no Content-Type at all
+    web.simRaw = true; web.simContentType = "";
+    webUpdateUpload(); webUpdateDone();
   } else if (t == "good-upload") {                 // right password, whole file: restarts
     web.simAuthOk = true; web.simOrigin = "http://192.168.83.30"; uploadFile(); webUpdateDone();
   } else if (t == "good-upload-no-origin") {       // e.g. curl: restarts

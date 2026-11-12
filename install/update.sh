@@ -27,7 +27,7 @@ command -v git >/dev/null || dnf install -y git
 
 # git as root in a folder that may belong to another user: trust it for these commands
 # only, with no hooks and no pager.
-g() { git -c safe.directory="$PWD" -c core.hooksPath=/dev/null --no-pager "$@"; }
+g() { git -c safe.directory="$PWD" -c core.hooksPath=/dev/null -c core.fsmonitor= --no-pager "$@"; }
 
 # Older versions of this script added the folder to root's git settings; take it out.
 if git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$PWD"; then
