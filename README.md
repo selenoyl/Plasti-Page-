@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.8.0:** receiving, checking, logging, dry-run paging, the
+**Status, version 0.8.1:** receiving, checking, logging, dry-run paging, the
 admin page, the editable phone settings and the recorded page audio are in and
 tested. The phone call to the HT813 is not built yet:
 with dry run off, every page is logged as FAILED ("phone pager not built yet").
@@ -259,6 +259,23 @@ match except where marked):
 | ADVANCED | Automatic Upgrade | No; and **Always Skip the Firmware Check** |
 | BASIC | Reply to ICMP on WAN port | Yes (so it answers ping when troubleshooting) |
 | BASIC | Admin password | changed from the label's |
+
+**Catching pages that don't open (line check).** "Sent" means the HT813 answered and the audio played;
+it doesn't prove the Norstar opened the page. So after dialing, the laptop listens to what the line sends
+back during the wait after dialing:
+- **Dial tone** means the hook flash or the digits weren't taken.
+- **A busy or reorder tone** means the page zone was busy (for example, the feedback eliminator still playing the last page), or the code was refused.
+- **Ringing** means it called a phone instead of opening the page.
+
+Set "Line check after dialing" under Phone and paging setup:
+
+| Setting | What it does |
+|---|---|
+| **warn** (default) | The page plays anyway, and the call's Detail says `WARNING: …` |
+| **retry** | Marks that try FAILED, hangs up and tries again (up to 3 times) |
+| **off** | No check |
+
+Start with warn. Once real pages on your line show no false warnings, switch to retry. The admin page keeps the line audio of the last page ("Last live page") and of the last failed try ("Last failed page try"). It also waits **6 s between calls** ("Gap between calls"), so the HT813 and Norstar fully release the line; the HT813 itself waits 4 s.
 
 **Admin page tools:**
 - **Call the HT813 (no dialing):** holds the ATA2 line about 3 s and dials nothing. Proves laptop → HT813 → line.

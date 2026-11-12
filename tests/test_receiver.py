@@ -620,7 +620,7 @@ class Server(unittest.TestCase):
              "local_sip_port": "5070", "wait_after_answer_ms": "1000", "dtmf_ms": "100",
              "dtmf_gap_ms": "100", "wait_after_dial_ms": "2500", "max_call_s": "60",
              "dial_floor": "F*61", "dial_office": "", "repeat": "3", "tones": "once",
-             "lead_silence_ms": "3000", "gain_db": "6"}
+             "lead_silence_ms": "3000", "gain_db": "6", "min_gap_s": "6", "line_check": "warn"}
         for c in range(2, 10):
             f["zone_%d" % c] = "floor"
             f["tone_%d" % c] = self.cfg["codes"][c]["tone"]
@@ -721,7 +721,7 @@ class Server(unittest.TestCase):
         from fake_ht813 import FakeHT813
         ht = FakeHT813(**kw)
         self.addCleanup(ht.close)
-        self.cfg["phone"].update(ht813_ip="127.0.0.1", sip_port=ht.port, local_sip_port=0,
+        self.cfg["phone"].update(ht813_ip="127.0.0.1", sip_port=ht.port, local_sip_port=0, min_gap_s=0,
                                  wait_after_answer_ms=60, dtmf_ms=60, dtmf_gap_ms=40, wait_after_dial_ms=60)
         self.cfg["audio"].update(lead_silence_ms=0, repeat=1)
         self.worker.live = R.SipPager(self.cfg)
@@ -743,6 +743,32 @@ class Server(unittest.TestCase):
             self.assertTrue(f.read().startswith(b"RIFF"))
         self.assertIn("Dial digits in use now", self.admin("/admin")[2])
         self.assertIn("floor: F61", self.admin("/admin")[2])
+
+    def test_page_that_does_not_open_is_retried_then_failed(self):
+        ht = self.use_fake_ht813(line_tone="dial")
+        self.cfg["phone"].update(wait_after_dial_ms=600, line_check="retry")
+        self.cfg["zones"]["floor"]["dial"] = "F61"
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        row = self.wait_row()
+        self.assertEqual((row["result"], row["attempts"]), ("FAILED", "3"))
+        self.assertIn("dial tone", row["detail"])
+        self.assertEqual(ht.calls, 3)
+        with open(os.path.join(self.tmp, "last_failed_page_line.wav"), "rb") as f:
+            self.assertTrue(f.read().startswith(b"RIFF"))
+        self.assertIn("name=line_check", self.admin("/admin")[2])
+
+    def test_line_check_warn_is_the_default(self):
+        self.assertEqual(R.load_config(CONFIG)["phone"]["line_check"], "warn")
+        ht = self.use_fake_ht813(line_tone="dial")
+        self.cfg["phone"]["wait_after_dial_ms"] = 600
+        self.cfg["phone"]["line_check"] = R.load_config(CONFIG)["phone"]["line_check"]
+        self.cfg["zones"]["floor"]["dial"] = "F61"
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        row = self.wait_row()
+        self.assertEqual((row["result"], row["attempts"]), ("sent", "1"))   # played once, not retried
+        self.assertIn("WARNING: the line still had dial tone", row["detail"])
 
     def test_live_page_without_dial_digits_fails(self):
         ht = self.use_fake_ht813()

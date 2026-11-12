@@ -36,7 +36,9 @@
     "dtmf_ms": 120,
     "dtmf_gap_ms": 120,
     "wait_after_dial_ms": 1000,
-    "max_call_s": 90
+    "max_call_s": 90,
+    "min_gap_s": 6,
+    "line_check": "warn"
   },
   "boards": {
     "RSP_LH": {

@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -59,6 +59,8 @@ PHONE_DEFAULTS = {
     "wait_after_dial_ms": 2000,
     "max_call_s": 90,
     "ht813_user": "",      # SIP user to call; empty = call the HT813 by address (direct IP call)
+    "min_gap_s": 6,        # gap after a call before the next, so the HT813 and Norstar release the line
+    "line_check": "warn",  # after dialing, listen for dial/busy/ringing tone: retry, warn or off
 }
 # (key, label, low, high, help) for the number fields on the admin page.
 PHONE_NUMBERS = [
@@ -72,6 +74,9 @@ PHONE_NUMBERS = [
     ("wait_after_dial_ms", "Wait after dialing before speaking (ms)", 0, 15000,
      "Time for the page zone to open (the paging beep) before the message plays."),
     ("max_call_s", "Longest call (s)", 10, 300, "Hang up after this, whatever happens."),
+    ("min_gap_s", "Gap between calls (s)", 0, 60,
+     "Wait at least this long after a call before the next, so the line is released (the HT813 itself "
+     "waits 4 s between outgoing calls)."),
 ]
 DIAL_RE = re.compile(r"^[0-9*#,F]{0,32}$")
 IP_RE = re.compile(r"^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$")
@@ -135,6 +140,11 @@ def parse_tuning(form, cfg, tone_names=None):
         phone["dial_method"] = method
     else:
         errs.append("dial method must be 1-stage or 2-stage")
+    check = form.get("line_check", "retry")
+    if check in ("retry", "warn", "off"):
+        phone["line_check"] = check
+    else:
+        errs.append("line check must be retry, warn or off")
     for key, label, lo, hi, _ in PHONE_NUMBERS:
         try:
             v = int(form.get(key, ""))
@@ -600,6 +610,12 @@ class PageWorker(threading.Thread):
                     ok, detail = pager.page(zone, dial, rec["en"], rec["es"], audio)
                 except Exception as e:  # a pager bug must not stop the worker
                     ok, detail = False, "error: %s" % e
+                if not ok and not dry and self.state_dir and getattr(pager, "last_recording", b""):
+                    try:   # keep what the line did on the failed try, to listen to on the admin page
+                        with open(os.path.join(self.state_dir, "last_failed_page_line.wav"), "wb") as f:
+                            f.write(pager.last_recording)
+                    except OSError as e:
+                        LOG.warning("could not save the failed page's line recording: %s", e)
                 if ok:
                     break
                 LOG.warning("page try %d of %d failed: %s", n, tries, detail)
@@ -917,6 +933,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._back("Phone test not run: no audio to play (%s)" % e)
             LOG.info("phone %s from admin page (%s)", "digit trial %s" % digits if digits else "connection test", who)
             ok, detail = live.connection_test(digits=digits, wav=wav, what=what)
+            if ok and getattr(live, "last_check", ""):
+                detail += " WARNING: " + live.last_check
             LOG.info("phone connection test: %s", detail)
             rec = getattr(live, "last_recording", b"")
             note = ""
@@ -968,7 +986,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._ask_password()
             q = {k: v[0].strip() for k, v in parse_qs(parts.query).items()}
             return self._reply(200, preview_obj(self.app, q))
-        if parts.path in ("/admin/last_phone_test.wav", "/admin/last_page_line.wav"):
+        if parts.path in ("/admin/last_phone_test.wav", "/admin/last_page_line.wav",
+                          "/admin/last_failed_page_line.wav"):
             if not self._admin_ok():
                 return self._ask_password()
             try:
@@ -1245,6 +1264,13 @@ def page_html(app, admin, msg=""):
         ph = cfg["phone"]
         rows = ["<tr><td>HT813 address</td><td><input name=ht813_ip value='%s' required size=15></td>"
                 "<td class=small>The HT813's fixed IP address on the IoT network.</td></tr>" % e(ph["ht813_ip"])]
+        rows.append("<tr><td>Line check after dialing</td><td><select name=line_check>%s</select></td>"
+                    "<td class=small>Listens to the line while waiting after the digits. Dial tone, a busy or "
+                    "reorder tone, or ringing means the page did not open. <b>retry</b>: the page counts as "
+                    "failed and is tried again (up to 3 times). <b>warn</b>: plays anyway and notes it in the "
+                    "log. <b>off</b>: no check. Needs a wait after dialing of at least 400 ms.</td></tr>" % "".join(
+                        "<option%s>%s</option>" % (" selected" if ph.get("line_check", "warn") == m else "", m)
+                        for m in ("retry", "warn", "off")))
         rows.append("<tr><td>Dial method</td><td><select name=dial_method>%s</select></td><td class=small>"
                     "2-stage: the HT813 picks up the ATA2 line, the laptop hears dial tone and sends the "
                     "digits as tones (pauses and flash work). 1-stage: the digits go inside the call and the "
@@ -1336,6 +1362,9 @@ the line. Save any changed settings first.</p>
 <h3>Last live page</h3>
 <p>What the line sent back during the last real (not dry-run) page. Dial digits in use now:
 <b>%s</b>.<br><audio controls preload=none src='/admin/last_page_line.wav'></audio></p>
+<h3>Last failed page try</h3>
+<p>What the line did on the last page try that failed (for example dial tone, busy or ringing after the
+digits):<br><audio controls preload=none src='/admin/last_failed_page_line.wav'></audio></p>
 <p class=small>If the bell pages but real calls don't: try "a full test page" here with the same digits.
 It works: the digits a real call dials are different (see "Dial digits in use now"). It fails: the difference
 is the audio; play "Last phone test" to hear what the line did. To find a page code without paging a message, use the bell. 0-9 * #, comma = half-second pause,

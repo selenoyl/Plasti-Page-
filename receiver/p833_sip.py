@@ -14,6 +14,7 @@
 # Standard library only; Python 3.6+.
 
 import io
+import math
 import random
 import re
 import select
@@ -82,6 +83,62 @@ def pcm_to_wav(pcm):
     return out.getvalue()
 
 
+# ------------------------------------------------------------- line check ---
+# After dialing, listen to what the Norstar line sends back. North American call
+# progress tones: dial tone 350+440 Hz (steady), busy 480+620 (0.5 s on/off),
+# reorder 480+620 (0.25 s), ringback 440+480 (2 s on, 4 s off). An open page is
+# quiet (or a short page beep). 80 ms blocks with a Hann window separate 440/480.
+
+BLOCK = 640
+_HANN = [0.5 - 0.5 * math.cos(2 * math.pi * i / (BLOCK - 1)) for i in range(BLOCK)]
+
+
+def _goertzel(x, freq):
+    k = 2 * math.cos(2 * math.pi * freq / RATE)
+    s1 = s2 = 0.0
+    for v, w in zip(x, _HANN):
+        s0 = v * w + k * s1 - s2
+        s2, s1 = s1, s0
+    return s1 * s1 + s2 * s2 - k * s1 * s2
+
+
+_CAL = _goertzel([math.sin(2 * math.pi * 1000 * i / RATE) for i in range(BLOCK)], 1000)   # unit sine
+
+
+def classify_block(x):
+    """'dial', 'busy', 'ring', 'quiet' or 'other' for one 80 ms block of samples."""
+    ms = sum(v * v for v in x) / len(x)
+    if ms < 150 ** 2:                    # about -47 dBFS: nothing there
+        return "quiet"
+    r = {f: _goertzel(x, f) / (_CAL * 2 * ms) for f in (350, 440, 480, 620)}
+    if r[350] > 0.2 and r[440] > 0.2 and r[480] < 0.12 and r[620] < 0.12:
+        return "dial"
+    if r[480] > 0.2 and r[620] > 0.2 and r[350] < 0.12:
+        return "busy"
+    if r[440] > 0.2 and r[480] > 0.2 and r[350] < 0.12 and r[620] < 0.12:
+        return "ring"
+    return "other"
+
+
+def line_check(ulaw_frames):
+    """Look at what the line sent back while we waited after dialing.
+    Returns '' if nothing says the page failed, or the reason it didn't open."""
+    pcm = b"".join(ulaw_frames)
+    samples = [_ULAW_DECODE[b] for b in pcm]
+    blocks = [samples[i:i + BLOCK] for i in range(0, len(samples) - BLOCK + 1, BLOCK)]
+    if len(blocks) < 5:                  # under 0.4 s heard: not enough to judge
+        return ""
+    kinds = [classify_block(b) for b in blocks]
+    n = float(len(kinds))
+    if kinds.count("dial") / n >= 0.6:
+        return "the line still had dial tone after dialing (the hook flash or the digits weren't taken)"
+    if kinds.count("busy") / n >= 0.3:
+        return "the line sent a busy or reorder tone after dialing (page zone busy, or the code was refused)"
+    if kinds.count("ring") / n >= 0.3:
+        return "the line was ringing after dialing (it called a phone instead of opening the page)"
+    return ""
+
+
 def wav_to_pcm(wav_bytes):
     with wave.open(io.BytesIO(wav_bytes)) as w:
         if (w.getframerate(), w.getsampwidth(), w.getnchannels()) != (RATE, 2, 1):
@@ -147,6 +204,8 @@ class SipPager:
         self.cfg = cfg
         self.log = log or (lambda *a: None)
         self.line = threading.Lock()      # one phone line: one call at a time
+        self.last_end = 0.0               # when the last call hung up (for the gap between calls)
+        self.last_check = ""              # what the line check found on the last call
         self.last_recording = b""         # what the line sent back during the last test (WAV)
 
     # -- the public entry point used by the receiver's page worker
@@ -194,8 +253,9 @@ class SipPager:
             pcm = wav_to_pcm(audio)
             self.last_recording = b""
             secs = self.call(ph, dial, pcm, record=True)     # keep what the line sent back, for checking
-            return True, "dialed %s via HT813 %s, waited %.1f s, played %.0f s" % (
-                dial, ph["ht813_ip"], int(ph["wait_after_dial_ms"]) / 1000.0, secs)
+            warn = ("; WARNING: " + self.last_check) if self.last_check else ""
+            return True, "dialed %s via HT813 %s, waited %.1f s, played %.0f s%s" % (
+                dial, ph["ht813_ip"], int(ph["wait_after_dial_ms"]) / 1000.0, secs, warn)
         except CallFailed as e:
             return False, "phone: %s" % e
         except OSError as e:
@@ -211,6 +271,13 @@ class SipPager:
         # or as a user if one is set. 1-stage: the digits are the user part.
         user = ph.get("ht813_user", "") if two_stage else dial.replace(",", "").replace("F", "")
         me = local_ip_towards(host)
+        # Give the HT813 and the Norstar time to release the line after the last call
+        # (the HT813 waits 4 s between outgoing calls by default).
+        wait = self.last_end + float(ph.get("min_gap_s", 6)) - time.monotonic()
+        if wait > 0:
+            self.log("phone: waiting %.1f s for the line to settle after the last call" % wait)
+            time.sleep(wait)
+        self.last_check = ""
 
         sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sip.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -233,10 +300,19 @@ class SipPager:
                         else:
                             stream.dtmf(DTMF_EVENTS[ch], int(ph["dtmf_ms"]), d)
                             stream.silence(int(ph["dtmf_gap_ms"]), d)
+                mark = len(stream.got)
                 stream.silence(int(ph["wait_after_dial_ms"]), d)
+                if two_stage and dial and ph.get("line_check", "warn") != "off":
+                    found = line_check(stream.got[mark:])
+                    if found:
+                        self.last_check = found
+                        self.log("phone: line check: %s" % found)
+                        if ph.get("line_check", "warn") == "retry":
+                            raise CallFailed("page did not open: " + found)
                 played = stream.play(pcm, d, deadline)
             finally:
                 d.bye()
+                self.last_end = time.monotonic()
                 if record:
                     self.last_recording = pcm_to_wav(stream.heard())
             return played
@@ -389,7 +465,7 @@ class RtpStream:
 
     def __init__(self, sock, far, record=False):
         self.sock, self.far = sock, far
-        self.record = record
+        self.record = True          # always keep what the line sends: the line check needs it
         self.got = []              # PCMU payloads received from the HT813 (what the line sends back)
         self.seq = random.getrandbits(16)
         self.ts = random.getrandbits(32)

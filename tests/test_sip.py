@@ -25,7 +25,7 @@ def tone_wav(seconds):
 def cfg_for(ht, **over):
     ph = {"ht813_ip": "127.0.0.1", "sip_port": ht.port, "local_sip_port": 0, "dial_method": "2-stage",
           "wait_after_answer_ms": 100, "dtmf_ms": 60, "dtmf_gap_ms": 40, "wait_after_dial_ms": 100,
-          "max_call_s": 10, "ht813_user": ""}
+          "max_call_s": 10, "ht813_user": "", "min_gap_s": 0, "line_check": "retry"}
     ph.update(over)
     return {"phone": ph}
 
@@ -104,6 +104,50 @@ class Pager(unittest.TestCase):
         self.assertIn("no dial digits", pager.page("floor", "", "en", "es", tone_wav(0.2))[1])
         self.assertIn("not valid", pager.page("floor", "PAGE1", "en", "es", tone_wav(0.2))[1])
         self.assertEqual(self.ht.invites, [])
+
+    def test_line_check_catches_dial_tone(self):
+        self.ht = FakeHT813(line_tone="dial")
+        ok, detail = S.SipPager(cfg_for(self.ht, wait_after_dial_ms=600)).page("floor", "F61", "en", "es",
+                                                                              tone_wav(0.5))
+        self.assertFalse(ok)
+        self.assertIn("dial tone", detail)
+        self.assertEqual(self.ht.audio_frames, 0)          # the page audio wasn't played into nothing
+        self.assertTrue(self.ht.wait_bye())
+
+    def test_line_check_busy_and_ring(self):
+        for tone_kind, word in (("busy", "busy"), ("ring", "ringing")):
+            ht = FakeHT813(line_tone=tone_kind)
+            try:
+                ok, detail = S.SipPager(cfg_for(ht, wait_after_dial_ms=1000)).page(
+                    "floor", "F61", "en", "es", tone_wav(0.3))
+            finally:
+                ht.close()
+            self.assertFalse(ok, tone_kind)
+            self.assertIn(word, detail)
+
+    def test_line_check_quiet_line_is_ok_and_warn_mode(self):
+        self.ht = FakeHT813(line_tone="quiet")
+        ok, detail = S.SipPager(cfg_for(self.ht, wait_after_dial_ms=600)).page("floor", "F61", "en", "es",
+                                                                              tone_wav(0.3))
+        self.assertTrue(ok, detail)
+        self.assertNotIn("WARNING", detail)
+        ht2 = FakeHT813(line_tone="dial")
+        try:
+            ok, detail = S.SipPager(cfg_for(ht2, wait_after_dial_ms=600, line_check="warn")).page(
+                "floor", "F61", "en", "es", tone_wav(0.3))
+        finally:
+            ht2.close()
+        self.assertTrue(ok)
+        self.assertIn("WARNING: the line still had dial tone", detail)
+
+    def test_gap_between_calls(self):
+        self.ht = FakeHT813()
+        pager = S.SipPager(cfg_for(self.ht, min_gap_s=1.5))
+        pager.page("floor", "61", "en", "es", tone_wav(0.1))
+        t0 = time.monotonic()
+        ok, _ = pager.page("floor", "61", "en", "es", tone_wav(0.1))
+        self.assertTrue(ok)
+        self.assertGreater(time.monotonic() - t0, 1.4)
 
     def test_ulaw(self):
         self.assertEqual(S.pcm16_to_ulaw(b"\x00\x00"), b"\xff")

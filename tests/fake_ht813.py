@@ -16,8 +16,11 @@ EVENT_CHARS.update({10: "*", 11: "#", 16: "F"})
 
 
 class FakeHT813:
-    def __init__(self, mode="answer", hangup_after=0.5):
-        self.mode, self.hangup_after = mode, hangup_after
+    def __init__(self, mode="answer", hangup_after=0.5, line_tone="quiet"):
+        # line_tone: what the "line" sends back during the call: quiet (an open page),
+        # dial (dial tone: flash or digits not taken), busy, or ring (called a phone)
+        self.mode, self.hangup_after, self.line_tone = mode, hangup_after, line_tone
+        self.calls = 0
         self.sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sip.bind(("127.0.0.1", 0))
         self.port = self.sip.getsockname()[1]
@@ -67,6 +70,7 @@ class FakeHT813:
             self.requests.append(first)
             if first.startswith("INVITE "):
                 self.invites.append((first, h, body))
+                self.calls += 1
                 self._peer = (addr, h)
                 if self.mode == "silent":
                     continue
@@ -94,14 +98,24 @@ class FakeHT813:
             elif first.startswith("CANCEL "):
                 self._reply(addr, 200, "OK", h)
 
-    def _send_tone_back(self, far, frames=25):
-        """Send 0.5 s of 'dial tone' back, like the line would."""
-        import math
-        sys_path_payload = bytes((0x55 + int(20 * math.sin(i / 3.0))) & 0xFF for i in range(160))
-        for i in range(frames):
-            if self._stop:
+    def _send_tone_back(self, far, seconds=12):
+        """Send what the line would: quiet, or a call-progress tone, until the call ends."""
+        import math, sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "receiver"))
+        import p833_sip
+        freqs = {"dial": (350, 440), "busy": (480, 620), "ring": (440, 480)}.get(self.line_tone)
+        bye_seen = self.got_bye
+        for i in range(int(seconds / 0.02)):
+            if self._stop or (self.got_bye and not bye_seen):
                 return
-            pkt = struct.pack("!BBHII", 0x80, 0, i, i * 160, 0x1234) + sys_path_payload
+            t0 = i * 160
+            if freqs and (self.line_tone != "busy" or (t0 // 4000) % 2 == 0):   # busy: 0.5 s on/off
+                samples = [int(3000 * sum(math.sin(2 * math.pi * f * (t0 + k) / 8000.0) for f in freqs))
+                           for k in range(160)]
+            else:
+                samples = [0] * 160
+            payload = p833_sip.pcm16_to_ulaw(struct.pack("<160h", *samples))
+            pkt = struct.pack("!BBHII", 0x80, 0, i & 0xFFFF, t0 & 0xFFFFFFFF, 0x1234) + payload
             try:
                 self.rtp.sendto(pkt, far)
             except OSError:
