@@ -63,7 +63,9 @@ def main():
         return 0
 
     base = "http://%s:%d" % (a.host, a.port)
-    boot = "test%04d" % random.randint(0, 9999)
+    # Like a board: a new random boot ID for each run, and calls numbered 1, 2, 3... (the
+    # receiver refuses a number that jumps far past the last one, as a forged message would).
+    boot = "test%08x" % random.getrandbits(32)
 
     if a.heartbeat:
         st, txt = post(base + "/heartbeat", {"board": a.board, "boot": boot, "fw": "test",
@@ -79,7 +81,7 @@ def main():
         p.error("give --code, --all, --heartbeat or --pulses")
 
     failed = 0
-    seq = random.randint(1, 100000)
+    seq = 0
     for i, code in enumerate(codes):
         if i:
             time.sleep(a.gap)

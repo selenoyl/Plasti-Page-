@@ -47,10 +47,10 @@ FILTER = ("silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.0
           "silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.06,areverse,"
           "highpass=f=200,lowpass=f=3400")
 # How a voice should SAY a word it would otherwise mispronounce. Only the
-# recording changes; the page text stays as written.
-PRONOUNCE = {
-    "es": {"Red Rabbit": "Red Rábit"},
-}
+# recording changes; the page text stays as written. One list, shared with the
+# live page voice (receiver/p833_voice.py).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "receiver"))
+from p833_voice import PRONOUNCE  # noqa: E402
 
 
 def spoken(lang, text):

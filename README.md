@@ -15,9 +15,9 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.10.0:** receiving, checking, logging, the admin page (HTTPS),
-paging through the HT813 (working on the floor), the recorded page audio, the voice
-lab and the optional voip.ms texts (off until set up) are in and tested. The whole
+**Status, version 0.11.0:** receiving, checking, logging, the admin page (HTTPS),
+paging through the HT813 (working on the floor), the recorded page audio, the Piper page
+voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
 in dry run: no real page goes out until dry run is turned off on the admin page.
 
@@ -239,6 +239,39 @@ Each call from a cell can also go out as a one-way text, for example
 - On the voip.ms account, turn off international and premium-rate calling if you don't use them, and keep a small prepaid balance with automatic recharge off, so a stolen API password can't run up a big bill.
 - The API password can only be saved over HTTPS (the normal admin page). If the admin page ever shows "not encrypted", the password field is ignored.
 
+## Page voice (choose the voice pages are spoken in)
+
+The **Page voice** box on the admin page sets how pages sound, with Piper on the laptop. It needs Piper
+installed (see "Set up once" under Voice lab).
+
+1. For English and Spanish, pick a **voice**, a **speed** (1 = normal, higher = slower) and how the
+   **press number** is said:
+   - **digit by digit** ticked: "press two, seven"; unticked: "press twenty-seven". English and Spanish each
+     have their own tick box (English is ticked and Spanish isn't, like the recordings).
+   - **Pause between digits**: 0 says them like the recordings ("two, seven"). A number such as 300 says
+     each digit on its own with that many milliseconds of silence between.
+2. **Preview** plays a whole page (tone, English, Spanish, repeats, page volume) for the code and press
+   you pick, in your browser. Nothing is saved or sent.
+3. **Save as the page voice** when it sounds right. From then on:
+   - each page is spoken by Piper as it comes in, and the spoken sentence is kept on the laptop
+     (`/var/lib/p833-receiver/voice_cache`), so the same message plays straight from disk next time;
+   - changing any setting (or the wording in `config.json`) makes new audio for the messages affected;
+   - presses above 100 are spoken properly (the recordings only go to 100), and custom pages are spoken too.
+4. **Make all messages now** (optional) speaks every message (codes 2 to 9, presses 0 to 100, both
+   languages, about 1,600 sentences) in the background, so no page ever waits for Piper. It takes a few
+   minutes, runs at low priority and pauses while a page is going out.
+5. **Go back to the recorded clips** returns to the shipped recordings at any time (your Piper settings stay
+   in the form). **Remove kept audio** clears the kept sentences.
+
+How fast is it? Measured on a 4-core 2.1 GHz Xeon: loading a voice takes about 1.5 s and 200 to 250 MB of
+memory, once; after that a sentence takes about 0.15 s, and a kept sentence about 0.001 s. With the Piper
+voice saved, the laptop keeps both voices loaded (about 300 to 500 MB of memory), so a new message adds well
+under a second to a page. Piper runs at a lower priority than the receiver, so it doesn't hold up the phone
+call. A slower laptop takes longer, so check the first page after saving.
+
+A page never fails because of Piper: if Piper isn't installed, stops, or takes over 15 s, that sentence
+comes from the recorded clips instead, and the call log's detail says so.
+
 ## Voice lab (try voices, speed and pauses)
 
 The last box on the admin page speaks **any text** with Piper (the same offline voices the recordings are
@@ -248,7 +281,7 @@ made with), so you can hear what works on your speakers before the full set is r
 - **Write the text.** Put a pause anywhere as **[350]** (milliseconds). Each part between pauses is spoken on its own, which gives digits a clear, separate sound. For example: `Maintenance requested to press two. [350] Seven.`
 - **Preview** plays it in your browser at the page volume; nothing is sent.
 - **Page it** dials the zone and plays it on the speakers. It works with dry run on, and it is written to the call log (code "voice lab", with the whole text).
-- When something sounds right, tell whoever maintains the recordings the voice, speed and pause, and the full set is re-recorded to match (`tools/make_audio.py`).
+- When something sounds right, set it in the **Page voice** box (above) and save it: pages then use it.
 
 **Set up once** (needs internet, and Python 3.9 or newer; on AlmaLinux 8 run `sudo dnf install -y python3.11` first):
 
@@ -435,7 +468,8 @@ The plan. **Today the laptop, the HT813 and the boards are on the plant network,
 | `install/update.sh` | Fetch the newest version from GitHub, show the changes, ask, and run the installer. |
 | `install/voices.sha256` | Checksums the voice lab installer checks the downloaded voices against. |
 | `receiver/p833_audio.py` | Builds a page from the recorded sentences and tones. |
-| `receiver/p833_tts.py` | Voice lab helper: runs Piper (in its own environment) to speak any text. |
+| `receiver/p833_tts.py` | Piper helper: runs Piper in its own environment; stays running to speak pages and the voice lab. |
+| `receiver/p833_voice.py` | The page voice: saved settings, live speech, the kept audio and Make all messages. |
 | `install/install_tts.sh` | Sets up the Voice lab: Piper and voices. |
 | `tools/make_audio.py` | Records the clips with Piper (run on a PC with internet). |
 | `audio/` | The recorded clips and `manifest.json` (once made). |

@@ -332,6 +332,7 @@ class Server(unittest.TestCase):
         self.worker.start()
         R.Handler.app = {"cfg": cfg, "state": self.state, "worker": self.worker, "key": KEY,
                          "admin_password": ADMIN_PW, "state_dir": self.tmp}
+        R.page_voice(R.Handler.app)                    # as main() does: pages can use the Piper voice
         self.srv = R.Server(("127.0.0.1", 0), R.Handler)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -339,6 +340,8 @@ class Server(unittest.TestCase):
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
+        if R.Handler.app.get("voice"):
+            R.Handler.app["voice"].engine._stop()
         shutil.rmtree(self.tmp)
 
     def post(self, path, body, key=KEY):
@@ -537,6 +540,17 @@ class Server(unittest.TestCase):
         again = R.State(self.cfg, self.tmp, self.tmp)
         self.assertTrue(again.replayed({"board": "RSP_LH", "boot": "b1", "seq": 4}))
         self.assertFalse(again.replayed({"board": "RSP_LH", "boot": "b2", "seq": 1}))
+
+    def test_the_test_sender_tool_is_accepted(self):
+        import subprocess
+        tool = os.path.join(ROOT, "tools", "p833_test_sender.py")
+        for _ in range(2):                                   # two runs, as a person would
+            out = subprocess.run([sys.executable, tool, "--port", str(self.port), "--key", KEY,
+                                  "--board", "RSP_LH", "--code", "3", "--press", "27"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+            self.assertEqual(out.returncode, 0, out.stdout.decode())
+            self.assertIn(": 200 ", out.stdout.decode())
+            self.state.recent.clear()                       # not a repeat of the same call
 
     def test_forged_huge_seq_cannot_silence_a_board(self):
         self.assertEqual(self.call(boot="live", seq=1)[0], 200)
@@ -1080,22 +1094,9 @@ class Server(unittest.TestCase):
 
     # ---- voice lab (with a stand-in for Piper)
     def use_fake_tts(self):
-        stub = os.path.join(self.tmp, "fake_tts.py")
-        with open(stub, "w") as f:
-            f.write("""import io, json, sys, wave
-if sys.argv[1] == "list":
-    print(json.dumps(["en_US-test-voice"])); sys.exit(0)
-req = json.loads(sys.stdin.read())
-if req["voice"] != "en_US-test-voice":
-    sys.stderr.write("voice not installed: %s\\n" % req["voice"]); sys.exit(1)
-n = sum(80 if "text" in s else 8 * s["pause_ms"] for s in req["segments"])
-b = io.BytesIO()
-with wave.open(b, "wb") as w:
-    w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\\x30\\x00" * n)
-sys.stdout.buffer.write(b.getvalue())
-""")
+        """Piper stand-in (tests/fake_piper.py): voices en_US-test-voice, en_US-other-voice, es_MX-test-voice."""
         os.makedirs(os.path.join(self.tmp, "voices"), exist_ok=True)
-        self.cfg["audio"].update(tts_python=sys.executable, tts_script=stub,
+        self.cfg["audio"].update(tts_python=sys.executable, tts_script=os.path.join(HERE, "fake_piper.py"),
                                  tts_voices=os.path.join(self.tmp, "voices"))
 
     def test_piper_gets_no_secrets(self):
@@ -1103,6 +1104,122 @@ sys.stdout.buffer.write(b.getvalue())
         self.addCleanup(os.environ.pop, "P833_TEST_SECRET", None)
         self.assertNotIn("P833_TEST_SECRET", R.tts_env())
         self.assertEqual(sorted(R.tts_env()), ["HOME", "LANG", "LC_ALL", "PATH"])
+
+    # ---- page voice (Piper)
+    VOICE_FORM = {"en_voice": "en_US-test-voice", "en_pace": "1.25", "en_digits": "on", "en_digit_pause_ms": "0",
+                  "es_voice": "es_MX-test-voice", "es_pace": "1.25", "es_digit_pause_ms": "0"}
+
+    def spoken(self):
+        try:
+            with open(os.path.join(self.tmp, "voices", "requests.log"), encoding="utf-8") as f:
+                return [" ".join(x["text"] for x in json.loads(line)["segments"] if "text" in x) for line in f]
+        except OSError:
+            return []
+
+    def test_page_voice_card(self):
+        page = self.admin("/admin")[2]
+        self.assertIn("Page voice", page)
+        self.assertIn("install Piper on this laptop", page)                # not installed yet
+        self.use_fake_tts()
+        page = self.admin("/admin")[2]
+        self.assertIn("Pages now use the recorded clips (as shipped)", page)
+        self.assertIn("name=en_digits checked", page)                       # English digits on by default
+        self.assertIn("name=es_digits>", page)
+
+    def test_save_page_voice_then_pages_are_spoken_and_kept(self):
+        self.use_fake_tts()
+        _, loc, _ = self.admin("/admin/voice/save", self.VOICE_FORM)
+        self.assertIn("Page voice saved", urllib.parse.unquote(loc))
+        self.assertEqual(R.State(self.cfg, self.tmp, self.tmp).settings["voice"]["source"], "piper")  # kept
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        said = self.spoken()
+        self.assertIn("Maintenance requested to press two, seven.", said)
+        self.assertIn("Se solicita mantenimiento en la prensa 27.", said)
+        self.assertEqual(self.wait_row()["result"], "sent")
+        self.post("/call", {"board": "RSP_RH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        self.assertEqual(self.spoken().count("Maintenance requested to press two, seven."), 1)   # kept: not again
+        self.assertEqual(len(self.pager.sent), 2)
+
+    def test_english_digits_tick_box(self):
+        self.use_fake_tts()
+        form = dict(self.VOICE_FORM)
+        del form["en_digits"]
+        self.admin("/admin/voice/save", form)
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        self.assertIn("Maintenance requested to press 27.", self.spoken())
+        self.admin("/admin/voice/save", dict(self.VOICE_FORM, en_digit_pause_ms="300"))
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 2, "code": 3, "press": 41})
+        self.wait_pages()
+        self.assertIn("Technician requested to press four one.", self.spoken())   # two parts, 300 ms apart
+
+    def test_voice_preview_and_bad_settings(self):
+        self.use_fake_tts()
+        st, ctype, body = self.voice_post("/admin/voice/preview", dict(self.VOICE_FORM, code="4", press="12"))
+        self.assertEqual((st, ctype), (200, "audio/wav"))
+        self.assertEqual(R.State(self.cfg, self.tmp, self.tmp).settings.get("voice"), None)   # not saved
+        st, _, body = self.voice_post("/admin/voice/preview", dict(self.VOICE_FORM, en_voice="../../etc/x"))
+        self.assertEqual(st, 400)
+        self.assertIn(b"English voice", body)
+        _, loc, _ = self.admin("/admin/voice/save", dict(self.VOICE_FORM, en_pace="9"))
+        self.assertIn("not saved", urllib.parse.unquote(loc))
+        self.assertEqual(self.pager.sent, [])                                       # previews never page
+
+    def test_back_to_recorded_and_make_all(self):
+        self.use_fake_tts()
+        _, loc, _ = self.admin("/admin/voice/make_all", {})
+        self.assertIn("Save a Piper page voice first", urllib.parse.unquote(loc))
+        self.admin("/admin/voice/save", self.VOICE_FORM)
+        _, loc, _ = self.admin("/admin/voice/make_all", {})
+        self.assertIn("Making every message", urllib.parse.unquote(loc))
+        self.admin("/admin/voice/stop", {})
+        _, loc, _ = self.admin("/admin/voice/recorded", {})
+        self.assertIn("recorded clips again", urllib.parse.unquote(loc))
+        self.assertEqual(self.cfg["audio"]["voice"]["source"], "recorded")
+        self.assertEqual(self.cfg["audio"]["voice"]["en"]["voice"], "en_US-test-voice")   # settings kept
+        n = len(self.spoken())
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 5, "press": 9})
+        self.wait_pages()
+        self.assertEqual(len(self.spoken()), n)                                   # recorded: no Piper
+        self.admin("/admin/voice/clear", {})
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "voice_cache")))
+
+    def test_piper_broken_falls_back_to_recorded(self):
+        self.use_fake_tts()
+        self.admin("/admin/voice/save", self.VOICE_FORM)
+        self.cfg["audio"]["tts_python"] = os.path.join(self.tmp, "gone")               # Piper removed
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        row = self.wait_row()
+        self.assertEqual(row["result"], "sent")                                     # the page still went
+        self.assertIn("recorded clip", row["detail"])
+
+    def test_custom_page_spoken_live(self):
+        self.use_fake_tts()
+        self.admin("/admin/custom", {"zone": "floor", "en": "Lunch truck is here.", "es": "Lleg\u00f3 la comida."})
+        self.wait_pages()
+        self.assertEqual(self.wait_row()["result"], "sent")
+        self.assertIn("Lunch truck is here.", self.spoken())
+        q = urllib.parse.urlencode({"kind": "custom", "zone": "floor", "en": "Hello there."})
+        prev = json.loads(self.admin("/admin/preview?" + q)[2])
+        self.assertIn("/admin/listen?kind=custom", prev["audio"])
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, prev["audio"]), headers={
+            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode()})
+        with urllib.request.urlopen(req) as r:
+            self.assertEqual((r.status, r.read(4)), (200, b"RIFF"))
+
+    def voice_post(self, path, form):
+        url = "http://127.0.0.1:%d%s" % (self.port, path)
+        req = urllib.request.Request(url, data=urllib.parse.urlencode(form).encode(), headers={
+            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode(),
+            "Origin": "http://127.0.0.1:%d" % self.port})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.headers.get("Content-Type"), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Content-Type"), e.read()
 
     def lab_post(self, **form):
         url = "http://127.0.0.1:%d/admin/voicelab" % self.port

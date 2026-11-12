@@ -13,6 +13,12 @@
 #                "segments": [{"text": "Maintenance requested to press two."},
 #                             {"pause_ms": 350}, {"text": "Seven."}]}
 #       stdout: WAV, 8 kHz 16-bit mono, phone band (200-3400 Hz), silence trimmed
+#   <tts venv>/bin/python p833_tts.py serve <voices dir>
+#       Stays running and keeps the voices it has used loaded (loading one takes
+#       a second or two; speaking a sentence then takes a fraction of a second).
+#       Each request is one JSON line on stdin, as for speak. Each answer is one
+#       JSON line on stdout, {"ok": true, "bytes": N} followed by N bytes of WAV,
+#       or {"ok": false, "error": "..."}. Ends when stdin closes.
 #
 # Each text segment is spoken as its own utterance; pauses are exact.
 
@@ -67,13 +73,25 @@ def list_voices(voices_dir):
     return out
 
 
-def speak(voices_dir, req):
-    from piper import PiperVoice, SynthesisConfig
-    voice_name = req["voice"]
+_LOADED = {}            # voice name -> loaded PiperVoice (serve keeps them)
+MAX_LOADED = 4          # about 100 to 250 MB each
+
+
+def load_voice(voices_dir, voice_name):
+    from piper import PiperVoice
     if voice_name not in list_voices(voices_dir):
-        raise SystemExit("voice not installed: %s" % voice_name)
-    voice = PiperVoice.load(os.path.join(voices_dir, voice_name + ".onnx"))
-    syn = SynthesisConfig(length_scale=float(req.get("length_scale", 1.0)))
+        raise ValueError("voice not installed: %s" % voice_name)
+    if voice_name not in _LOADED:
+        if len(_LOADED) >= MAX_LOADED:
+            _LOADED.pop(next(iter(_LOADED)))
+        _LOADED[voice_name] = PiperVoice.load(os.path.join(voices_dir, voice_name + ".onnx"))
+    return _LOADED[voice_name]
+
+
+def speak(voices_dir, req):
+    from piper import SynthesisConfig
+    voice = load_voice(voices_dir, str(req["voice"]))
+    syn = SynthesisConfig(length_scale=max(0.5, min(2.5, float(req.get("length_scale", 1.0)))))
     parts = []
     for seg in req.get("segments", []):
         if "pause_ms" in seg:
@@ -101,15 +119,35 @@ def speak(voices_dir, req):
     return buf.getvalue()
 
 
+def serve(voices_dir):
+    out = sys.stdout.buffer
+    for line in sys.stdin.buffer:
+        if not line.strip():
+            continue
+        try:
+            wav = speak(voices_dir, json.loads(line.decode("utf-8")))
+            head = {"ok": True, "bytes": len(wav)}
+        except Exception as e:          # report it and keep serving
+            wav, head = b"", {"ok": False, "error": "%s: %s" % (e.__class__.__name__, e)}
+        out.write((json.dumps(head) + "\n").encode("utf-8") + wav)
+        out.flush()
+
+
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in ("list", "speak"):
-        raise SystemExit("usage: p833_tts.py list|speak <voices dir>")
+    if len(sys.argv) != 3 or sys.argv[1] not in ("list", "speak", "serve"):
+        raise SystemExit("usage: p833_tts.py list|speak|serve <voices dir>")
     voices_dir = sys.argv[2]
     if sys.argv[1] == "list":
         print(json.dumps(list_voices(voices_dir)))
         return
-    req = json.loads(sys.stdin.read())
-    sys.stdout.buffer.write(speak(voices_dir, req))
+    if sys.argv[1] == "serve":
+        serve(voices_dir)
+        return
+    try:
+        req = json.loads(sys.stdin.read())
+        sys.stdout.buffer.write(speak(voices_dir, req))
+    except ValueError as e:
+        raise SystemExit(str(e))
 
 
 if __name__ == "__main__":

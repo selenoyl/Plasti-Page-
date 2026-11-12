@@ -7,6 +7,10 @@
 # tone, the English sentence, a pause, the Spanish sentence, and the whole thing
 # repeated. Tones are in <audio>/tones/single; a code with no tone gets the chime.
 # Clips may be 16-bit PCM or 8-bit mu-law WAV (phone quality, half the size).
+#
+# With the Piper page voice switched on (admin page, Page voice; see p833_voice.py)
+# the sentences are spoken live instead, and kept; the tones still come from here,
+# and any sentence Piper can't make in time falls back to its recorded clip.
 # Standard library only; Python 3.6+.
 
 import io
@@ -164,6 +168,7 @@ class AudioLibrary:
         self.manifest = {}
         self.cache = {}
         self.load_error = ""
+        self.voice = None          # the Piper page voice (p833_voice.PageVoice), set by the receiver
         try:
             with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
                 self.manifest = json.load(f)
@@ -238,28 +243,64 @@ class AudioLibrary:
             warn.append(key)
         return [key], warn
 
-    def build(self, cfg, code, press):
-        """Return (WAV bytes, list of notes: out-of-date clips, missing tone, ...)."""
-        if self.load_error:
+    def piper_settings(self, vs=None):
+        """The voice settings to speak with, or None when pages use the recorded clips."""
+        if self.voice is None:
+            return None
+        vs = vs or self.voice.settings()
+        return vs if vs["source"] == "piper" else None
+
+    def build(self, cfg, code, press, vs=None, urgent=True, timeout=None):
+        """Return (WAV bytes, list of notes: out-of-date clips, missing tone, Piper fallbacks, ...).
+        vs: voice settings to use instead of the saved ones (a preview)."""
+        vs = self.piper_settings(vs)
+        if self.load_error and not vs:
             raise AudioError(self.load_error)
         opts = cfg.get("audio", {})
         langs = [l for l in ("en", "es") if l in opts.get("languages", ["en", "es"])]
         body, notes = b"", []
-        if press > self.max_press:
-            notes.append("press %d is above the recorded 1-%d, so the page says press number unknown"
-                         % (press, self.max_press))
         for i, lang in enumerate(langs):
-            keys, warn = self.pieces(cfg, code, press, lang)
-            notes += ["clip %s no longer matches the config wording" % k for k in warn]
             if i:
                 body += silence(_gap(cfg, "lang_gap_ms"))
+            if vs:
+                try:
+                    body += self.voice.sentence(lang, code, press, vs=vs, urgent=urgent,
+                                                **({"timeout": timeout} if timeout else {}))
+                    continue
+                except AudioError as e:
+                    notes.append("Piper voice failed (%s), so the %s sentence is the recorded clip" % (e, lang))
+                    if self.load_error:
+                        raise AudioError("%s; and %s" % (e, self.load_error))
+            if press > self.max_press and "press %d is above" % press not in " ".join(notes):
+                notes.append("press %d is above the recorded 1-%d, so the page says press number unknown"
+                             % (press, self.max_press))
+            keys, warn = self.pieces(cfg, code, press, lang)
+            notes += ["clip %s no longer matches the config wording" % k for k in warn]
             for k in keys:
                 body += self._frames(k)
-        lead, tone_notes = self.lead_in(cfg, code)
+        lead, tone_notes = self._lead_in_safe(cfg, code, bool(vs))
         return self._wrap(lead, body, opts), notes + tone_notes
 
-    def build_custom(self, cfg, en, es):
-        raise AudioError("custom text can't be spoken yet: only the recorded messages exist")
+    def _lead_in_safe(self, cfg, code, piper):
+        try:
+            return self.lead_in(cfg, code)
+        except AudioError as e:
+            if not piper:
+                raise
+            return b"", ["no tone (%s)" % e]
+
+    def build_custom(self, cfg, en, es, vs=None):
+        """A page of free text, spoken by Piper with the page voice (or, while pages use the
+        recorded clips, with the voices the clips were made with)."""
+        if self.voice is None or not self.voice.ready():
+            raise AudioError("custom text needs Piper on the laptop (sudo bash install/install_tts.sh)")
+        vs = vs or self.voice.settings()
+        opts = cfg.get("audio", {})
+        body = self.voice.text("en", en, vs=vs)
+        if es and "es" in opts.get("languages", ["en", "es"]):
+            body += silence(_gap(cfg, "lang_gap_ms")) + self.voice.text("es", es, vs=vs)
+        lead, notes = self._lead_in_safe(cfg, None, True)
+        return self._wrap(lead, body, opts)
 
     def _wrap(self, lead, body, opts):
         once = lead + body

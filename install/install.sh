@@ -58,9 +58,13 @@ if [ -e "$APP" ] || [ -e "$ETC" ] || [ -e "$UNIT" ]; then
         tar -C / --exclude="${APP#/}/audio" --exclude="${APP#/}/tts" --exclude="${APP#/}/voices" \
             -cf - "${APP#/}" | tar -C "$BK" -xf -
     fi
-    for p in "$ETC" "$UNIT" /var/log/p833-receiver /var/lib/p833-receiver; do
+    for p in "$ETC" "$UNIT" /var/log/p833-receiver; do
         [ -e "$p" ] && cp -a --parents "$p" "$BK"/
     done
+    # The board list, settings and so on; not the kept page audio (it is made again as needed).
+    if [ -e /var/lib/p833-receiver ]; then
+        tar -C / --exclude=var/lib/p833-receiver/voice_cache -cf - var/lib/p833-receiver | tar -C "$BK" -xf -
+    fi
     chmod 700 "$BK"
     echo "Backed up the old install to $BK"
 fi
