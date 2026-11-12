@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.15.0:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.16.0:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -139,7 +139,7 @@ The admin page is in tabs, so it isn't one long list: **Overview** (dry run, boa
 | Section | What it does |
 |---|---|
 | **Paging page** (Overview tab) | Sets or removes the paging page's own password (see "Paging page"). |
-| **Page wording** (Wording tab) | What each call type says, in English and Spanish, for example the camera fault message (code 8). Put `{press}` where the press number goes. Also the short reason shown on the admin page ("camera fault") and, under "when the press number is unknown", the text for press 0. Saved on the laptop on top of the config file's wording and kept through restarts and updates; **Back to the config file's wording** undoes it. A reworded message is spoken by Piper in the recordings' voice (or in the Page voice, if you use one) and then kept, so the next time plays at once; messages you didn't change keep their recordings. Without Piper on the laptop, the old recording plays and the Audio box says so. Texts use the new wording too. Check a change with the test call **Preview**. |
+| **Page wording** (Wording tab) | What each call type says, in English and Spanish, for example the camera fault message (code 8). Put `{press}` where the press number goes. Also the short reason shown on the admin page and the paging page's buttons ("camera fault"; a Spanish one for the paging page in Spanish, else the built-in translation, such as "falla de cámara") and, under "when the press number is unknown", the text for press 0. Saved on the laptop on top of the config file's wording and kept through restarts and updates; **Back to the config file's wording** undoes it. A reworded message is spoken by Piper in the recordings' voice (or in the Page voice, if you use one) and then kept, so the next time plays at once; messages you didn't change keep their recordings. Without Piper on the laptop, the old recording plays and the Audio box says so. Texts use the new wording too. Check a change with the test call **Preview**. |
 | **Phone and paging setup** | HT813 address and ports, 1-stage or 2-stage dialing, the timing waits, each zone's **dial digits** (0-9 * #, comma = half-second pause, F = hook flash), which zone each code pages, each code's department tone, the tone once, twice or off, the silence at the start, and how many times the message plays. Saved on the laptop on top of the config file's values; **Reset** goes back to the config. |
 | **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
 | **Send a test call** | Pick a board, a call type (2 to 9) and a press. **1. Preview** shows the exact words and plays the exact audio, sending nothing. **2. Send** goes through exactly the same path as a real call from that board, and is logged with the detail "admin page test". |
@@ -153,11 +153,14 @@ With dry run off, every test or custom page is really dialed.
 
 Open `https://<laptop IP>:8833/` (plain `http://` is sent there), on a PC, tablet or phone that can reach the laptop. It is made for the floor:
 
+- **English / Español:** the switch in the top-right corner puts the whole page in English or Spanish: the buttons (Mantenimiento, Técnico, Calidad, Empaque, ...), the help text and the answers. The browser remembers the choice; the first time, it follows the phone's or PC's language. The pages themselves still play in English, then Spanish.
+
 - **Page someone to a press:** tap who (Maintenance, Technician, Supervisor, Quality, Packaging, or one with a reason, such as Maintenance, camera fault), type the press number, check the "Will say" line and tap **Page now**. It asks once more before it pages.
-- **Type a message:** English, and Spanish if you like. It is spoken by the computer voice (Piper) after a chime. Without Piper on the laptop this part is off.
+- **Type a message:** in English, Spanish or both (English plays first). It is spoken by the computer voice (Piper) after a chime. Without Piper on the laptop this part is off.
 - **Recent pages:** the last 8 pages from anywhere, with their result; it updates by itself. **Full log** opens `/log`.
 - Pages from here go to the **floor zone only**, never the office, whatever zone a call type is set to.
-- **Each department can be paged from here once every 5 minutes.** Maintenance covers all three Maintenance buttons (plain, camera fault, Red Rabbit), and Supervisor both of its buttons. A department paged lately is greyed out with "again in N min", and the laptop refuses it too. A page that FAILED doesn't count, so it can be tried again at once. Calls from the boards don't count. The same typed message isn't sent twice within a minute (a double tap).
+- **Each department can be paged from here once every 5 minutes.** Maintenance covers all three Maintenance buttons (plain, camera fault, Red Rabbit), and Supervisor both of its buttons. A department paged lately is greyed out with "again in N min", and the laptop refuses it too. A page that FAILED doesn't count, so it can be tried again at once. Calls from the boards don't count.
+- **One typed message every 5 minutes** from the paging page, whatever the text (all supervisors together), so it can't be used to spam the floor. The message box is greyed out with "You can send another typed message in N min" until then. A typed message that FAILED doesn't count.
 - At most 6 pages a minute leave the paging page in all, and none while 20 pages are already waiting.
 - Pages from here are logged as from "Paging page", with the name the supervisor signed in with, and are texted like board calls when texts are on.
 - In dry run the page says **PRACTICE MODE**: pages are logged, not played.

@@ -1471,11 +1471,11 @@ class Server(unittest.TestCase):
     # ---- the paging page (the home screen) for supervisors
     PAGING_PW = "floor-pass-123"
 
-    def home(self, path, form=None, pw=PAGING_PW, user="Sam", origin="self"):
+    def home(self, path, form=None, pw=PAGING_PW, user="Sam", origin="self", headers=None, want_headers=False):
         """The paging page like a supervisor's browser: their name as the user name."""
         url = "http://127.0.0.1:%d%s" % (self.port, path)
         data = urllib.parse.urlencode(form).encode() if form is not None else None
-        req = urllib.request.Request(url, data=data)
+        req = urllib.request.Request(url, data=data, headers=headers or {})
         if pw is not None:
             req.add_header("Authorization", "Basic " + base64.b64encode(("%s:%s" % (user, pw)).encode()).decode())
         if origin == "self":
@@ -1485,9 +1485,10 @@ class Server(unittest.TestCase):
             req.add_header("Origin", origin)
         try:
             with urllib.request.build_opener(NoRedirect).open(req) as r:
-                return r.status, r.headers.get("Location", ""), r.read().decode()
+                out = r.status, r.headers.get("Location", ""), r.read().decode(), r.headers
         except urllib.error.HTTPError as e:
-            return e.code, e.headers.get("Location", ""), e.read().decode()
+            out = e.code, e.headers.get("Location", ""), e.read().decode(), e.headers
+        return out if want_headers else out[:3]
 
     def home_msg(self, loc):
         """(ok, message) from the paging page's answer to a form."""
@@ -1607,12 +1608,68 @@ class Server(unittest.TestCase):
         row = self.wait_row()
         self.assertEqual((row["code"], row["who"], row["cell"]), ("custom", "Custom", "Paging page"))
         self.assertIn("typed on the paging page by Sam", row["detail"])
-        ok, msg = self.home_msg(self.home("/page/custom", form)[1])
-        self.assertFalse(ok)                                                # a double tap
-        self.assertIn("just sent", msg)
-        for bad in ({"en": "", "es": "Hola"}, {"en": "x" * 201}, {"en": "bell\x07"}):
+        ok, msg = self.home_msg(self.home("/page/custom", {"en": "Another message."})[1])
+        self.assertFalse(ok)                                                # any typed message: 5 minutes
+        self.assertIn("a typed message was sent from here less than 5 minutes ago", msg)
+        page = self.home("/")[2]
+        self.assertIn("<fieldset id=cfs disabled>", page)
+        self.assertIn("You can send another typed message in 5 min.", page)
+        self.assertGreater(json.loads(self.home("/page/live")[2])["wait"]["custom"], 250)
+        ok, msg = self.home_msg(self.home("/page/custom", {"en": "Otro."}, headers={"Cookie": "p833_lang=es"})[1])
+        self.assertIn("ya se envi\u00f3 un mensaje escrito desde aqu\u00ed hace menos de 5 minutos", msg)
+        for bad in ({"en": "", "es": ""}, {"en": " ", "es": " "}, {"en": "x" * 201}, {"es": "x" * 201},
+                    {"en": "bell\x07"}):
             self.assertFalse(self.home_msg(self.home("/page/custom", bad)[1])[0], bad)
         self.assertEqual(len(self.pager.sent), 1)
+        with self.state.lock:                                               # 5 minutes on
+            self.state.home_sent = {k: (t - R.CUSTOM_WAIT_S, rec) for k, (t, rec) in self.state.home_sent.items()}
+        self.assertIn("<fieldset id=cfs>", self.home("/")[2])
+        ok, msg = self.home_msg(self.home("/page/custom", {"en": "", "es": "Junta en la sala a las 3."})[1])
+        self.assertTrue(ok, msg)                                            # Spanish only is fine
+        self.wait_pages()
+        self.assertEqual(self.pager.sent[-1], ("floor", "F,*60,2,1", "", "Junta en la sala a las 3."))
+        self.assertIn("Junta en la sala a las 3.", self.spoken())
+        self.assertEqual(self.wait_row()["message"], "Junta en la sala a las 3.")
+
+    def test_home_screen_in_spanish(self):
+        self.set_paging_pw()
+        st, _, page, hdrs = self.home("/?lang=es", want_headers=True)
+        self.assertEqual(st, 200)
+        self.assertIn("<html lang=es>", page)
+        self.assertIn("p833_lang=es", hdrs["Set-Cookie"])                   # the switch is remembered
+        for words in ("1. \u00bfA qui\u00e9n?", "Mantenimiento", "falla de c\u00e1mara", "Empaque", "Vocear ahora",
+                      "Escribir un mensaje", "Voceos recientes", "class=on aria-current=true>Espa\u00f1ol"):
+            self.assertIn(words, page)
+        self.assertNotIn("Page someone to a press", page)
+        es = {"Cookie": "p833_lang=es"}
+        self.assertIn("Llamar a alguien a una prensa", self.home("/", headers=es)[2])
+        self.assertIn("Llamar a alguien a una prensa", self.home("/", headers={"Accept-Language": "es-MX,es;q=0.9"})[2])
+        self.assertIn("Page someone to a press", self.home("/", headers={"Accept-Language": "en-US,es;q=0.5"})[2])
+        st, _, page, hdrs = self.home("/?lang=en", headers=es, want_headers=True)    # switched back
+        self.assertIn("Page someone to a press", page)
+        self.assertIn("p833_lang=en", hdrs["Set-Cookie"])
+        # the answers are in Spanish too
+        ok, msg = self.send_home(8, 12, headers=es)
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg, "Voceando ahora: Se solicita mantenimiento en la prensa 12 por falla de c\u00e1mara.")
+        self.wait_pages()
+        ok, msg = self.send_home(2, 3, headers=es)
+        self.assertFalse(ok)
+        self.assertIn("a Mantenimiento se le voce\u00f3 desde aqu\u00ed hace menos de 5 minutos", msg)
+        self.assertIn("(a las ", msg)
+        live = json.loads(self.home("/page/live", headers=es)[2])
+        self.assertIn("EN VIVO", live["status"])
+        self.assertIn("Se solicita mantenimiento en la prensa 12 por falla de c\u00e1mara.", live["calls"])
+        self.assertIn("P\u00e1gina de voceo", live["calls"])
+        self.assertIn("enviado", live["calls"])
+        self.assertIn("otra vez en 5 min", self.home("/", headers=es)[2])
+        # a Spanish reason saved on the admin page's Page wording shows on the Spanish buttons
+        self.admin("/admin/wording", self.wording_form(why_es_8="c\u00e1mara ca\u00edda"))
+        page = self.home("/", headers=es)[2]
+        self.assertIn("c\u00e1mara ca\u00edda", page)
+        self.assertIn("camera fault", self.home("/", headers={"Cookie": "p833_lang=en"})[2])
+        # the sign-in answer is in both languages
+        self.assertIn("P\u00e1gina de voceo", self.home("/", pw=None)[2])
 
     def test_home_screen_safety(self):
         self.set_paging_pw()

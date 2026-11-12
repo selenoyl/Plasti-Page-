@@ -574,27 +574,30 @@ class AudioLibrary:
 
     def build_custom(self, cfg, en, es, vs=None, urgent=True):
         """A page of free text, spoken by Piper with the page voice (or, while pages use the
-        recorded clips, with the voices the clips were made with)."""
+        recorded clips, with the voices the clips were made with): English, then Spanish.
+        Either may be empty. If the Spanish fails after the English, the English still goes out."""
         if self.voice is None or not self.voice.ready():
             raise AudioError("custom text needs Piper on the laptop (sudo bash install/install_tts.sh)")
         vs = vs or self.voice.settings()
         opts = cfg.get("audio", {})
         end = time.monotonic() + getattr(self.voice, "page_budget", 10)
-        try:
-            body = self.voice.text("en", en, vs=vs, urgent=urgent, timeout=max(0.0, end - time.monotonic()))
-        except AudioError:
-            raise
-        except Exception as e:
-            raise AudioError("%s: %s" % (e.__class__.__name__, e))
-        body = self.speech(cfg, body)
-        if es and "es" in opts.get("languages", ["en", "es"]):
+        parts = []
+        for lang, text in (("en", en), ("es", es)):
+            if not text or (lang == "es" and en and "es" not in opts.get("languages", ["en", "es"])):
+                continue
             try:
-                body += silence(_gap(cfg, "lang_gap_ms")) + self.speech(cfg, self.voice.text(
-                    "es", es, vs=vs, urgent=urgent, timeout=max(0.0, end - time.monotonic())))
-            except Exception:
-                pass                         # the English part still goes out
+                parts.append(self.speech(cfg, self.voice.text(lang, text, vs=vs, urgent=urgent,
+                                                              timeout=max(0.0, end - time.monotonic()))))
+            except Exception as e:
+                if parts:
+                    continue                 # the English part still goes out
+                if isinstance(e, AudioError):
+                    raise
+                raise AudioError("%s: %s" % (e.__class__.__name__, e))
+        if not parts:
+            raise AudioError("there is no text to speak")
         lead, notes = self._lead_in_safe(cfg, None, True)
-        return self._wrap(lead, body, opts)
+        return self._wrap(lead, silence(_gap(cfg, "lang_gap_ms")).join(parts), opts)
 
     def _wrap(self, lead, body, opts):
         once = lead + body

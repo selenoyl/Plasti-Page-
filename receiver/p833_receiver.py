@@ -44,7 +44,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -629,7 +629,8 @@ class State:
             prev = self.home_sent.get(key)
             if prev and prev[1].get("result") != "FAILED" and now - prev[0] < wait_s:
                 return int(prev[0] + wait_s - now) + 1
-            self.home_sent = {k: v for k, v in self.home_sent.items() if now - v[0] < DEPARTMENT_WAIT_S}
+            keep = max(DEPARTMENT_WAIT_S, CUSTOM_WAIT_S)
+            self.home_sent = {k: v for k, v in self.home_sent.items() if now - v[0] < keep}
             self.home_sent[key] = (now, rec)
             return 0
 
@@ -976,7 +977,7 @@ def lab_wav(app, form):
 
 PAGING_ZONE = "floor"          # pages from the paging page go to this zone only (not the office)
 DEPARTMENT_WAIT_S = 300        # ...and each department (who) from it at most once in this long
-SAME_TEXT_WAIT_S = 60          # the same typed message isn't sent twice in this long (a double tap)
+CUSTOM_WAIT_S = 300            # ...and a typed message from it at most once in this long (any text)
 HOME_RATE_KEY = " paging page"   # its pages count together for MAX_CALLS_PER_MIN (no board ID has a space)
 HOME_RECENT = 8                # recent pages shown on it
 PAGING_PW_MIN, PAGING_PW_MAX = 8, 64
@@ -1059,41 +1060,196 @@ def home_name(user):
     return name if name.isprintable() else ""
 
 
-def wait_text(seconds):
+# Spanish names for the paging page's buttons, when a call type has none of its own
+# (who_es in the config; why_es on the admin page's Page wording).
+SPANISH_NAMES = {"maintenance": "Mantenimiento", "technician": "Técnico", "supervisor": "Supervisor",
+                 "quality": "Calidad", "packaging": "Empaque",
+                 "audit check-in": "revisión de auditoría", "camera fault": "falla de cámara",
+                 "red rabbit failure": "falla de Red Rabbit"}
+
+# The paging page's words, in English and Spanish (the language switch in its corner).
+HOME_TEXT = {
+    "en": {
+        "title": "PLASTI-PAGE Paging",
+        "live": "LIVE: pages play on the floor speakers",
+        "practice": "PRACTICE MODE (dry run): pages are logged, not played",
+        "waiting": "pages waiting to go out: {n}",
+        "full_log": "Full log",
+        "card_page": "Page someone to a press",
+        "who": "1. Who?",
+        "press": "2. Which press?",
+        "press_eg": "e.g. 12",
+        "will_say": "Will say:",
+        "pick": "pick who to page, then the press",
+        "type_press": "type the press number (1 to 999)",
+        "page_now": "Page now",
+        "page_note": "Pages go to the floor speakers. Each department can be paged from here once every {m} minutes.",
+        "again": "again in {n} min",
+        "card_type": "Type a message",
+        "lang_en": "English",
+        "lang_es": "Spanish",
+        "type_note": "Type it in English, Spanish or both. The computer voice says it after a chime, on the floor "
+                     "speakers. One typed message can be sent from here every {m} minutes.",
+        "custom_wait": "You can send another typed message in {n} min.",
+        "page_msg": "Page this message",
+        "no_voice": "Typed messages need the computer voice on the laptop, which isn't installed. Tell the admin.",
+        "card_recent": "Recent pages",
+        "cols": ("Time", "From", "Message", "Result"),
+        "none_yet": "none yet",
+        "results": {"sent": "sent", "dry-run": "practice: not played", "FAILED": "FAILED",
+                    "repeat dropped": "repeat: not sent again"},
+        "from": {},
+        "signed_in": "Signed in as: {name}. Pages you send are logged with this name.",
+        "no_name": "no name (type your name as the user name when you sign in)",
+        "confirm_page": "Page now?",
+        "confirm_msg": "Page this message now?",
+        "type_first": "Type the message first.",
+        "warn_no_floor": "The floor zone isn't set up on the laptop, so nothing can be paged from here. Tell the admin.",
+        "warn_no_dial": "The floor zone has no dial digits yet, so pages will fail. Tell the admin.",
+        "warn_plain": "This page isn't encrypted (no HTTPS certificate on the laptop). Tell the admin.",
+        "ok_live": "Paging now: {text}",
+        "ok_practice": "Practice mode (dry run): logged, not played: {text}",
+        "no_floor": "Not sent: the floor zone isn't set up on the laptop. Tell the admin.",
+        "bad_pick": "Not sent: pick who to page and type the press number (1 to 999).",
+        "too_soon": "Not sent: {who} was paged from here less than {m} minutes ago. You can page {who} again in "
+                    "{when}.",
+        "when": "{n} min (at {t})",
+        "bad_text": "Not sent: type the message in English, Spanish or both, up to 200 characters each.",
+        "no_voice_send": "Not sent: typed messages need the computer voice, which isn't installed on the laptop. "
+                         "Tell the admin.",
+        "too_soon_text": "Not sent: a typed message was sent from here less than {m} minutes ago. You can send "
+                         "another in {when}.",
+        "queue_full": "Not sent: too many pages are waiting to go out. Try again in a minute.",
+        "rate": "Not sent: {n} pages already went out from this page in the last minute. Try again in a minute.",
+        "race": "Not sent: that was just paged from here by someone else.",
+    },
+    "es": {
+        "title": "PLASTI-PAGE Voceo",
+        "live": "EN VIVO: los voceos suenan en las bocinas de la planta",
+        "practice": "MODO DE PRÁCTICA: los voceos se registran, pero no suenan",
+        "waiting": "voceos en espera: {n}",
+        "full_log": "Registro completo",
+        "card_page": "Llamar a alguien a una prensa",
+        "who": "1. ¿A quién?",
+        "press": "2. ¿A qué prensa?",
+        "press_eg": "ej. 12",
+        "will_say": "Dirá:",
+        "pick": "elija a quién llamar y luego la prensa",
+        "type_press": "escriba el número de la prensa (1 a 999)",
+        "page_now": "Vocear ahora",
+        "page_note": "Los voceos salen por las bocinas de la planta. A cada departamento se le puede vocear desde "
+                     "aquí una vez cada {m} minutos.",
+        "again": "otra vez en {n} min",
+        "card_type": "Escribir un mensaje",
+        "lang_en": "Inglés",
+        "lang_es": "Español",
+        "type_note": "Escríbalo en inglés, en español o en los dos. La voz de la computadora lo dice después de "
+                     "un timbre, por las bocinas de la planta. Desde aquí se puede enviar un mensaje escrito cada "
+                     "{m} minutos.",
+        "custom_wait": "Puede enviar otro mensaje escrito en {n} min.",
+        "page_msg": "Vocear este mensaje",
+        "no_voice": "Los mensajes escritos necesitan la voz de la computadora, que no está instalada en la laptop. "
+                    "Avise al administrador.",
+        "card_recent": "Voceos recientes",
+        "cols": ("Hora", "De", "Mensaje", "Resultado"),
+        "none_yet": "ninguno todavía",
+        "results": {"sent": "enviado", "dry-run": "práctica: no sonó", "FAILED": "FALLÓ",
+                    "repeat dropped": "repetido: no se envió otra vez"},
+        "from": {"Paging page": "Página de voceo", "Admin page": "Página de administración"},
+        "signed_in": "Entró como: {name}. Sus voceos se registran con este nombre.",
+        "no_name": "sin nombre (escriba su nombre como usuario al entrar)",
+        "confirm_page": "¿Vocear ahora?",
+        "confirm_msg": "¿Vocear este mensaje ahora?",
+        "type_first": "Primero escriba el mensaje.",
+        "warn_no_floor": "La zona de la planta no está configurada en la laptop, así que no se puede vocear desde "
+                         "aquí. Avise al administrador.",
+        "warn_no_dial": "La zona de la planta todavía no tiene los dígitos para marcar, así que los voceos van a "
+                        "fallar. Avise al administrador.",
+        "warn_plain": "Esta página no está cifrada (no hay certificado HTTPS en la laptop). Avise al administrador.",
+        "ok_live": "Voceando ahora: {text}",
+        "ok_practice": "Modo de práctica: se registró, pero no sonó: {text}",
+        "no_floor": "No se envió: la zona de la planta no está configurada en la laptop. Avise al administrador.",
+        "bad_pick": "No se envió: elija a quién llamar y escriba el número de la prensa (1 a 999).",
+        "too_soon": "No se envió: a {who} se le voceó desde aquí hace menos de {m} minutos. Puede volver a vocear "
+                    "a {who} en {when}.",
+        "when": "{n} min (a las {t})",
+        "bad_text": "No se envió: escriba el mensaje en inglés, en español o en los dos, hasta 200 caracteres "
+                    "cada uno.",
+        "no_voice_send": "No se envió: los mensajes escritos necesitan la voz de la computadora, que no está "
+                         "instalada en la laptop. Avise al administrador.",
+        "too_soon_text": "No se envió: ya se envió un mensaje escrito desde aquí hace menos de {m} minutos. "
+                         "Puede enviar otro en {when}.",
+        "queue_full": "No se envió: hay demasiados voceos en espera. Intente de nuevo en un minuto.",
+        "rate": "No se envió: ya salieron {n} voceos desde esta página en el último minuto. Intente de nuevo en "
+                "un minuto.",
+        "race": "No se envió: alguien más lo acaba de vocear desde aquí.",
+    },
+}
+
+
+def home_text(lang, key, **kw):
+    """One of the paging page's texts in its language (the values go in with str.format)."""
+    t = HOME_TEXT[lang if lang in HOME_TEXT else "en"][key]
+    return t.format(**kw) if kw else t
+
+
+def home_who(c, lang):
+    """A call type's department, as its button says it."""
+    if lang == "es":
+        return c.get("who_es") or SPANISH_NAMES.get(c["who"].lower(), c["who"])
+    return c["who"]
+
+
+def home_why(c, lang):
+    """A call type's reason (camera fault, ...), as its button says it."""
+    why = c.get("why", "")
+    if lang == "es" and why:
+        return c.get("why_es") or SPANISH_NAMES.get(why.lower(), why)
+    return why
+
+
+def wait_text(seconds, lang="en"):
     """'4 min (at 10:42)'"""
-    return "%d min (at %s)" % ((seconds + 59) // 60,
-                               time.strftime("%H:%M", time.localtime(time.time() + seconds)))
+    return home_text(lang, "when", n=(seconds + 59) // 60,
+                     t=time.strftime("%H:%M", time.localtime(time.time() + seconds)))
 
 
-def home_live(app):
+def home_live(app, lang="en"):
     """The parts of the paging page that change by themselves (it fetches them every 10 s):
     the mode line, the recent pages and how long each call type must wait."""
     st, cfg, e = app["state"], app["cfg"], html.escape
+    T = HOME_TEXT[lang]
     with st.lock:
         calls = list(reversed(st.calls))[:HOME_RECENT]
     today = now_text()[:10]
-    shown = {"sent": "sent", "dry-run": "practice: not played", "FAILED": "FAILED",
-             "repeat dropped": "repeat: not sent again"}
-    rows = "".join(
-        "<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
-            "bad" if c.get("result") == "FAILED" else "",
-            e(c.get("time", "")[11:16] if c.get("time", "").startswith(today) else c.get("time", "")[5:16]),
-            e(c.get("cell", "")), e(c.get("message", "")), e(shown.get(c.get("result", ""), c.get("result", ""))))
-        for c in calls)
-    if st.dry_run:
-        mode = ("<span class=mode style='background:var(--warn)'>PRACTICE MODE (dry run): pages are logged, "
-                "not played</span>")
-    else:
-        mode = "<span class=mode style='background:var(--good)'>LIVE: pages play on the floor speakers</span>"
+    rows = []
+    for c in calls:
+        msg, code, press, t = c.get("message", ""), c.get("code", ""), c.get("press", ""), c.get("time", "")
+        if lang == "es" and code.isdigit() and int(code) in cfg["codes"] and press.isdigit():
+            msg = build_message(cfg, int(code), int(press))[1]          # the Spanish sentence of that call
+        rows.append("<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            "bad" if c.get("result") == "FAILED" else "", e(t[11:16] if t.startswith(today) else t[5:16]),
+            e(T["from"].get(c.get("cell", ""), c.get("cell", ""))), e(msg),
+            e(T["results"].get(c.get("result", ""), c.get("result", "")))))
+    mode = "<span class=mode style='background:var(--%s)'>%s</span>" % (
+        ("warn", e(T["practice"])) if st.dry_run else ("good", e(T["live"])))
     waiting = app["worker"].jobs.qsize()
-    return {"status": mode + (" &nbsp; pages waiting to go out: %d" % waiting if waiting else "")
-            + " &nbsp; <a href='/log'>Full log</a>",
-            "calls": rows or "<tr><td colspan=4>none yet</td></tr>",
-            "wait": {str(code): st.home_wait("dept:" + c["who"].lower(), DEPARTMENT_WAIT_S)
-                     for code, c in cfg["codes"].items()}}
+    return {"status": mode + (" &nbsp; " + e(home_text(lang, "waiting", n=waiting)) if waiting else "")
+            + " &nbsp; <a href='/log'>%s</a>" % e(T["full_log"]),
+            "calls": "".join(rows) or "<tr><td colspan=4>%s</td></tr>" % e(T["none_yet"]),
+            "wait": dict({str(code): st.home_wait("dept:" + c["who"].lower(), DEPARTMENT_WAIT_S)
+                          for code, c in cfg["codes"].items()}, custom=st.home_wait("text", CUSTOM_WAIT_S))}
 
 
 HOME_STYLE = """
+body.home{max-width:960px;margin:0 auto;padding:16px;box-sizing:border-box}
+.home .card,.home .msg{max-width:none}
+header.top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+header.top h1{margin:8px 0}
+nav.lang{display:flex;flex-shrink:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+nav.lang a{padding:7px 12px;color:var(--fg);text-decoration:none;font-size:15px}
+nav.lang a.on{background:var(--fg);color:var(--bg);font-weight:bold}
+@media (max-width:480px){header.top h1{font-size:24px} nav.lang a{padding:7px 9px}}
 .card label.tile{display:block;margin:0}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin:6px 0 14px}
 .tile{position:relative}
@@ -1111,36 +1267,43 @@ input.press{font-size:26px;width:5em;padding:6px 8px}
 button.big{font-size:20px;padding:12px 26px;border-radius:8px;margin-top:6px}
 .say{margin:12px 0 6px} #willsay{font-weight:bold}
 .home .card label.text{display:block;margin:6px 0}
+fieldset{border:0;padding:0;margin:0;min-width:0} fieldset:disabled{opacity:.5}
+p.wait{color:var(--warn);font-weight:bold;margin:8px 0 0}
 textarea{width:100%;box-sizing:border-box;font-size:16px;padding:6px;font-family:inherit}
 .msg.err{border-color:var(--warn)}
 """
 
 HOME_JS = """<script>
 (function(){
-  var T=@TEXTS@, f=document.getElementById('pageform'), out=document.getElementById('willsay');
+  var T=@TEXTS@, L=@UI@, f=document.getElementById('pageform'), out=document.getElementById('willsay');
   function picked(){var r=f.querySelector('input[name=code]:checked');return r?r.value:'';}
   function say(){
     var c=picked(), p=parseInt((f.elements.press.value||'').replace(/[^0-9]/g,''),10);
-    if(!c){out.textContent='pick who to page, then the press';return '';}
-    if(!(p>=1&&p<=999)){out.textContent='type the press number (1 to 999)';return '';}
+    if(!c){out.textContent=L.pick;return '';}
+    if(!(p>=1&&p<=999)){out.textContent=L.type_press;return '';}
     var en=T[c].en.split('{press}').join(String(p)), es=T[c].es?T[c].es.split('{press}').join(String(p)):'';
     out.textContent=en+(es?'  /  '+es:'');
-    return en;
+    return out.textContent;
   }
   f.addEventListener('change',say);f.addEventListener('input',say);
-  f.addEventListener('submit',function(ev){var en=say();
-    if(!en||!confirm('Page now?\\n\\n'+en)){ev.preventDefault();}});
+  f.addEventListener('submit',function(ev){var s=say();
+    if(!s||!confirm(L.confirm_page+'\\n\\n'+s)){ev.preventDefault();}});
   var g=document.getElementById('customform');
   if(g){g.addEventListener('submit',function(ev){
-    if(!confirm('Page this message now?\\n\\n'+g.elements.en.value)){ev.preventDefault();}});}
+    var t=[g.elements.en.value.trim(),g.elements.es.value.trim()].filter(Boolean);
+    if(!t.length){alert(L.type_first);ev.preventDefault();return;}
+    if(!confirm(L.confirm_msg+'\\n\\n'+t.join('\\n'))){ev.preventDefault();}});}
   function waits(w){
     var rs=f.querySelectorAll('input[name=code]');
     for(var i=0;i<rs.length;i++){
       var s=w[rs[i].value]||0, n=document.getElementById('w'+rs[i].value);
       rs[i].disabled=s>0;
       if(s>0&&rs[i].checked){rs[i].checked=false;}
-      if(n){n.textContent=s>0?'again in '+Math.ceil(s/60)+' min':'';}
+      if(n){n.textContent=s>0?L.again.split('{n}').join(String(Math.ceil(s/60))):'';}
     }
+    var cfs=document.getElementById('cfs'), cw=document.getElementById('cw'), c=w.custom||0;
+    if(cfs){cfs.disabled=c>0;}
+    if(cw){cw.textContent=c>0?L.custom_wait.split('{n}').join(String(Math.ceil(c/60))):'';}
     say();
   }
   waits(@WAIT@);
@@ -1162,67 +1325,78 @@ def _script_json(obj):
     return json.dumps(obj).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
-def home_html(app, name="", msg="", ok=True):
-    """The paging page (the home screen) for supervisors."""
+def home_html(app, lang="en", name="", msg="", ok=True):
+    """The paging page (the home screen) for supervisors, in English or Spanish."""
     cfg, e = app["cfg"], html.escape
-    live = home_live(app)
+    T = HOME_TEXT[lang]
+    live = home_live(app, lang)
     langs = cfg["audio"].get("languages", ["en", "es"])
     tiles = []
     for code in sorted(cfg["codes"]):
         c, w = cfg["codes"][code], live["wait"][str(code)]
         tiles.append("<label class=tile><input type=radio name=code value=%d required%s>"
                      "<span>%s<small>%s</small><em id=w%d>%s</em></span></label>"
-                     % (code, " disabled" if w else "", e(c["who"]), e(c.get("why", "")), code,
-                        "again in %d min" % ((w + 59) // 60) if w else ""))
+                     % (code, " disabled" if w else "", e(home_who(c, lang)), e(home_why(c, lang)), code,
+                        e(home_text(lang, "again", n=(w + 59) // 60)) if w else ""))
     texts = {str(code): {"en": c["en"], "es": c["es"] if "es" in langs else ""} for code, c in cfg["codes"].items()}
+    ui = {k: T[k] for k in ("pick", "type_press", "again", "confirm_page", "confirm_msg", "type_first", "custom_wait")}
     lib = app["worker"].audio
-    voice_ok = lib.voice is not None and lib.voice.ready()
     warns = []
     if PAGING_ZONE not in cfg["zones"]:
-        warns.append("The floor zone isn't set up on the laptop, so nothing can be paged from here. Tell the admin.")
+        warns.append(T["warn_no_floor"])
     elif not cfg["zones"][PAGING_ZONE].get("dial") and not app["state"].dry_run:
-        warns.append("The floor zone has no dial digits yet, so pages will fail. Tell the admin.")
+        warns.append(T["warn_no_dial"])
     if app.get("https_problem"):
-        warns.append("This page isn't encrypted (no HTTPS certificate on the laptop). Tell the admin.")
-    custom = ("""
-<form method=post action='/page/custom' id=customform>
-<label class=text>English<br><textarea name=en rows=2 maxlength=200 required
- placeholder='The lunch truck is at the north door.'></textarea></label>
-<label class=text>Spanish (optional)<br><textarea name=es rows=2 maxlength=200
- placeholder='El camión de comida está en la puerta norte.'></textarea></label>
-<button class=big>Page this message</button></form>
-<p class=small>Spoken by the computer voice after a chime, on the floor speakers. Leave Spanish empty for
-English only.</p>""" if voice_ok else
-              "<p>Typed messages need the computer voice on the laptop, which isn't installed. Tell the admin.</p>")
-    return """<!doctype html><html><head><meta charset="utf-8">
+        warns.append(T["warn_plain"])
+    boxes = [("en", T["lang_en"], "The lunch truck is at the north door."),
+             ("es", T["lang_es"], "El camión de comida está en la puerta norte.")]
+    if lang == "es":
+        boxes.reverse()                      # your own language first
+    if lib.voice is not None and lib.voice.ready():
+        cw = live["wait"]["custom"]
+        custom = ("\n<form method=post action='/page/custom' id=customform><fieldset id=cfs%s>%s"
+                  "\n<button class=big>%s</button></fieldset></form>\n<p class=wait id=cw>%s</p>\n<p class=small>%s</p>" % (
+                      " disabled" if cw else "",
+                      "".join("\n<label class=text>%s<br><textarea name=%s lang=%s rows=2 maxlength=200 "
+                              "placeholder='%s'></textarea></label>" % (e(label), k, k, e(ph)) for k, label, ph in boxes),
+                      e(T["page_msg"]), e(home_text(lang, "custom_wait", n=(cw + 59) // 60)) if cw else "",
+                      e(home_text(lang, "type_note", m=CUSTOM_WAIT_S // 60))))
+    else:
+        custom = "<p>%s</p>" % e(T["no_voice"])
+    switch = "".join("<a href='/?lang=%s' lang=%s%s>%s</a>" % (
+        k, k, " class=on aria-current=true" if k == lang else "", label) for k, label in (("en", "English"), ("es", "Español")))
+    return """<!doctype html><html lang=%s><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PLASTI-PAGE Paging</title><style>%s%s</style></head><body class=home>
-<h1>PLASTI-PAGE</h1>
+<title>%s</title><style>%s%s</style></head><body class=home>
+<header class=top><h1>PLASTI-PAGE</h1><nav class=lang aria-label='Language / Idioma'>%s</nav></header>
 <p id=statusline>%s</p>
 %s%s
-<div class=card><h2>Page someone to a press</h2>
+<div class=card><h2>%s</h2>
 <form method=post action='/page/send' id=pageform>
-<p class=step>1. Who?</p>
+<p class=step>%s</p>
 <div class=tiles>%s</div>
-<p class=step><label for=press>2. Which press?</label></p>
-<input id=press name=press class=press type=number inputmode=numeric min=1 max=999 required placeholder='e.g. 12'>
-<p class=say>Will say: <span id=willsay>pick who to page, then the press</span></p>
-<button class=big>Page now</button></form>
-<p class=small>Pages go to the floor speakers. Each department can be paged from here once every %d minutes.</p>
+<p class=step><label for=press>%s</label></p>
+<input id=press name=press class=press type=number inputmode=numeric min=1 max=999 required placeholder='%s'>
+<p class=say>%s <span id=willsay>%s</span></p>
+<button class=big>%s</button></form>
+<p class=small>%s</p>
 </div>
-<div class=card><h2>Type a message</h2>%s</div>
-<div class=card><h2>Recent pages</h2>
-<div class=w><table><thead><tr><th>Time</th><th>From</th><th>Message</th><th>Result</th></tr></thead>
+<div class=card><h2>%s</h2>%s</div>
+<div class=card><h2>%s</h2>
+<div class=w><table><thead><tr>%s</tr></thead>
 <tbody id=recent>%s</tbody></table></div></div>
-<p class=small>Signed in as: %s. Pages you send are logged with this name.</p>
+<p class=small>%s</p>
 <footer class=credit>ETHAN BRADY &amp; RYAN RAIKES</footer>
 %s</body></html>""" % (
-        PAGE_STYLE, HOME_STYLE, live["status"],
+        lang, e(T["title"]), PAGE_STYLE, HOME_STYLE, switch, live["status"],
         "<div class='msg%s'>%s</div>" % ("" if ok else " err", e(msg)) if msg else "",
         "".join("<div class='msg err'>%s</div>" % e(w) for w in warns),
-        "\n".join(tiles), DEPARTMENT_WAIT_S // 60, custom, live["calls"],
-        e(name) if name else "no name (type your name as the user name when you sign in)",
-        HOME_JS.replace("@TEXTS@", _script_json(texts)).replace("@WAIT@", _script_json(live["wait"])))
+        e(T["card_page"]), e(T["who"]), "\n".join(tiles), e(T["press"]), e(T["press_eg"]), e(T["will_say"]),
+        e(T["pick"]), e(T["page_now"]), e(home_text(lang, "page_note", m=DEPARTMENT_WAIT_S // 60)),
+        e(T["card_type"]), custom, e(T["card_recent"]), "".join("<th>%s</th>" % e(x) for x in T["cols"]),
+        live["calls"], e(home_text(lang, "signed_in", name=name or T["no_name"])),
+        HOME_JS.replace("@TEXTS@", _script_json(texts)).replace("@UI@", _script_json(ui))
+        .replace("@WAIT@", _script_json(live["wait"])))
 
 
 def paging_card(app):
@@ -1238,8 +1412,8 @@ def paging_card(app):
     return """
 <div class=card><h2>Paging page</h2>
 <p>The home screen (<a href='/'>open it</a>) is the paging page for supervisors: they pick who to page and the
-press, or type a message. Its pages go to the floor zone only, and each department can be paged from it once
-every %d minutes. Its password is %s.</p>
+press, or type a message. Its pages go to the floor zone only; each department can be paged from it once
+every %d minutes, and one typed message can be sent from it every %d minutes. Its password is %s.</p>
 <form method=post action='/admin/paging'>
 <label>New paging password <input name=password type=password required minlength=%d maxlength=%d
  autocomplete=new-password></label> <button>Save the paging password</button></form>%s
@@ -1247,7 +1421,7 @@ every %d minutes. Its password is %s.</p>
 password; the browser can remember both. The admin password opens the paging page too. Only a hash of the
 password is kept on the laptop, so it can't be shown again: to change it, save a new one. It is saved only
 over HTTPS (or on the laptop itself). The open log of boards and calls is at <a href='/log'>/log</a>.</p></div>
-""" % (DEPARTMENT_WAIT_S // 60, state, PAGING_PW_MIN, PAGING_PW_MAX, remove)
+""" % (DEPARTMENT_WAIT_S // 60, CUSTOM_WAIT_S // 60, state, PAGING_PW_MIN, PAGING_PW_MAX, remove)
 
 
 # ------------------------------------------------------------ web server ---
@@ -1373,8 +1547,22 @@ class Handler(BaseHTTPRequestHandler):
         if locked:
             return self._reply(429, b"Too many wrong passwords from this address. Try again in 10 minutes.",
                                "text/plain")
-        return self._reply(401, b"Paging page: sign in with your name as the user name and the paging password.",
-                           "text/plain", {"WWW-Authenticate": 'Basic realm="PLASTI-PAGE paging page"'})
+        return self._reply(401, ("Paging page: sign in with your name as the user name and the paging password.\n"
+                                 "P\u00e1gina de voceo: entre con su nombre como usuario y la contrase\u00f1a de voceo."
+                                 ).encode("utf-8"), "text/plain; charset=utf-8",
+                           {"WWW-Authenticate": 'Basic realm="PLASTI-PAGE paging page"'})
+
+    def _home_lang(self, query=None):
+        """The paging page's language: ?lang=en|es, else the p833_lang cookie (set by its
+        language switch), else the browser's first language (Spanish if it is es), else English."""
+        q = (query or {}).get("lang", [""])[0]
+        if q in HOME_TEXT:
+            return q
+        m = re.search(r"(?:^|;)\s*p833_lang=(en|es)\s*(?:;|$)", self.headers.get("Cookie", ""))
+        if m:
+            return m.group(1)
+        first = self.headers.get("Accept-Language", "").split(",")[0].strip().lower()
+        return "es" if first.startswith("es") else "en"
 
     def _home_back(self, msg, ok):
         return self._reply(303, b"", "text/plain",
@@ -1470,7 +1658,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _home_post(self, path):
         """A page from the paging page: someone to a press, or a typed message. Floor zone only;
-        each department at most once every DEPARTMENT_WAIT_S from here."""
+        each department at most once every DEPARTMENT_WAIT_S from here. Answers in the page's
+        language."""
         user = self._login(paging=True)
         if user is None:
             return self._ask_paging_password()
@@ -1479,58 +1668,59 @@ class Handler(BaseHTTPRequestHandler):
         raw = self._raw_body()
         form = {k: v[0].strip() for k, v in parse_qs((raw or b"").decode("utf-8", "replace")).items()}
         app, st, cfg = self.app, self.app["state"], self.app["cfg"]
+        lang = self._home_lang()
+
+        def say(key, **kw):
+            return home_text(lang, key, **kw)
+
         name = home_name(user)
         if PAGING_ZONE not in cfg["zones"]:
-            return self._home_back("Not sent: the floor zone isn't set up on the laptop. Tell the admin.", False)
+            return self._home_back(say("no_floor"), False)
         if path == "/page/send":
             try:
                 code, press = int(form.get("code", "")), int(form.get("press", ""))
             except ValueError:
                 code, press = None, 0
             if code not in cfg["codes"] or not 1 <= press <= 999:
-                return self._home_back("Not sent: pick who to page and type the press number (1 to 999).", False)
+                return self._home_back(say("bad_pick"), False)
             c = cfg["codes"][code]
             key, wait_s = "dept:" + c["who"].lower(), DEPARTMENT_WAIT_S
             wait = st.home_wait(key, wait_s)
             if wait:
-                return self._home_back("Not sent: %s was paged from here less than %d minutes ago. You can page "
-                                       "%s again in %s." % (c["who"], wait_s // 60, c["who"], wait_text(wait)),
-                                       False)
+                return self._home_back(say("too_soon", who=home_who(c, lang), m=wait_s // 60,
+                                           when=wait_text(wait, lang)), False)
             en, es = build_message(cfg, code, press)
             rec = {"time": now_text(), "board": "paging", "cell": "Paging page", "press": press, "code": code,
                    "who": c["who"], "message": en, "en": en, "es": es, "zone": PAGING_ZONE,
                    "note": "from the paging page" + (" by %s" % name if name else "")}
         elif path == "/page/custom":
             en, es = " ".join(form.get("en", "").split()), " ".join(form.get("es", "").split())
-            if not en or len(en) > 200 or len(es) > 200 or not (en + es).isprintable():
-                return self._home_back("Not sent: type the message in English (Spanish is optional), up to 200 "
-                                       "characters each.", False)
+            if not (en or es) or len(en) > 200 or len(es) > 200 or not (en + es).isprintable():
+                return self._home_back(say("bad_text"), False)
             lib = app["worker"].audio
             if lib.voice is None or not lib.voice.ready():
-                return self._home_back("Not sent: typed messages need the computer voice, which isn't installed "
-                                       "on the laptop. Tell the admin.", False)
-            key, wait_s = "text:" + (en + "|" + es).lower(), SAME_TEXT_WAIT_S
-            if st.home_wait(key, wait_s):
-                return self._home_back("Not sent again: that message was just sent.", False)
+                return self._home_back(say("no_voice_send"), False)
+            key, wait_s = "text", CUSTOM_WAIT_S
+            wait = st.home_wait(key, wait_s)
+            if wait:
+                return self._home_back(say("too_soon_text", m=wait_s // 60, when=wait_text(wait, lang)), False)
             rec = {"time": now_text(), "board": "paging", "cell": "Paging page", "press": "", "code": "custom",
-                   "who": "Custom", "message": en, "en": en, "es": es, "zone": PAGING_ZONE,
+                   "who": "Custom", "message": en or es, "en": en, "es": es, "zone": PAGING_ZONE,
                    "note": "typed on the paging page" + (" by %s" % name if name else "")}
         else:
             return self._reply(404, {"ok": False, "error": "not found"})
         if app["worker"].jobs.qsize() >= MAX_WAITING_PAGES:
-            return self._home_back("Not sent: too many pages are waiting to go out. Try again in a minute.", False)
+            return self._home_back(say("queue_full"), False)
         if st.too_fast(HOME_RATE_KEY):
-            return self._home_back("Not sent: %d pages already went out from this page in the last minute. "
-                                   "Try again in a minute." % MAX_CALLS_PER_MIN, False)
+            return self._home_back(say("rate", n=MAX_CALLS_PER_MIN), False)
         if st.claim_home(key, wait_s, rec):           # someone else sent it a moment ago
-            return self._home_back("Not sent: that was just paged from here by someone else.", False)
-        LOG.info("PAGE from the paging page (%s): %s%s", name or "no name given", en, " | " + es if es else "")
+            return self._home_back(say("race"), False)
+        LOG.info("PAGE from the paging page (%s): %s", name or "no name given", " | ".join(x for x in (en, es) if x))
         app["worker"].jobs.put(rec)
         if app.get("sms"):
             app["sms"].text_for_call(rec)
-        if st.dry_run:
-            return self._home_back("Practice mode (dry run): logged, not played: " + en, True)
-        return self._home_back("Paging now: " + en, True)
+        shown = (es or en) if lang == "es" else (en or es)
+        return self._home_back(say("ok_practice" if st.dry_run else "ok_live", text=shown), True)
 
     def _admin_post(self, path):
         if not self._admin_ok():
@@ -1857,12 +2047,18 @@ class Handler(BaseHTTPRequestHandler):
             if user is None:
                 return self._ask_paging_password()
             q = parse_qs(parts.query)
-            return self._reply(200, home_html(self.app, home_name(user), q.get("msg", [""])[0],
-                                              q.get("ok", ["1"])[0] == "1").encode(), "text/html; charset=utf-8")
+            lang = self._home_lang(q)
+            cookie = {}
+            if q.get("lang", [""])[0] in HOME_TEXT:      # the language switch: remembered in this browser
+                cookie["Set-Cookie"] = "p833_lang=%s; Path=/; Max-Age=31536000; SameSite=Lax%s" % (
+                    lang, "; Secure" if self._https() else "")
+            return self._reply(200, home_html(self.app, lang, home_name(user), q.get("msg", [""])[0],
+                                              q.get("ok", ["1"])[0] == "1").encode(), "text/html; charset=utf-8",
+                               cookie)
         if parts.path == "/page/live":
             if self._login(paging=True) is None:
                 return self._ask_paging_password()
-            return self._reply(200, home_live(self.app))
+            return self._reply(200, home_live(self.app, self._home_lang()))
         if parts.path == "/admin/live":
             if not self._admin_ok():
                 return self._ask_password()
@@ -2284,7 +2480,7 @@ carrier doesn't flag a burst or a fixed rhythm as spam.</td></tr>
        "\n".join(rows) or "<tr><td colspan=4>none yet</td></tr>")
 
 
-WORDING_FIELDS = ("why", "en", "es", "en_no_press", "es_no_press")
+WORDING_FIELDS = ("why", "why_es", "en", "es", "en_no_press", "es_no_press")
 
 
 def apply_wording(cfg, wording):
@@ -2313,10 +2509,11 @@ def parse_wording(form, cfg):
         for f in WORDING_FIELDS:
             key = "%s_%d" % (f, code)
             v = " ".join(str(form.get(key, "")).split())         # (an emptied field isn't sent)
-            label = "code %d %s" % (code, {"why": "reason", "en": "English", "es": "Spanish",
+            label = "code %d %s" % (code, {"why": "reason", "why_es": "reason (Spanish)", "en": "English",
+                                            "es": "Spanish",
                                             "en_no_press": "English (no press number)",
                                             "es_no_press": "Spanish (no press number)"}[f])
-            limit = 40 if f == "why" else 200
+            limit = 40 if f in ("why", "why_es") else 200
             if len(v) > limit or not v.isprintable():
                 errs.append("%s: up to %d characters" % (label, limit))
             elif f in ("en", "es") and v.count("{press}") != 1:
@@ -2339,24 +2536,28 @@ def wording_html(app):
     for code in sorted(cfg["codes"]):
         c = cfg["codes"][code]
         rows.append(
-            "<tr><td><b>%d</b><br>%s</td><td><input name=why_%d value='%s' size=14 maxlength=40 placeholder='(none)'></td>"
+            "<tr><td><b>%d</b><br>%s</td><td><input name=why_%d value='%s' size=14 maxlength=40 placeholder='(none)'><br>"
+            "<input name=why_es_%d value='%s' size=14 maxlength=40 placeholder='%s'></td>"
             "<td><input class=wtxt name=en_%d value='%s' maxlength=200 required><br>"
             "<input class=wtxt name=es_%d value='%s' maxlength=200 required>"
             "<details><summary class=small>when the press number is unknown</summary>"
             "<input class=wtxt name=en_no_press_%d value='%s' maxlength=200 placeholder='(English: as above)'><br>"
             "<input class=wtxt name=es_no_press_%d value='%s' maxlength=200 placeholder='(Spanish: as above)'>"
             "</details></td></tr>"
-            % (code, e(c["who"]), code, e(c.get("why", "")), code, e(c["en"]), code, e(c["es"]),
+            % (code, e(c["who"]), code, e(c.get("why", "")), code, e(c.get("why_es", "")),
+               e("(Spanish: %s)" % SPANISH_NAMES[c["why"].lower()] if c.get("why", "").lower() in SPANISH_NAMES
+                 else "(Spanish)"), code, e(c["en"]), code, e(c["es"]),
                code, e(c.get("en_no_press", "")), code, e(c.get("es_no_press", ""))))
     return """
 <div class=card><h2>Page wording</h2>
 <p>%s</p>
 <p class=small>What each call type says. Put <b>{press}</b> where the press number goes. The reason is the
-short label shown on this page (for example "camera fault"). Texts follow the wording here too. A message you
+short label shown on this page and on the paging page's buttons (for example "camera fault"; the Spanish
+one is for the paging page in Spanish). Texts follow the wording here too. A message you
 reword is spoken by Piper in the recordings' voice (or in the Page voice, if you use one); a message you leave
 alone keeps playing its recording. Check a change with the test call Preview.</p>
 <form method=post action='/admin/wording'><div class=w><table>
-<tr><th>Code</th><th>Reason</th><th>English, then Spanish</th></tr>
+<tr><th>Code</th><th>Reason (English, then Spanish)</th><th>English, then Spanish</th></tr>
 %s</table></div><button>Save the wording</button></form>
 <form method=post action='/admin/wording/reset' style='margin-top:8px'
  onsubmit="return confirm('Go back to the wording in the config file?')"><button>Back to the config file's wording</button></form>
