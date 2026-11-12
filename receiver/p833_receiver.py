@@ -15,6 +15,7 @@
 import argparse
 import base64
 import csv
+import hashlib
 import hmac
 import html
 import io
@@ -43,7 +44,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -359,6 +360,7 @@ class State:
         self.ui_boot = "admin-%x" % int(time.time())   # admin test calls: unique per start
         self.boots = {}       # board -> [[boot, highest seq accepted], ...] newest last (kept across restarts)
         self.rate = {}        # board -> times of accepted calls in the last minute
+        self.home_sent = {}   # paging page: "dept:<who>" or "text:<message>" -> (time, its page record)
         self.heard_file = os.path.join(state_dir, "boards.json")
         self.boots_file = os.path.join(state_dir, "seen_calls.json")
         self.registry_file = os.path.join(state_dir, "board_list.json")
@@ -608,6 +610,28 @@ class State:
                 return True
             times.append(now)
             return False
+
+    def home_wait(self, key, wait_s):
+        """Seconds before the paging page may send `key` (a department, or a typed message)
+        again; 0 = now. A page that FAILED doesn't count."""
+        now = time.time()
+        with self.lock:
+            prev = self.home_sent.get(key)
+        if not prev or prev[1].get("result") == "FAILED" or now - prev[0] >= wait_s:
+            return 0
+        return int(prev[0] + wait_s - now) + 1
+
+    def claim_home(self, key, wait_s, rec):
+        """Note that the paging page is sending rec as `key`. Returns 0, or the seconds left
+        when the same was sent a moment ago (two supervisors at once)."""
+        now = time.time()
+        with self.lock:
+            prev = self.home_sent.get(key)
+            if prev and prev[1].get("result") != "FAILED" and now - prev[0] < wait_s:
+                return int(prev[0] + wait_s - now) + 1
+            self.home_sent = {k: v for k, v in self.home_sent.items() if now - v[0] < DEPARTMENT_WAIT_S}
+            self.home_sent[key] = (now, rec)
+            return 0
 
     def is_repeat(self, call):
         """True if this exact message, or the same call, was already accepted."""
@@ -946,6 +970,286 @@ def lab_wav(app, form):
     return lib._wrap(lead, lib.speech(cfg, body), dict(cfg["audio"], repeat=plays, lead_silence_ms=0))
 
 
+# ------------------------------------------------------------ paging page ---
+# The home screen: supervisors page someone to a press, or type a message, to the floor.
+# It needs its own password (set on the admin page) or the admin password.
+
+PAGING_ZONE = "floor"          # pages from the paging page go to this zone only (not the office)
+DEPARTMENT_WAIT_S = 300        # ...and each department (who) from it at most once in this long
+SAME_TEXT_WAIT_S = 60          # the same typed message isn't sent twice in this long (a double tap)
+HOME_RATE_KEY = " paging page"   # its pages count together for MAX_CALLS_PER_MIN (no board ID has a space)
+HOME_RECENT = 8                # recent pages shown on it
+PAGING_PW_MIN, PAGING_PW_MAX = 8, 64
+PAGING_PW_ITERATIONS = 200000  # PBKDF2-SHA256 rounds for the stored hash
+
+
+class PagingPassword:
+    """The paging page's own password, set on the admin page. Only a salted PBKDF2 hash is
+    kept (in the state folder, readable by this service only), so it can't be read back."""
+
+    def __init__(self, path):
+        self.path = path
+        self.memo = None       # a quick digest of the last password that checked out (skips PBKDF2)
+        self.rec = self._read()
+
+    def _read(self):
+        if not os.path.exists(self.path):
+            return None
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                rec = json.load(f)
+            bytes.fromhex(rec["salt"])
+            bytes.fromhex(rec["hash"])
+            if not isinstance(rec["iterations"], int) or rec["iterations"] < 1000:
+                raise ValueError("iterations")
+            return rec
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            LOG.warning("paging page password file %s can't be used (%s): set the password again on the "
+                        "admin page", self.path, e)
+            return None
+
+    def is_set(self):
+        return self.rec is not None
+
+    def check(self, pw):
+        rec = self.rec
+        if rec is None or not pw:
+            return False
+        salt, given = bytes.fromhex(rec["salt"]), pw.encode("utf-8")
+        quick = hashlib.sha256(salt + given).digest()
+        if self.memo is not None and hmac.compare_digest(quick, self.memo):
+            return True
+        if hmac.compare_digest(hashlib.pbkdf2_hmac("sha256", given, salt, rec["iterations"]),
+                               bytes.fromhex(rec["hash"])):
+            self.memo = quick
+            return True
+        return False
+
+    def set(self, pw):
+        """Save a new password, or with '' remove it."""
+        if not pw:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+            self.rec, self.memo = None, None
+            return
+        salt = os.urandom(16)
+        rec = {"salt": salt.hex(), "iterations": PAGING_PW_ITERATIONS, "set": now_text(),
+               "hash": hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt, PAGING_PW_ITERATIONS).hex()}
+        tmp = self.path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+        self.rec, self.memo = rec, None
+
+
+def paging_password(app):
+    """The paging page's password (main() makes it; read on first use otherwise)."""
+    if app.get("paging") is None:
+        app["paging"] = PagingPassword(os.path.join(app["state_dir"], "paging_password.json"))
+    return app["paging"]
+
+
+def home_name(user):
+    """The name typed as the user name at the paging page's login, for the log."""
+    name = " ".join(str(user or "").split())[:40]
+    return name if name.isprintable() else ""
+
+
+def wait_text(seconds):
+    """'4 min (at 10:42)'"""
+    return "%d min (at %s)" % ((seconds + 59) // 60,
+                               time.strftime("%H:%M", time.localtime(time.time() + seconds)))
+
+
+def home_live(app):
+    """The parts of the paging page that change by themselves (it fetches them every 10 s):
+    the mode line, the recent pages and how long each call type must wait."""
+    st, cfg, e = app["state"], app["cfg"], html.escape
+    with st.lock:
+        calls = list(reversed(st.calls))[:HOME_RECENT]
+    today = now_text()[:10]
+    shown = {"sent": "sent", "dry-run": "practice: not played", "FAILED": "FAILED",
+             "repeat dropped": "repeat: not sent again"}
+    rows = "".join(
+        "<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            "bad" if c.get("result") == "FAILED" else "",
+            e(c.get("time", "")[11:16] if c.get("time", "").startswith(today) else c.get("time", "")[5:16]),
+            e(c.get("cell", "")), e(c.get("message", "")), e(shown.get(c.get("result", ""), c.get("result", ""))))
+        for c in calls)
+    if st.dry_run:
+        mode = ("<span class=mode style='background:var(--warn)'>PRACTICE MODE (dry run): pages are logged, "
+                "not played</span>")
+    else:
+        mode = "<span class=mode style='background:var(--good)'>LIVE: pages play on the floor speakers</span>"
+    waiting = app["worker"].jobs.qsize()
+    return {"status": mode + (" &nbsp; pages waiting to go out: %d" % waiting if waiting else "")
+            + " &nbsp; <a href='/log'>Full log</a>",
+            "calls": rows or "<tr><td colspan=4>none yet</td></tr>",
+            "wait": {str(code): st.home_wait("dept:" + c["who"].lower(), DEPARTMENT_WAIT_S)
+                     for code, c in cfg["codes"].items()}}
+
+
+HOME_STYLE = """
+.card label.tile{display:block;margin:0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin:6px 0 14px}
+.tile{position:relative}
+.tile input{position:absolute;opacity:0;width:1px;height:1px;margin:0}
+.tile span{display:flex;flex-direction:column;justify-content:center;box-sizing:border-box;height:100%;
+ min-height:64px;padding:10px;border:2px solid var(--line);border-radius:10px;background:var(--bg);
+ text-align:center;font-size:18px;font-weight:bold;cursor:pointer}
+.tile small{font-weight:normal;font-size:14px}
+.tile em{font-style:normal;font-weight:normal;font-size:13px;color:var(--warn)}
+.tile input:checked+span{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.tile input:focus-visible+span{outline:3px solid var(--warn);outline-offset:2px}
+.tile input:disabled+span{opacity:.5;cursor:not-allowed}
+.step{font-weight:bold;font-size:17px;margin:12px 0 4px}
+input.press{font-size:26px;width:5em;padding:6px 8px}
+button.big{font-size:20px;padding:12px 26px;border-radius:8px;margin-top:6px}
+.say{margin:12px 0 6px} #willsay{font-weight:bold}
+.home .card label.text{display:block;margin:6px 0}
+textarea{width:100%;box-sizing:border-box;font-size:16px;padding:6px;font-family:inherit}
+.msg.err{border-color:var(--warn)}
+"""
+
+HOME_JS = """<script>
+(function(){
+  var T=@TEXTS@, f=document.getElementById('pageform'), out=document.getElementById('willsay');
+  function picked(){var r=f.querySelector('input[name=code]:checked');return r?r.value:'';}
+  function say(){
+    var c=picked(), p=parseInt((f.elements.press.value||'').replace(/[^0-9]/g,''),10);
+    if(!c){out.textContent='pick who to page, then the press';return '';}
+    if(!(p>=1&&p<=999)){out.textContent='type the press number (1 to 999)';return '';}
+    var en=T[c].en.split('{press}').join(String(p)), es=T[c].es?T[c].es.split('{press}').join(String(p)):'';
+    out.textContent=en+(es?'  /  '+es:'');
+    return en;
+  }
+  f.addEventListener('change',say);f.addEventListener('input',say);
+  f.addEventListener('submit',function(ev){var en=say();
+    if(!en||!confirm('Page now?\\n\\n'+en)){ev.preventDefault();}});
+  var g=document.getElementById('customform');
+  if(g){g.addEventListener('submit',function(ev){
+    if(!confirm('Page this message now?\\n\\n'+g.elements.en.value)){ev.preventDefault();}});}
+  function waits(w){
+    var rs=f.querySelectorAll('input[name=code]');
+    for(var i=0;i<rs.length;i++){
+      var s=w[rs[i].value]||0, n=document.getElementById('w'+rs[i].value);
+      rs[i].disabled=s>0;
+      if(s>0&&rs[i].checked){rs[i].checked=false;}
+      if(n){n.textContent=s>0?'again in '+Math.ceil(s/60)+' min':'';}
+    }
+    say();
+  }
+  waits(@WAIT@);
+  setInterval(function(){
+    if(document.hidden){return;}
+    fetch('/page/live',{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null;}).then(function(p){
+      if(!p){return;}
+      document.getElementById('statusline').innerHTML=p.status;
+      document.getElementById('recent').innerHTML=p.calls;
+      waits(p.wait);
+    }).catch(function(){});
+  },10000);
+})();
+</script>"""
+
+
+def _script_json(obj):
+    """JSON to put inside a <script>: no '<', '>' or '&' that could end the script early."""
+    return json.dumps(obj).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def home_html(app, name="", msg="", ok=True):
+    """The paging page (the home screen) for supervisors."""
+    cfg, e = app["cfg"], html.escape
+    live = home_live(app)
+    langs = cfg["audio"].get("languages", ["en", "es"])
+    tiles = []
+    for code in sorted(cfg["codes"]):
+        c, w = cfg["codes"][code], live["wait"][str(code)]
+        tiles.append("<label class=tile><input type=radio name=code value=%d required%s>"
+                     "<span>%s<small>%s</small><em id=w%d>%s</em></span></label>"
+                     % (code, " disabled" if w else "", e(c["who"]), e(c.get("why", "")), code,
+                        "again in %d min" % ((w + 59) // 60) if w else ""))
+    texts = {str(code): {"en": c["en"], "es": c["es"] if "es" in langs else ""} for code, c in cfg["codes"].items()}
+    lib = app["worker"].audio
+    voice_ok = lib.voice is not None and lib.voice.ready()
+    warns = []
+    if PAGING_ZONE not in cfg["zones"]:
+        warns.append("The floor zone isn't set up on the laptop, so nothing can be paged from here. Tell the admin.")
+    elif not cfg["zones"][PAGING_ZONE].get("dial") and not app["state"].dry_run:
+        warns.append("The floor zone has no dial digits yet, so pages will fail. Tell the admin.")
+    if app.get("https_problem"):
+        warns.append("This page isn't encrypted (no HTTPS certificate on the laptop). Tell the admin.")
+    custom = ("""
+<form method=post action='/page/custom' id=customform>
+<label class=text>English<br><textarea name=en rows=2 maxlength=200 required
+ placeholder='The lunch truck is at the north door.'></textarea></label>
+<label class=text>Spanish (optional)<br><textarea name=es rows=2 maxlength=200
+ placeholder='El camión de comida está en la puerta norte.'></textarea></label>
+<button class=big>Page this message</button></form>
+<p class=small>Spoken by the computer voice after a chime, on the floor speakers. Leave Spanish empty for
+English only.</p>""" if voice_ok else
+              "<p>Typed messages need the computer voice on the laptop, which isn't installed. Tell the admin.</p>")
+    return """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLASTI-PAGE Paging</title><style>%s%s</style></head><body class=home>
+<h1>PLASTI-PAGE</h1>
+<p id=statusline>%s</p>
+%s%s
+<div class=card><h2>Page someone to a press</h2>
+<form method=post action='/page/send' id=pageform>
+<p class=step>1. Who?</p>
+<div class=tiles>%s</div>
+<p class=step><label for=press>2. Which press?</label></p>
+<input id=press name=press class=press type=number inputmode=numeric min=1 max=999 required placeholder='e.g. 12'>
+<p class=say>Will say: <span id=willsay>pick who to page, then the press</span></p>
+<button class=big>Page now</button></form>
+<p class=small>Pages go to the floor speakers. Each department can be paged from here once every %d minutes.</p>
+</div>
+<div class=card><h2>Type a message</h2>%s</div>
+<div class=card><h2>Recent pages</h2>
+<div class=w><table><thead><tr><th>Time</th><th>From</th><th>Message</th><th>Result</th></tr></thead>
+<tbody id=recent>%s</tbody></table></div></div>
+<p class=small>Signed in as: %s. Pages you send are logged with this name.</p>
+<footer class=credit>ETHAN BRADY &amp; RYAN RAIKES</footer>
+%s</body></html>""" % (
+        PAGE_STYLE, HOME_STYLE, live["status"],
+        "<div class='msg%s'>%s</div>" % ("" if ok else " err", e(msg)) if msg else "",
+        "".join("<div class='msg err'>%s</div>" % e(w) for w in warns),
+        "\n".join(tiles), DEPARTMENT_WAIT_S // 60, custom, live["calls"],
+        e(name) if name else "no name (type your name as the user name when you sign in)",
+        HOME_JS.replace("@TEXTS@", _script_json(texts)).replace("@WAIT@", _script_json(live["wait"])))
+
+
+def paging_card(app):
+    """The admin page's card for the paging page: its password."""
+    pp, e = paging_password(app), html.escape
+    if pp.is_set():
+        state = "<b>set</b> (on %s)" % e(str(pp.rec.get("set", "")))
+        remove = ("<form method=post action='/admin/paging' style='margin-top:8px' onsubmit=\"return confirm("
+                  "'Remove the paging password? Then only the admin password opens the paging page.')\">"
+                  "<input type=hidden name=clear value=on><button>Remove the paging password</button></form>")
+    else:
+        state, remove = "<b>not set</b>: only the admin password opens it", ""
+    return """
+<div class=card><h2>Paging page</h2>
+<p>The home screen (<a href='/'>open it</a>) is the paging page for supervisors: they pick who to page and the
+press, or type a message. Its pages go to the floor zone only, and each department can be paged from it once
+every %d minutes. Its password is %s.</p>
+<form method=post action='/admin/paging'>
+<label>New paging password <input name=password type=password required minlength=%d maxlength=%d
+ autocomplete=new-password></label> <button>Save the paging password</button></form>%s
+<p class=small>Supervisors type their name as the user name (it goes in the log with each page) and this
+password; the browser can remember both. The admin password opens the paging page too. Only a hash of the
+password is kept on the laptop, so it can't be shown again: to change it, save a new one. It is saved only
+over HTTPS (or on the laptop itself). The open log of boards and calls is at <a href='/log'>/log</a>.</p></div>
+""" % (DEPARTMENT_WAIT_S // 60, state, PAGING_PW_MIN, PAGING_PW_MAX, remove)
+
+
 # ------------------------------------------------------------ web server ---
 
 class Handler(BaseHTTPRequestHandler):
@@ -1005,37 +1309,48 @@ class Handler(BaseHTTPRequestHandler):
         given = self.headers.get("X-P833-Key", "")
         return bool(key) and hmac.compare_digest(given.encode("utf-8", "replace"), key.encode("utf-8"))
 
-    # -- admin password (HTTP Basic; any user name, the password is checked)
-    def _admin_ok(self):
-        """No password set means no admin page (fail closed). Wrong passwords are logged,
-        and an address with LOGIN_FAILS of them in LOGIN_WINDOW_S is locked out that long."""
-        pw = self.app["admin_password"]
-        if not pw:
-            return False
+    # -- passwords (HTTP Basic; the user name is any name, the password is checked)
+    def _login(self, paging=False):
+        """The user name typed, if the login holds the admin password (or, for the paging page,
+        the paging password); else None. No password set means closed (fail closed). Wrong
+        passwords are logged, and an address with LOGIN_FAILS of them in LOGIN_WINDOW_S is
+        locked out of both pages that long."""
+        admin_pw = self.app["admin_password"]
+        pp = paging_password(self.app)
+        if not admin_pw and not (paging and pp.is_set()):
+            return None
         ip = self.client_address[0]
         now = time.time()
         with self.login_lock:
             fails = [t for t in self.login_fails.get(ip, []) if now - t < LOGIN_WINDOW_S]
             self.login_fails[ip] = fails
             if len(fails) >= LOGIN_FAILS:
-                return False
+                return None
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Basic "):
-            return False
+            return None
         try:
-            given = base64.b64decode(auth[6:]).decode("utf-8").split(":", 1)[1]
-        except (ValueError, IndexError, UnicodeDecodeError):
-            given = None
-        if given is not None and hmac.compare_digest(given.encode("utf-8"), pw.encode("utf-8")):
-            return True
+            user, given = base64.b64decode(auth[6:]).decode("utf-8").split(":", 1)
+        except (ValueError, UnicodeDecodeError):      # (bad base64 is a ValueError too)
+            user, given = "", None
+        if given is not None:
+            if admin_pw and hmac.compare_digest(given.encode("utf-8"), admin_pw.encode("utf-8")):
+                return user
+            if pp.check(given):
+                # The paging password at the admin page is no guess: a browser that signed in to
+                # the paging page sends it to every page of this laptop. Just ask again.
+                return user if paging else None
         with self.login_lock:
             fails = self.login_fails.setdefault(ip, [])
             fails.append(now)
             if len(self.login_fails) > 1000:          # keep the table small
                 self.login_fails.clear()
-        LOG.warning("wrong admin password from %s%s", ip,
+        LOG.warning("wrong %s password from %s%s", "paging page" if paging else "admin", ip,
                     "; locked out for %d min" % (LOGIN_WINDOW_S // 60) if len(fails) >= LOGIN_FAILS else "")
-        return False
+        return None
+
+    def _admin_ok(self):
+        return self._login() is not None
 
     def _ask_password(self):
         if not self.app["admin_password"]:
@@ -1048,6 +1363,22 @@ class Handler(BaseHTTPRequestHandler):
                                "text/plain")
         return self._reply(401, b"Admin password needed.", "text/plain",
                            {"WWW-Authenticate": 'Basic realm="P833 receiver admin"'})
+
+    def _ask_paging_password(self):
+        if not self.app["admin_password"] and not paging_password(self.app).is_set():
+            return self._reply(503, b"The paging page is off: no password is set for it yet. The admin sets "
+                               b"one on the admin page.", "text/plain")
+        with self.login_lock:
+            locked = len(self.login_fails.get(self.client_address[0], [])) >= LOGIN_FAILS
+        if locked:
+            return self._reply(429, b"Too many wrong passwords from this address. Try again in 10 minutes.",
+                               "text/plain")
+        return self._reply(401, b"Paging page: sign in with your name as the user name and the paging password.",
+                           "text/plain", {"WWW-Authenticate": 'Basic realm="PLASTI-PAGE paging page"'})
+
+    def _home_back(self, msg, ok):
+        return self._reply(303, b"", "text/plain",
+                           {"Location": "/?" + urlencode({"ok": "1" if ok else "0", "msg": msg})})
 
     def _same_site(self):
         """Refuse admin form posts that don't come from the admin page itself. Browsers send
@@ -1072,11 +1403,20 @@ class Handler(BaseHTTPRequestHandler):
     def _to_https(self):
         host = self.headers.get("Host", "")
         if not re.match(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$", host):
-            return self._reply(400, b"Use https:// for the admin page.", "text/plain")
+            return self._reply(400, b"Use https:// for this page.", "text/plain")
         return self._reply(302, b"", "text/plain", {"Location": "https://%s%s" % (host, self.path)})
 
     def do_POST(self):
         path = urlsplit(self.path).path
+        if path.startswith("/page/"):
+            if self._needs_https():
+                return self._reply(403, b"Use https:// for the paging page.", "text/plain")
+            try:
+                return self._home_post(path)
+            except Exception as e:      # never drop the connection on a bug; show and log it
+                LOG.exception("paging page error on %s", path)
+                return self._reply(500, ("Error: %s: %s (details in the receiver log)"
+                                         % (e.__class__.__name__, e)).encode(), "text/plain; charset=utf-8")
         if path.startswith("/admin/") and self._needs_https():
             return self._reply(403, b"Use https:// for the admin page.", "text/plain")
         if path.startswith("/admin/"):
@@ -1127,6 +1467,70 @@ class Handler(BaseHTTPRequestHandler):
         except Refused as e:
             return self._reply(400, {"ok": False, "error": str(e)})
         return self._reply(200, {"ok": True, "repeat": repeat})
+
+    def _home_post(self, path):
+        """A page from the paging page: someone to a press, or a typed message. Floor zone only;
+        each department at most once every DEPARTMENT_WAIT_S from here."""
+        user = self._login(paging=True)
+        if user is None:
+            return self._ask_paging_password()
+        if not self._same_site():
+            return self._reply(403, b"Form came from another site.", "text/plain")
+        raw = self._raw_body()
+        form = {k: v[0].strip() for k, v in parse_qs((raw or b"").decode("utf-8", "replace")).items()}
+        app, st, cfg = self.app, self.app["state"], self.app["cfg"]
+        name = home_name(user)
+        if PAGING_ZONE not in cfg["zones"]:
+            return self._home_back("Not sent: the floor zone isn't set up on the laptop. Tell the admin.", False)
+        if path == "/page/send":
+            try:
+                code, press = int(form.get("code", "")), int(form.get("press", ""))
+            except ValueError:
+                code, press = None, 0
+            if code not in cfg["codes"] or not 1 <= press <= 999:
+                return self._home_back("Not sent: pick who to page and type the press number (1 to 999).", False)
+            c = cfg["codes"][code]
+            key, wait_s = "dept:" + c["who"].lower(), DEPARTMENT_WAIT_S
+            wait = st.home_wait(key, wait_s)
+            if wait:
+                return self._home_back("Not sent: %s was paged from here less than %d minutes ago. You can page "
+                                       "%s again in %s." % (c["who"], wait_s // 60, c["who"], wait_text(wait)),
+                                       False)
+            en, es = build_message(cfg, code, press)
+            rec = {"time": now_text(), "board": "paging", "cell": "Paging page", "press": press, "code": code,
+                   "who": c["who"], "message": en, "en": en, "es": es, "zone": PAGING_ZONE,
+                   "note": "from the paging page" + (" by %s" % name if name else "")}
+        elif path == "/page/custom":
+            en, es = " ".join(form.get("en", "").split()), " ".join(form.get("es", "").split())
+            if not en or len(en) > 200 or len(es) > 200 or not (en + es).isprintable():
+                return self._home_back("Not sent: type the message in English (Spanish is optional), up to 200 "
+                                       "characters each.", False)
+            lib = app["worker"].audio
+            if lib.voice is None or not lib.voice.ready():
+                return self._home_back("Not sent: typed messages need the computer voice, which isn't installed "
+                                       "on the laptop. Tell the admin.", False)
+            key, wait_s = "text:" + (en + "|" + es).lower(), SAME_TEXT_WAIT_S
+            if st.home_wait(key, wait_s):
+                return self._home_back("Not sent again: that message was just sent.", False)
+            rec = {"time": now_text(), "board": "paging", "cell": "Paging page", "press": "", "code": "custom",
+                   "who": "Custom", "message": en, "en": en, "es": es, "zone": PAGING_ZONE,
+                   "note": "typed on the paging page" + (" by %s" % name if name else "")}
+        else:
+            return self._reply(404, {"ok": False, "error": "not found"})
+        if app["worker"].jobs.qsize() >= MAX_WAITING_PAGES:
+            return self._home_back("Not sent: too many pages are waiting to go out. Try again in a minute.", False)
+        if st.too_fast(HOME_RATE_KEY):
+            return self._home_back("Not sent: %d pages already went out from this page in the last minute. "
+                                   "Try again in a minute." % MAX_CALLS_PER_MIN, False)
+        if st.claim_home(key, wait_s, rec):           # someone else sent it a moment ago
+            return self._home_back("Not sent: that was just paged from here by someone else.", False)
+        LOG.info("PAGE from the paging page (%s): %s%s", name or "no name given", en, " | " + es if es else "")
+        app["worker"].jobs.put(rec)
+        if app.get("sms"):
+            app["sms"].text_for_call(rec)
+        if st.dry_run:
+            return self._home_back("Practice mode (dry run): logged, not played: " + en, True)
+        return self._home_back("Paging now: " + en, True)
 
     def _admin_post(self, path):
         if not self._admin_ok():
@@ -1277,6 +1681,27 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/admin/voice/"):
             return self._voice_post(path, form, who)
 
+        if path == "/admin/paging":
+            pp = paging_password(self.app)
+            if form.get("clear") == "on":
+                pp.set("")
+                LOG.info("paging page password removed on the admin page (%s)", who)
+                return self._back("Paging page password removed: only the admin password opens it now.")
+            pw = parse_qs((raw or b"").decode("utf-8", "replace")).get("password", [""])[0]   # (not trimmed)
+            if not PAGING_PW_MIN <= len(pw) <= PAGING_PW_MAX or not pw.isprintable() or pw != pw.strip():
+                return self._back("Paging password not saved: use %d to %d characters, with no space at the start "
+                                  "or end." % (PAGING_PW_MIN, PAGING_PW_MAX))
+            if pw == self.app["admin_password"]:
+                return self._back("Paging password not saved: it must be different from the admin password.")
+            if not (self._https() or who in ("127.0.0.1", "::1")):
+                return self._back("Paging password not saved: this admin page isn't encrypted (no HTTPS "
+                                  "certificate), so it would cross the network as plain text. Run sudo bash "
+                                  "install/install.sh on the laptop, then save it again.")
+            pp.set(pw)
+            LOG.info("paging page password changed on the admin page (%s)", who)
+            return self._back("Paging password saved. Give it to the supervisors: they sign in on the home screen "
+                              "with their name as the user name and this password.")
+
         if path == "/admin/wording":
             wording, errs = parse_wording(form, self.app["cfg"])
             if errs:
@@ -1420,12 +1845,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._request_read()
         parts = urlsplit(self.path)
-        if (parts.path == "/admin" or parts.path.startswith("/admin/")) and self._needs_https():
+        if (parts.path in ("/admin", "/", "/index.html", "/page/live") or parts.path.startswith("/admin/")) \
+                and self._needs_https():
             return self._to_https()
         if parts.path == "/status.json":
             return self._reply(200, status_obj(self.app))
-        if parts.path in ("/", "/index.html"):
+        if parts.path == "/log":
             return self._reply(200, page_html(self.app, False).encode(), "text/html; charset=utf-8")
+        if parts.path in ("/", "/index.html"):
+            user = self._login(paging=True)
+            if user is None:
+                return self._ask_paging_password()
+            q = parse_qs(parts.query)
+            return self._reply(200, home_html(self.app, home_name(user), q.get("msg", [""])[0],
+                                              q.get("ok", ["1"])[0] == "1").encode(), "text/html; charset=utf-8")
+        if parts.path == "/page/live":
+            if self._login(paging=True) is None:
+                return self._ask_paging_password()
+            return self._reply(200, home_live(self.app))
         if parts.path == "/admin/live":
             if not self._admin_ok():
                 return self._ask_password()
@@ -2154,7 +2591,7 @@ function p833Preview(kind){
 # The admin page's categories (tabs), and which tab each card (by its title) goes in.
 TABS = [("overview", "Overview"), ("send", "Test and send"), ("wording", "Wording"), ("sound", "Sound"),
         ("phone", "Phone"), ("texts", "Texts")]
-CARD_TABS = {"Settings": "overview", "Add or rename a board": "overview", "Send a test call": "send",
+CARD_TABS = {"Settings": "overview", "Paging page": "overview", "Add or rename a board": "overview", "Send a test call": "send",
              "Send a custom page": "send", "Page wording": "wording", "Audio": "sound", "PA clarity": "sound",
              "Page voice": "sound", "Voice lab": "sound", "Phone and paging setup": "phone",
              "Text messages (voip.ms)": "texts"}
@@ -2262,8 +2699,8 @@ def live_parts(app, admin, s=None):
             ("time", "cell", "press", "code", "who", "message", "result", "attempts", "detail"))))
     mode = ("DRY RUN: pages are logged, not dialed" if s["dry_run"] else "LIVE: pages are dialed")
     mode_color = "var(--warn)" if s["dry_run"] else "var(--good)"
-    nav = ("<a href='/'>Back to status page</a>" if admin
-           else "<a href='/admin'>Admin: test calls and boards</a>")
+    nav = ("<a href='/'>Paging page</a> &nbsp; <a href='/log'>Log page</a>" if admin
+           else "<a href='/'>Paging page</a> &nbsp; <a href='/admin'>Admin</a>")
     out = {"status": "<span class=\"mode\" style=\"background:%s\">%s</span> &nbsp; version %s &nbsp; "
                      "pages waiting: %d &nbsp; %s" % (mode_color, mode, VERSION, s["pages_waiting"], nav),
            "boards": "\n".join(brows) or "<tr><td colspan=8>none</td></tr>",
@@ -2468,7 +2905,7 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
 Custom text is spoken by Piper with the page voice (Preview lets you hear it); without Piper on the laptop, a live custom page fails.</p></div>
 """ % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + sms_html(app) \
-            + wording_html(app) + clarity_html(app) + voice_html(app) + lab_html(app)
+            + wording_html(app) + clarity_html(app) + voice_html(app) + lab_html(app) + paging_card(app)
 
     tables = """
 <h2>Boards</h2>
@@ -2490,7 +2927,7 @@ Custom text is spoken by Piper with the page voice (Preview lets you hear it); w
 %s%s
 <footer class=credit>ETHAN BRADY &amp; RYAN RAIKES</footer>
 %s</body></html>""" % (
-        PAGE_STYLE, " - Admin" if admin else "", live["status"],
+        PAGE_STYLE, " - Admin" if admin else " - Log", live["status"],
         "<div class=msg>%s</div>" % e(msg) if msg else "", body,
         ADMIN_LIVE_JS if admin else REFRESH_JS)
 
@@ -2548,7 +2985,11 @@ def main(argv=None):
     sms = p833_sms.SmsSender(cfg, args.state_dir, args.log_dir)
     sms.start()
     Handler.app = {"cfg": cfg, "state": state, "worker": worker, "key": key,
-                   "admin_password": admin_pw, "state_dir": args.state_dir, "sms": sms, "voice": voice}
+                   "admin_password": admin_pw, "state_dir": args.state_dir, "sms": sms, "voice": voice,
+                   "paging": PagingPassword(os.path.join(args.state_dir, "paging_password.json"))}
+    if not Handler.app["paging"].is_set():
+        LOG.info("paging page (home screen): no paging password yet, so only the admin password opens it "
+                 "(set one on the admin page)")
 
     def watch():
         while True:

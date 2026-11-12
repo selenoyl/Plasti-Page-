@@ -487,7 +487,7 @@ class Server(unittest.TestCase):
         self.assertEqual(rh["cell"], "RSP RH")
         never = [b for b in s["boards"] if b["board"] == "FSP_LH"][0]
         self.assertEqual(never["last_heard"], "never")
-        page = self.get("/")
+        page = self.get("/log")
         self.assertIn("PLASTI-PAGE RECEIVER", page)
         self.assertIn("ETHAN BRADY &amp; RYAN RAIKES", page)
 
@@ -509,7 +509,7 @@ class Server(unittest.TestCase):
 
     def test_html_is_escaped(self):
         self.post("/heartbeat", {"board": "<b>x</b>"})
-        self.assertNotIn("<b>x</b>", self.get("/"))
+        self.assertNotIn("<b>x</b>", self.get("/log"))
 
 
     # ---- security
@@ -561,10 +561,14 @@ class Server(unittest.TestCase):
         self.assertTrue(self.state.dry_run)
 
     def test_security_headers(self):
-        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port) as r:
-            self.assertEqual(r.headers["X-Frame-Options"], "DENY")
-            self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
-            self.assertIn("frame-ancestors 'none'", r.headers["Content-Security-Policy"])
+        for path, auth in (("/log", None), ("/", ADMIN_PW)):        # the home screen needs a password
+            req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path))
+            if auth:
+                req.add_header("Authorization", "Basic " + base64.b64encode(("a:" + auth).encode()).decode())
+            with urllib.request.urlopen(req) as r:
+                self.assertEqual(r.headers["X-Frame-Options"], "DENY", path)
+                self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff", path)
+                self.assertIn("frame-ancestors 'none'", r.headers["Content-Security-Policy"], path)
 
     def test_board_ids_checked(self):
         for bad in ("../x", "a b", "x" * 33, "<b>", "=1+1"):
@@ -791,7 +795,7 @@ class Server(unittest.TestCase):
         st, _, body = self.admin("/admin")
         self.assertEqual(st, 200)
         self.assertIn("Send a test call", body)
-        self.assertNotIn("Send a test call", self.get("/"))
+        self.assertNotIn("Send a test call", self.get("/log"))
 
     def test_admin_refuses_other_site(self):
         st, _, _ = self.admin("/admin/board/add", {"board": "X1", "cell": "X"}, origin="http://evil.example")
@@ -1201,7 +1205,7 @@ class Server(unittest.TestCase):
         page = self.admin("/admin")[2]
         self.assertNotIn("location.replace", page)                  # no whole-page reload on the admin page
         self.assertIn("/admin/live", page)
-        self.assertIn("location.replace", self.get("/"))            # the open status page still reloads
+        self.assertIn("location.replace", self.get("/log"))         # the open log page still reloads
         self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
         self.wait_pages()
         self.wait_row()
@@ -1464,6 +1468,176 @@ class Server(unittest.TestCase):
         self.assertFalse(sender.has_password())
         self.assertEqual(self.cfg["sms"]["api_username"], "boss@example.com")   # the rest is saved
 
+    # ---- the paging page (the home screen) for supervisors
+    PAGING_PW = "floor-pass-123"
+
+    def home(self, path, form=None, pw=PAGING_PW, user="Sam", origin="self"):
+        """The paging page like a supervisor's browser: their name as the user name."""
+        url = "http://127.0.0.1:%d%s" % (self.port, path)
+        data = urllib.parse.urlencode(form).encode() if form is not None else None
+        req = urllib.request.Request(url, data=data)
+        if pw is not None:
+            req.add_header("Authorization", "Basic " + base64.b64encode(("%s:%s" % (user, pw)).encode()).decode())
+        if origin == "self":
+            req.add_header("Referer", "http://127.0.0.1:%d/" % self.port)
+            origin = "http://127.0.0.1:%d" % self.port if data is not None else None
+        if origin:
+            req.add_header("Origin", origin)
+        try:
+            with urllib.request.build_opener(NoRedirect).open(req) as r:
+                return r.status, r.headers.get("Location", ""), r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Location", ""), e.read().decode()
+
+    def home_msg(self, loc):
+        """(ok, message) from the paging page's answer to a form."""
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(loc).query)
+        return q.get("ok", [""])[0] == "1", q.get("msg", [""])[0]
+
+    def send_home(self, code, press, **kw):
+        return self.home_msg(self.home("/page/send", {"code": str(code), "press": str(press)}, **kw)[1])
+
+    def set_paging_pw(self, pw=PAGING_PW):
+        return urllib.parse.unquote(self.admin("/admin/paging", {"password": pw})[1])
+
+    def test_log_page_is_open_and_the_home_screen_needs_a_password(self):
+        page = self.get("/log")
+        self.assertIn("PLASTI-PAGE RECEIVER - Log", page)
+        self.assertIn("Recent calls", page)
+        self.assertIn("location.replace", page)                        # refreshes itself, as before
+        self.assertEqual(self.home("/", pw=None)[0], 401)
+        self.assertEqual(self.home("/", pw="wrong-password")[0], 401)
+        self.assertEqual(self.home("/", pw=self.PAGING_PW)[0], 401)     # no paging password set yet
+        st, _, page = self.home("/", pw=ADMIN_PW)                       # ...so only the admin's opens it
+        self.assertEqual(st, 200)
+        self.assertIn("Page someone to a press", page)
+        self.assertIn("ETHAN BRADY &amp; RYAN RAIKES", page)
+        self.assertIn("<b>not set</b>", self.admin("/admin")[2])
+        R.Handler.app["admin_password"] = ""                            # no password at all: closed
+        self.assertEqual(self.home("/", pw=ADMIN_PW)[0], 503)
+
+    def test_paging_password_saved_on_the_admin_page(self):
+        for bad in ("short", " floor-pass-123", "x" * 65, ADMIN_PW):
+            self.assertIn("not saved", self.set_paging_pw(bad), bad)
+        self.assertIn("Paging password saved", self.set_paging_pw())
+        path = os.path.join(self.tmp, "paging_password.json")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        with open(path, encoding="utf-8") as f:
+            self.assertNotIn(self.PAGING_PW, f.read())                  # only a hash is kept
+        self.assertEqual(self.home("/")[0], 200)
+        self.assertEqual(self.home("/", pw=ADMIN_PW)[0], 200)           # the admin's opens it too
+        self.assertIn("<b>set</b>", self.admin("/admin")[2])
+        # it doesn't open the admin page, and isn't counted as a wrong guess there
+        R.Handler.login_fails.clear()
+        self.assertEqual(self.admin("/admin", pw=self.PAGING_PW)[0], 401)
+        self.assertEqual(R.Handler.login_fails.get("127.0.0.1"), [])
+        # kept through a restart
+        self.assertTrue(R.PagingPassword(path).check(self.PAGING_PW))
+        self.assertFalse(R.PagingPassword(path).check("floor-pass-124"))
+        # removed: only the admin password again
+        self.admin("/admin/paging", {"clear": "on"})
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(self.home("/")[0], 401)
+
+    def test_home_screen_pages_the_floor_and_each_department_once_in_5_minutes(self):
+        self.set_paging_pw()
+        ok, msg = self.send_home(8, 12)
+        self.assertTrue(ok, msg)
+        self.assertIn("Maintenance requested to press 12 for camera fault.", msg)
+        self.wait_pages()
+        self.assertEqual(self.pager.sent, [("floor", "F,*60,2,1", "Maintenance requested to press 12 for camera fault.",
+                                            "Se solicita mantenimiento en la prensa 12 por falla de c\u00e1mara.")])
+        row = self.wait_row()
+        self.assertEqual((row["cell"], row["who"], row["code"], row["press"], row["result"]),
+                         ("Paging page", "Maintenance", "8", "12", "sent"))
+        self.assertIn("from the paging page by Sam", row["detail"])
+        # Maintenance again, another reason and press: not for 5 minutes
+        ok, msg = self.send_home(2, 30)
+        self.assertFalse(ok)
+        self.assertIn("Maintenance was paged from here less than 5 minutes ago", msg)
+        self.assertTrue(self.send_home(3, 30)[0])                          # another department: yes
+        self.wait_pages()
+        self.assertEqual(len(self.pager.sent), 2)
+        live = json.loads(self.home("/page/live")[2])
+        self.assertTrue(all(live["wait"][c] > 250 for c in ("2", "8", "9", "3")), live["wait"])
+        self.assertEqual([live["wait"][c] for c in ("4", "5", "6", "7")], [0, 0, 0, 0])
+        self.assertIn("Maintenance requested to press 12 for camera fault.", live["calls"])
+        page = self.home("/")[2]
+        self.assertIn("name=code value=2 required disabled", page)
+        self.assertIn("again in 5 min", page)
+        self.assertIn("name=code value=5 required>", page)
+        # a board's call doesn't hold the department on the paging page
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 5, "press": 7})
+        self.wait_pages()
+        self.assertTrue(self.send_home(5, 7)[0])
+        # 5 minutes on, Maintenance can be paged again
+        with self.state.lock:
+            self.state.home_sent = {k: (t - R.DEPARTMENT_WAIT_S, rec) for k, (t, rec) in self.state.home_sent.items()}
+        self.pager.fail = 3                                                # ...and this page fails
+        self.assertTrue(self.send_home(2, 30)[0])
+        self.wait_pages()
+        self.assertEqual(self.wait_row()["result"], "FAILED")
+        self.assertTrue(self.send_home(2, 30)[0])                          # a failed page doesn't hold it
+        self.wait_pages()
+        self.assertEqual(self.pager.sent[-1][2], "Maintenance requested to press 30.")
+
+    def test_home_screen_never_pages_the_office(self):
+        self.set_paging_pw()
+        self.cfg["zones"]["office"]["dial"] = "F,*60,2,2"
+        self.cfg["codes"][6]["zone"] = "office"                            # even a code set to the office
+        self.assertTrue(self.send_home(6, 4)[0])
+        self.wait_pages()
+        self.assertEqual(self.pager.sent[0][:2], ("floor", "F,*60,2,1"))
+        self.assertNotIn("name=zone", self.home("/")[2])
+
+    def test_home_screen_typed_message(self):
+        self.set_paging_pw()
+        page = self.home("/")[2]
+        self.assertIn("need the computer voice", page)                     # no Piper: no typing
+        self.assertNotIn("id=customform", page)
+        self.assertFalse(self.home_msg(self.home("/page/custom", {"en": "Lunch truck is here.", "es": ""})[1])[0])
+        self.use_fake_tts()
+        self.assertIn("id=customform", self.home("/")[2])
+        form = {"en": "Lunch  truck is here.", "es": "Lleg\u00f3 la comida."}
+        ok, msg = self.home_msg(self.home("/page/custom", form)[1])
+        self.assertTrue(ok, msg)
+        self.wait_pages()
+        self.assertEqual(self.pager.sent, [("floor", "F,*60,2,1", "Lunch truck is here.", "Lleg\u00f3 la comida.")])
+        self.assertIn("Lunch truck is here.", self.spoken())
+        row = self.wait_row()
+        self.assertEqual((row["code"], row["who"], row["cell"]), ("custom", "Custom", "Paging page"))
+        self.assertIn("typed on the paging page by Sam", row["detail"])
+        ok, msg = self.home_msg(self.home("/page/custom", form)[1])
+        self.assertFalse(ok)                                                # a double tap
+        self.assertIn("just sent", msg)
+        for bad in ({"en": "", "es": "Hola"}, {"en": "x" * 201}, {"en": "bell\x07"}):
+            self.assertFalse(self.home_msg(self.home("/page/custom", bad)[1])[0], bad)
+        self.assertEqual(len(self.pager.sent), 1)
+
+    def test_home_screen_safety(self):
+        self.set_paging_pw()
+        self.assertEqual(self.home("/page/send", {"code": "2", "press": "5"}, origin="http://evil.example")[0], 403)
+        self.assertEqual(self.home("/page/send", {"code": "2", "press": "5"}, pw="wrong-password")[0], 401)
+        self.assertEqual(self.home("/page/live", pw=None)[0], 401)
+        for bad in ({"code": "11", "press": "5"}, {"code": "2", "press": "0"}, {"code": "2", "press": "1000"},
+                    {"code": "2", "press": "x"}, {"code": "custom", "press": "5"}, {"press": "5"}):
+            self.assertFalse(self.home_msg(self.home("/page/send", bad)[1])[0], bad)
+        # at most MAX_CALLS_PER_MIN pages a minute from the paging page, all supervisors together
+        for _ in range(R.MAX_CALLS_PER_MIN):
+            self.state.too_fast(R.HOME_RATE_KEY)
+        ok, msg = self.send_home(2, 5)
+        self.assertFalse(ok)
+        self.assertIn("in the last minute", msg)
+        self.assertEqual(self.state.home_wait("dept:maintenance", R.DEPARTMENT_WAIT_S), 0)  # not held by it
+        self.assertEqual(self.pager.sent, [])
+        # names, messages and wording are escaped, also inside the page's script
+        self.cfg["codes"][2]["en"] = "Maint </script><b>x</b> to press {press}."
+        page = self.home("/?ok=0&msg=%3Cscript%3Ealert(1)%3C/script%3E", user="<i>Bo</i>")[2]
+        self.assertNotIn("</script><b>x", page)
+        self.assertNotIn("<script>alert", page)
+        self.assertNotIn("<i>Bo</i>", page)
+        self.assertIn("&lt;i&gt;Bo&lt;/i&gt;", page)
+
     # ---- page wording and the admin page's tabs
     def wording_form(self, **change):
         """The Page wording form as the page fills it in, with some fields changed."""
@@ -1565,7 +1739,7 @@ class Server(unittest.TestCase):
         self.assertIn("<nav class=tabs>", page)
         sections = dict(re.findall(r"<section data-tab=(\w+)>(.*?)</section>", page, re.S))
         self.assertEqual(sorted(sections), sorted(k for k, _ in R.TABS))
-        where = {"Settings": "overview", "Boards": "overview", "Recent calls": "overview",
+        where = {"Settings": "overview", "Paging page": "overview", "Boards": "overview", "Recent calls": "overview",
                  "Add or rename a board": "overview", "Send a test call": "send", "Send a custom page": "send",
                  "Page wording": "wording", "Audio": "sound", "PA clarity": "sound", "Page voice": "sound",
                  "Voice lab": "sound", "Phone and paging setup": "phone", "Text messages (voip.ms)": "texts"}
@@ -1576,7 +1750,7 @@ class Server(unittest.TestCase):
         self.assertIn("id=calls", sections["overview"])
         self.assertIn("localStorage", page)
         self.assertNotIn("next build step", page)
-        public = self.get("/")
+        public = self.get("/log")
         self.assertNotIn("<nav class=tabs>", public)
         self.assertNotIn("<section", public)
         self.assertIn("id=calls", public)
@@ -1719,6 +1893,20 @@ class Https(unittest.TestCase):
             self.assertEqual(r.status, 200)
         with urllib.request.urlopen("http://127.0.0.1:%d/status.json" % self.port, timeout=5) as r:
             self.assertEqual(r.status, 200)
+
+    def test_paging_page_over_https_only(self):
+        base, plain = "https://127.0.0.1:%d" % self.port, "http://127.0.0.1:%d" % self.port
+        st, loc, _ = self.open(plain + "/?ok=1", auth=False)
+        self.assertEqual((st, loc), (302, base + "/?ok=1"))
+        st, _, body = self.open(base + "/")                         # the admin password opens it
+        self.assertEqual(st, 200)
+        self.assertIn("Page someone to a press", body)
+        self.assertEqual(self.open(plain + "/page/send", b"code=2&press=5", origin=plain)[0], 403)
+        st, loc, _ = self.open(base + "/page/send", b"code=2&press=5", origin=base)
+        self.assertEqual(st, 303)
+        self.assertIn("ok=1", loc)
+        with urllib.request.urlopen(plain + "/log", timeout=5) as r:
+            self.assertEqual(r.status, 200)                         # the open log stays on plain HTTP
 
     def test_bad_hello_does_not_stop_the_server(self):
         import socket

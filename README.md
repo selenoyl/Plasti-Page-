@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.14.0:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.15.0:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -130,7 +130,7 @@ the laptop's BIOS setup, if it has it.
 
 ## The admin page
 
-Open `https://<laptop IP>:8833/admin` (plain `http://` is sent there). The first time, the browser warns about the certificate: the installer made it on the laptop, so no outside company vouches for it. Check that the fingerprint matches the one the installer printed (`sudo openssl x509 -in /etc/p833-receiver/tls/cert.pem -noout -fingerprint -sha256`), then choose **Advanced > Proceed**. The browser asks for a user name and password: any user name works, and the password is `P833_ADMIN_PASSWORD` from `secrets.env`. The status page at `/` stays open and read-only.
+Open `https://<laptop IP>:8833/admin` (plain `http://` is sent there). The first time, the browser warns about the certificate: the installer made it on the laptop, so no outside company vouches for it. Check that the fingerprint matches the one the installer printed (`sudo openssl x509 -in /etc/p833-receiver/tls/cert.pem -noout -fingerprint -sha256`), then choose **Advanced > Proceed**. The browser asks for a user name and password: any user name works, and the password is `P833_ADMIN_PASSWORD` from `secrets.env`. The home screen `/` is the supervisors' paging page (see "Paging page"); the open, read-only log of boards and calls is at `/log`.
 
 The admin page doesn't reload itself: the mode line, the boards, the recent calls and the Make all progress update in place every 10 s, so what you're typing or listening to is left alone.
 
@@ -138,6 +138,7 @@ The admin page is in tabs, so it isn't one long list: **Overview** (dry run, boa
 
 | Section | What it does |
 |---|---|
+| **Paging page** (Overview tab) | Sets or removes the paging page's own password (see "Paging page"). |
 | **Page wording** (Wording tab) | What each call type says, in English and Spanish, for example the camera fault message (code 8). Put `{press}` where the press number goes. Also the short reason shown on the admin page ("camera fault") and, under "when the press number is unknown", the text for press 0. Saved on the laptop on top of the config file's wording and kept through restarts and updates; **Back to the config file's wording** undoes it. A reworded message is spoken by Piper in the recordings' voice (or in the Page voice, if you use one) and then kept, so the next time plays at once; messages you didn't change keep their recordings. Without Piper on the laptop, the old recording plays and the Audio box says so. Texts use the new wording too. Check a change with the test call **Preview**. |
 | **Phone and paging setup** | HT813 address and ports, 1-stage or 2-stage dialing, the timing waits, each zone's **dial digits** (0-9 * #, comma = half-second pause, F = hook flash), which zone each code pages, each code's department tone, the tone once, twice or off, the silence at the start, and how many times the message plays. Saved on the laptop on top of the config file's values; **Reset** goes back to the config. |
 | **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
@@ -148,6 +149,23 @@ The admin page is in tabs, so it isn't one long list: **Overview** (dry run, boa
 
 With dry run off, every test or custom page is really dialed.
 
+## Paging page (the home screen, for supervisors)
+
+Open `https://<laptop IP>:8833/` (plain `http://` is sent there), on a PC, tablet or phone that can reach the laptop. It is made for the floor:
+
+- **Page someone to a press:** tap who (Maintenance, Technician, Supervisor, Quality, Packaging, or one with a reason, such as Maintenance, camera fault), type the press number, check the "Will say" line and tap **Page now**. It asks once more before it pages.
+- **Type a message:** English, and Spanish if you like. It is spoken by the computer voice (Piper) after a chime. Without Piper on the laptop this part is off.
+- **Recent pages:** the last 8 pages from anywhere, with their result; it updates by itself. **Full log** opens `/log`.
+- Pages from here go to the **floor zone only**, never the office, whatever zone a call type is set to.
+- **Each department can be paged from here once every 5 minutes.** Maintenance covers all three Maintenance buttons (plain, camera fault, Red Rabbit), and Supervisor both of its buttons. A department paged lately is greyed out with "again in N min", and the laptop refuses it too. A page that FAILED doesn't count, so it can be tried again at once. Calls from the boards don't count. The same typed message isn't sent twice within a minute (a double tap).
+- At most 6 pages a minute leave the paging page in all, and none while 20 pages are already waiting.
+- Pages from here are logged as from "Paging page", with the name the supervisor signed in with, and are texted like board calls when texts are on.
+- In dry run the page says **PRACTICE MODE**: pages are logged, not played.
+
+**Password:** set the paging password on the admin page (Overview tab, **Paging page**). Supervisors sign in with **their name as the user name** (it goes in the log) and the paging password; the browser can remember both. The admin password also opens the paging page, but the paging password never opens the admin page. Until a paging password is set, only the admin password opens it. The laptop keeps only a hash of it (`/var/lib/p833-receiver/paging_password.json`, readable by the service only), so it can't be shown again: to change it, save a new one. 10 wrong passwords from one address lock that address out of both pages for 10 minutes.
+
+The first time on each device, the browser warns about the laptop's own certificate, as on the admin page (check the fingerprint, then **Advanced > Proceed**).
+
 ## Everyday commands
 
 | What | Command |
@@ -155,7 +173,8 @@ With dry run off, every test or custom page is really dialed.
 | Is it running? | `systemctl status p833-receiver` |
 | Live log | `journalctl -u p833-receiver -f` |
 | Call log | `sudo less /var/log/p833-receiver/calls.csv` (only root and the service can read the logs) |
-| Status page | `http://<laptop IP>:8833/` |
+| Paging page (supervisors) | `https://<laptop IP>:8833/` |
+| Log page (open, read-only) | `http://<laptop IP>:8833/log` |
 | After editing config.json | `sudo systemctl restart p833-receiver` |
 | Old install backups | `sudo ls -d /root/p833-backup-*`. Each holds an old copy of the secrets and logs; delete the old ones you don't need with `sudo rm -r /root/p833-backup-<date-time>`. |
 
@@ -467,7 +486,8 @@ What protects what (receiver 0.10.0, board firmware 1.1.3):
 | Texts | voip.ms API password write-only, stored 0600, sent only to voip.ms over checked HTTPS (no redirects). Only boards on the list send texts. Queue and hourly caps. |
 | Phone line | The laptop uses only SIP and audio from the HT813's address that belong to the call, so other devices can't hang up or divert a page. Optional password on calls (above). |
 | Laptop | Service runs as `p833` in a systemd sandbox; logs and state readable only by root and the service; secrets root-only; SELinux on; firewalld opens only 8833/tcp. The installer checks a new version loads before installing it; `update.sh` asks first. |
-| Open status page | Shows no call details, dial digits, HT813 address or board addresses (those are on the admin page). |
+| Paging page | Its own password (only a PBKDF2 hash kept) or the admin password, over HTTPS; shares the admin page's lock-out. Forms only from the page itself. Floor zone only; each department once every 5 minutes; 6 pages a minute in all. Name, wording and messages escaped. |
+| Open log page (`/log`) | Shows no call details, dial digits, HT813 address or board addresses (those are on the admin page). |
 
 **To do on site** (see also the AAR's open points):
 1. Isolate the IoT network (boards, HT813, laptop) from the plant LAN, and lock down the HT813 (above).
