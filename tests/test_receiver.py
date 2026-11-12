@@ -915,7 +915,7 @@ sys.stdout.buffer.write(b.getvalue())
         from test_sms import FakeVoipMs
         fake = FakeVoipMs()
         self.cfg["sms"].update(dict(enabled=True, api_username="ops@example.com", did="5551234567",
-                                    to=["5550001111"], stagger_s=0), **sms)
+                                    to=["5550001111"], stagger_min_s=0, stagger_max_s=0), **sms)
         sender = p833_sms.SmsSender(self.cfg, self.tmp, self.tmp, opener=fake)
         sender.set_password("api-secret-123")
         sender.start()
@@ -974,6 +974,7 @@ sys.stdout.buffer.write(b.getvalue())
         self.assertEqual(cfg2["sms"]["to"], ["5550001111"])
         # bad values are refused
         for bad in ({"to": "12345"}, {"did": "999"}, {"api_username": "not-an-email"},
+                    {"stagger_min_s": "8", "stagger_max_s": "2"},
                     {"template": "{oops}"}, {"template": "no message field"}):
             form = {"enabled": "on", "api_username": "boss@example.com", "did": "5552223333",
                     "to": "5550001111", "prefix": "Chapar:", "template": "{prefix} {message}"}

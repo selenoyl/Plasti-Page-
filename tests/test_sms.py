@@ -34,7 +34,7 @@ class FakeVoipMs:
 
 def cfg_with(**sms):
     s = dict(T.DEFAULTS, enabled=True, api_username="ops@example.com", did="555-123-4567",
-             to=["5550001111", "(555) 000-2222"], stagger_s=0)
+             to=["5550001111", "(555) 000-2222"], stagger_min_s=0, stagger_max_s=0)
     s.update(sms)
     return {"sms": s}
 
@@ -121,12 +121,18 @@ class Sms(unittest.TestCase):
 
     def test_staggered(self):
         fake = FakeVoipMs()
-        s = self.sender(cfg_with(to=["5550001111", "5550002222", "5550003333"], stagger_s=1), fake)
+        s = self.sender(cfg_with(to=["5550001111", "5550002222", "5550003333"], stagger_min_s=1,
+                                 stagger_max_s=1), fake)
         t0 = time.monotonic()
         ok, _ = s.send("hi")
         self.assertTrue(ok)
         self.assertGreater(time.monotonic() - t0, 1.9)          # two pauses of 1 s
         self.assertEqual(len(fake.requests), 3)
+        # the pause is random within the range, and varies
+        pauses = [T.SmsSender.pause_s(dict(T.DEFAULTS)) for _ in range(200)]
+        self.assertTrue(all(1 <= p <= 10 for p in pauses))
+        self.assertGreater(len(set(round(p, 2) for p in pauses)), 50)
+        self.assertEqual(T.SmsSender.pause_s(dict(T.DEFAULTS, stagger_min_s=5, stagger_max_s=2)), 5)
 
     def test_hourly_cap(self):
         fake = FakeVoipMs()
@@ -143,6 +149,7 @@ class Sms(unittest.TestCase):
         ok, detail = s.test_text()
         self.assertTrue(ok)
         self.assertIn("queued for 2", detail)
+        self.assertIn("0 to 0 s apart", detail)              # this test sets no pause
         self.assertEqual(s.jobs.get_nowait(), ("Chapar: Test text from the paging system.", None))
         self.assertFalse(self.sender(cfg_with(to=[]), fake).test_text()[0])
 

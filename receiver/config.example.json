@@ -152,7 +152,8 @@
     "template": "{prefix} {message}",
     "timeout_s": 15,
     "admin_tests": false,
-    "stagger_s": 3,
+    "stagger_min_s": 1,
+    "stagger_max_s": 10,
     "max_per_hour": 60
   }
 }

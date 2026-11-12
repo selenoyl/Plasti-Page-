@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import queue
+import random
 import re
 import ssl
 import threading
@@ -40,7 +41,8 @@ DEFAULTS = {
     "template": "{prefix} {message}",
     "timeout_s": 15,
     "admin_tests": False,        # also text for test calls sent from the admin page
-    "stagger_s": 3,              # pause between texts to different numbers (avoid spam flags)
+    "stagger_min_s": 1,          # random pause between texts to different numbers, from this...
+    "stagger_max_s": 10,         # ...to this many seconds (no fixed rhythm, avoid spam flags)
     "max_per_hour": 60,          # cap on texts sent in any hour (cost and spam guard)
 }
 MAX_SMS = 160                    # voip.ms sendSMS limit (characters)
@@ -130,8 +132,8 @@ class SmsSender(threading.Thread):
             return False, "no numbers to text"
         text = " ".join(("%s Test text from the paging system." % s["prefix"]).split())[:MAX_SMS]
         self.jobs.put((text, None))
-        return True, ("queued for %d number(s), %s s apart; refresh in a moment and see Recent texts"
-                      % (n, s["stagger_s"]))
+        return True, ("queued for %d number(s), %s to %s s apart; refresh in a moment and see Recent texts"
+                      % (n, s["stagger_min_s"], s["stagger_max_s"]))
 
     def manual_text(self, number, message, add_prefix=True):
         """Queue one text to one number, typed on the admin page (works with texts off).
@@ -170,7 +172,7 @@ class SmsSender(threading.Thread):
         results = []
         for i, dst in enumerate(dsts):
             if i:
-                time.sleep(max(0.0, float(s["stagger_s"])))     # spread texts out
+                time.sleep(self.pause_s(s))                     # spread texts out, at random
             if not self._under_cap(int(s["max_per_hour"])):
                 detail = "skipped: hourly limit of %s texts reached" % s["max_per_hour"]
                 self._record(dst, text, "SKIPPED", detail)
@@ -185,6 +187,13 @@ class SmsSender(threading.Thread):
         n_ok = sum(1 for _, ok, _ in results if ok)
         summary = "; ".join("%s: %s" % (d, "sent" if ok else det) for d, ok, det in results)
         return n_ok == len(results), "%d of %d sent (%s)" % (n_ok, len(results), summary)
+
+    @staticmethod
+    def pause_s(s):
+        """A random pause between two texts, between the min and max settings."""
+        lo = max(0.0, float(s["stagger_min_s"]))
+        hi = max(lo, float(s["stagger_max_s"]))
+        return random.uniform(lo, hi)
 
     def _under_cap(self, per_hour):
         now = time.monotonic()

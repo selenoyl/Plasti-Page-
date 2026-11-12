@@ -219,7 +219,7 @@ Each call from a cell can also go out as a one-way text, for example
 **On the admin page:**
 - Enter the voip.ms account e-mail and the API password. The password is write-only: it's stored in `/var/lib/p833-receiver/sms_secret.json` (mode 0600, readable only by the paging service) and is never shown again or written to a log.
 - Enter your **SMS-enabled voip.ms number** (DID) to send from, and up to 20 numbers to text. Each number gets its own text, because the voip.ms API doesn't do group chats.
-- **Pause between texts** (default 3 s) spreads one call's texts out, so the carrier doesn't flag a burst as spam. **Most texts per hour** (default 60) caps cost and spam; texts over it are skipped and logged.
+- **Pause between texts** is a **random** time between two settings (default 1 to 10 s). It spreads one call's texts out with no fixed rhythm, so the carrier doesn't flag them as spam. **Most texts per hour** (default 60) caps cost and spam; texts over it are skipped and logged.
 - Set the prefix (default "Chapar:") and the message pattern, then click **Send a test text**.
 - **Send a text** at the top of the box sends one text to any number you type, with or without the prefix. It works even while automatic texts are off.
 
