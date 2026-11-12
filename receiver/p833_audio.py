@@ -13,6 +13,8 @@
 # and any sentence Piper can't make in time falls back to its recorded clip.
 # Standard library only; Python 3.6+.
 
+import collections
+import hashlib
 import io
 import json
 import math
@@ -28,7 +30,17 @@ RATE = 8000
 # Pauses inside a page, in ms (defaults; lang_gap/repeat_gap/tone_gap can be set on
 # the admin page). Paging feedback eliminators end a page after a short silence, so
 # every pause stays well under a second.
-DEFAULT_GAPS = {"lang_gap_ms": 400, "repeat_gap_ms": 500, "tone_gap_ms": 250}
+DEFAULT_GAPS = {"lang_gap_ms": 400, "repeat_gap_ms": 500, "tone_gap_ms": 250, "tone_speech_gap_ms": 500}
+# PA clarity (admin page): shape the speech for a paging horn instead of for listening.
+# Cut the bass (mud through a horn), lift 2-4 kHz (where consonants are: "press" vs
+# "tech"), even out the loudness so every syllable is at the same level, and keep the
+# peaks below full scale so nothing down the line (HT813, ATA2, Norstar, PA amplifier)
+# is overdriven. When it is on, the page volume (gain_db) isn't used: pa_level_db sets
+# the peak level instead.
+CLARITY_DEFAULTS = {"pa_process": False, "pa_highpass_hz": 300, "pa_presence_db": 4, "pa_compress": "medium",
+                    "pa_level_db": -3}
+# evenness: (compressor threshold below the peak dB, ratio, aimed loud-to-average spread dB)
+COMPRESS = {"off": None, "light": (-18.0, 2.0, 15.0), "medium": (-24.0, 3.0, 12.0), "strong": (-30.0, 5.0, 10.0)}
 # How press numbers are spoken: languages listed in audio.speak_digits are read
 # digit by digit ("two, seven"); the others as a whole number ("veintisiete").
 DIGIT_WORDS = {
@@ -163,6 +175,157 @@ def silence(ms):
     return b"\x00\x00" * int(RATE * ms / 1000)
 
 
+def clarity_of(opts):
+    """The PA clarity settings from the audio options, each value checked."""
+    c = dict(CLARITY_DEFAULTS)
+    c["pa_process"] = opts.get("pa_process") is True
+    for key, lo, hi in (("pa_highpass_hz", 0, 600), ("pa_presence_db", 0, 10), ("pa_level_db", -20, 0)):
+        try:
+            v = int(opts.get(key, c[key]))
+            if lo <= v <= hi:
+                c[key] = v
+        except (TypeError, ValueError):
+            pass
+    if opts.get("pa_compress") in COMPRESS:
+        c["pa_compress"] = opts["pa_compress"]
+    return c
+
+
+def _floats(pcm):
+    a = array("h")
+    a.frombytes(pcm[:len(pcm) // 2 * 2])
+    if sys.byteorder != "little":
+        a.byteswap()
+    return [v / 32768.0 for v in a]
+
+
+def _pcm(x):
+    a = array("h", [int(max(-32767, min(32767, round(v * 32767)))) for v in x])
+    if sys.byteorder != "little":
+        a.byteswap()
+    return a.tobytes()
+
+
+def _biquad(x, b0, b1, b2, a1, a2):
+    out, x1, x2, y1, y2 = [], 0.0, 0.0, 0.0, 0.0
+    append = out.append
+    for v in x:
+        y = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        x2, x1, y2, y1 = x1, v, y1, y
+        append(y)
+    return out
+
+
+def _highpass(x, fc, q=0.7071):
+    """2nd-order high-pass (RBJ cookbook)."""
+    w = 2 * math.pi * fc / RATE
+    al, cw = math.sin(w) / (2 * q), math.cos(w)
+    a0 = 1 + al
+    return _biquad(x, (1 + cw) / 2 / a0, -(1 + cw) / a0, (1 + cw) / 2 / a0, -2 * cw / a0, (1 - al) / a0)
+
+
+def _presence(x, gain_db, fc=2500.0, q=1.0):
+    """Peaking boost around fc (RBJ cookbook)."""
+    w = 2 * math.pi * fc / RATE
+    al, cw, a = math.sin(w) / (2 * q), math.cos(w), 10 ** (gain_db / 40.0)
+    a0 = 1 + al / a
+    return _biquad(x, (1 + al * a) / a0, -2 * cw / a0, (1 - al * a) / a0, -2 * cw / a0, (1 - al / a) / a0)
+
+
+def _compress(x, threshold_db, ratio, attack_ms=3.0, release_ms=60.0):
+    """Even out the loudness: above the threshold (relative to the peak), level rises
+    only 1/ratio as fast. A peak follower with fast attack and slower release."""
+    peak = max((abs(v) for v in x), default=0.0)
+    if peak <= 0:
+        return x
+    thr = peak * 10 ** (threshold_db / 20.0)
+    att, rel = math.exp(-1.0 / (RATE * attack_ms / 1000.0)), math.exp(-1.0 / (RATE * release_ms / 1000.0))
+    slope, env, out = 1.0 / ratio - 1.0, 0.0, []
+    append = out.append
+    for v in x:
+        av = abs(v)
+        env = att * env + (1 - att) * av if av > env else rel * env + (1 - rel) * av
+        append(v * (env / thr) ** slope if env > thr else v)
+    return out
+
+
+def _speech_rms(x):
+    loud = [v * v for v in x if abs(v) > 1e-3]
+    return math.sqrt(sum(loud) / len(loud)) if loud else 0.0
+
+
+def _limit(x, ceiling, look=40, release_ms=50.0):
+    """Look-ahead limiter: the level is turned down smoothly just before each peak (5 ms
+    ahead) and back up after it, so peaks never pass the ceiling and nothing is clipped."""
+    n = len(x)
+    need = [min(1.0, ceiling / abs(v)) if v else 1.0 for v in x]
+    ahead, dq = [1.0] * n, collections.deque()
+    for i in range(n - 1, -1, -1):              # the lowest level needed over the next 5 ms
+        while dq and need[dq[-1]] >= need[i]:
+            dq.pop()
+        dq.append(i)
+        while dq[0] > i + look:
+            dq.popleft()
+        ahead[i] = need[dq[0]]
+    rel = math.exp(-1.0 / (RATE * release_ms / 1000.0))
+    g, gains = 1.0, []
+    for a in ahead:                             # down at once (it is already 5 ms early), up slowly
+        g = a if a < g else rel * g + (1 - rel) * a
+        gains.append(g)
+    half, out, acc = look // 4, [], 0.0           # a short average smooths each step
+    window = collections.deque()
+    for i, v in enumerate(x):
+        j = i + half
+        if j < n:
+            window.append(gains[j])
+            acc += gains[j]
+        if len(window) > 2 * half + 1:
+            acc -= window.popleft()
+        out.append(v * min(gains[i], acc / len(window)))
+    return [max(-ceiling, min(ceiling, v)) for v in out]   # (a last guard; rarely touches anything)
+
+
+_CLARITY_CACHE = collections.OrderedDict()
+
+
+def pa_process(pcm, c):
+    """Speech shaped for the PA (see CLARITY_DEFAULTS). Remembered for the last few hundred
+    sentences, since the same messages come again and again."""
+    key = (hashlib.sha1(pcm).hexdigest(), c["pa_highpass_hz"], c["pa_presence_db"], c["pa_compress"],
+           c["pa_level_db"])
+    if key in _CLARITY_CACHE:
+        _CLARITY_CACHE.move_to_end(key)
+        return _CLARITY_CACHE[key]
+    x = _floats(pcm)
+    if c["pa_highpass_hz"]:
+        x = _highpass(x, c["pa_highpass_hz"])
+    if c["pa_presence_db"]:
+        x = _presence(x, c["pa_presence_db"])
+    spread = 15.0
+    if COMPRESS.get(c["pa_compress"]):
+        thr, ratio, spread = COMPRESS[c["pa_compress"]]
+        x = _compress(x, thr, ratio)
+    rms = _speech_rms(x)
+    if rms > 0:                                 # bring the average up, then hold the peaks down
+        g = 10 ** ((c["pa_level_db"] - spread) / 20.0) / rms
+        x = _limit([v * g for v in x], 10 ** (c["pa_level_db"] / 20.0))
+    out = _pcm(x)
+    _CLARITY_CACHE[key] = out
+    while len(_CLARITY_CACHE) > 400:
+        _CLARITY_CACHE.popitem(last=False)
+    return out
+
+
+def level_only(pcm, level_db):
+    """Tones with PA clarity on: just brought to the same peak level as the speech."""
+    x = _floats(pcm)
+    peak = max((abs(v) for v in x), default=0.0)
+    if peak <= 0:
+        return pcm
+    g = 10 ** (level_db / 20.0) / peak
+    return _pcm([v * g for v in x])
+
+
 class AudioLibrary:
     def __init__(self, folder):
         self.folder = folder
@@ -219,12 +382,24 @@ class AudioLibrary:
                     # The single tone twice with a short gap (the "twice" files have long
                     # gaps inside that a feedback eliminator can take as the end of the page).
                     tone = tone + silence(_gap(cfg, "tone_gap_ms")) + tone
-                return tone + silence(300), []
+                return self._level_tone(cfg, tone) + silence(_gap(cfg, "tone_speech_gap_ms")), []
             except AudioError:
                 note = "tone %s missing, chime used" % key
         else:
             note = ""
-        return self._frames("chime.wav") + silence(300), [note] if note else []
+        return (self._level_tone(cfg, self._frames("chime.wav")) + silence(_gap(cfg, "tone_speech_gap_ms")),
+                [note] if note else [])
+
+    @staticmethod
+    def _level_tone(cfg, tone):
+        c = clarity_of(cfg.get("audio", {}))
+        return level_only(tone, c["pa_level_db"]) if c["pa_process"] else tone
+
+    @staticmethod
+    def speech(cfg, pcm):
+        """One sentence (or the voice lab's text), shaped for the PA if PA clarity is on."""
+        c = clarity_of(cfg.get("audio", {}))
+        return pa_process(pcm, c) if c["pa_process"] else pcm
 
     def pieces(self, cfg, code, press, lang):
         """Clip keys for one language, plus any 'text changed' warnings."""
@@ -286,7 +461,7 @@ class AudioLibrary:
             parts.append(b"".join(self._frames(k) for k in keys))
         if not parts:
             raise AudioError("; ".join(notes) or "nothing to say")
-        body = silence(_gap(cfg, "lang_gap_ms")).join(parts)
+        body = silence(_gap(cfg, "lang_gap_ms")).join(self.speech(cfg, p) for p in parts)
         lead, tone_notes = self._lead_in_safe(cfg, code, piper)
         return self._wrap(lead, body, opts), notes + tone_notes
 
@@ -312,10 +487,11 @@ class AudioLibrary:
             raise
         except Exception as e:
             raise AudioError("%s: %s" % (e.__class__.__name__, e))
+        body = self.speech(cfg, body)
         if es and "es" in opts.get("languages", ["en", "es"]):
             try:
-                body += silence(_gap(cfg, "lang_gap_ms")) + self.voice.text(
-                    "es", es, vs=vs, urgent=urgent, timeout=max(0.0, end - time.monotonic()))
+                body += silence(_gap(cfg, "lang_gap_ms")) + self.speech(cfg, self.voice.text(
+                    "es", es, vs=vs, urgent=urgent, timeout=max(0.0, end - time.monotonic())))
             except Exception:
                 pass                         # the English part still goes out
         lead, notes = self._lead_in_safe(cfg, None, True)
@@ -328,7 +504,8 @@ class AudioLibrary:
         gap = silence(int(opts.get("repeat_gap_ms", DEFAULT_GAPS["repeat_gap_ms"])))
         frames = (silence(int(opts.get("lead_silence_ms", 0)))
                   + (once + gap) * (repeat - 1) + once + silence(300))
-        frames = apply_gain(frames, float(opts.get("gain_db", 0)))
+        if not clarity_of(opts)["pa_process"]:       # with PA clarity, the level is set already
+            frames = apply_gain(frames, float(opts.get("gain_db", 0)))
         out = io.BytesIO()
         with wave.open(out, "wb") as w:
             w.setnchannels(1)

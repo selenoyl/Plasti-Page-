@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.11.1:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.12.0:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -240,6 +240,33 @@ Each call from a cell can also go out as a one-way text, for example
 - voip.ms's API takes the password in the HTTPS address, so if the plant has a firewall that opens HTTPS traffic to inspect it, exempt voip.ms (or the laptop) from that.
 - On the voip.ms account, turn off international and premium-rate calling if you don't use them, and keep a small prepaid balance with automatic recharge off, so a stolen API password can't run up a big bill.
 - The API password can only be saved over HTTPS (the normal admin page). If the admin page ever shows "not encrypted", the password field is ignored.
+
+## PA clarity (if people can hear pages but not understand them)
+
+The **PA clarity** box on the admin page shapes the speech for paging horns instead of for listening:
+- **Cut the bass** below about 300 Hz. Through a horn, bass is just mud.
+- **Clarity boost** of a few dB at 2 to 4 kHz, where consonants are ("press" vs "tech").
+- **Even out the loudness** so quiet syllables come up and every word carries over machine noise.
+- **Output level**: the peaks are held smoothly at this level (-3 dB below the top to start) by a
+  look-ahead limiter, so nothing is clipped. That includes the HT813, the ATA2, the Norstar and the PA
+  amplifier further down the line.
+- **Pause after the tone**: half a second between the tone and the first word, so ears can turn to it
+  (0.3 s before; this one applies with PA clarity on or off).
+
+Why: the **Page volume** of +8 dB pushes every page into a limiter. Measured on the recordings, it bends
+13 to 19% of the speech and sends very hot peaks down the phone line. That gives "loud but mushy", and
+it can overdrive the equipment after it. With PA clarity on, the Page volume isn't used.
+
+How to try it:
+1. Tick **Shape pages for the PA**, then **Preview** a page. Untick and Preview again to compare.
+   Nothing is saved until you click **Save**.
+2. Save it and page the floor. It's about 5 dB quieter than +8 dB was, but clean: turn the **paging
+   amplifier** up rather than the Output level. If a page ever sounds crunchy or buzzy, the level is too
+   hot somewhere: lower the Output level (or the HT813's FXO **Gain TX**) and raise the amplifier instead.
+3. In noisy areas, "Even out the loudness: a lot" can help further.
+
+Two things software can't fix: cone speakers in loud areas lose to machine noise (horn speakers carry
+speech far better), and the phone line itself carries only 300 to 3,400 Hz.
 
 ## Page voice (choose the voice pages are spoken in)
 

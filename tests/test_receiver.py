@@ -126,23 +126,23 @@ class Audio(unittest.TestCase):
         cfg["codes"] = self.cfg["codes"]
         lead = 8 * self.cfg["audio"]["lead_silence_ms"]
         langgap, repgap = 8 * 400, 8 * 500           # default pauses: English->Spanish, before the repeat
-        # tone 100 frames + 0.3 s; per language: one whole-sentence clip (80 frames in the fake library)
+        # tone 100 frames + 0.5 s; per language: one whole-sentence clip (80 frames in the fake library)
         lang = 80
-        once = 100 + 2400 + lang + langgap + lang
+        once = 100 + 4000 + lang + langgap + lang
         cfg["audio"] = dict(self.cfg["audio"], repeat=1)
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=2)
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once + repgap + once + 2400)
         # the pauses follow the settings
         cfg["audio"] = dict(self.cfg["audio"], repeat=2, lang_gap_ms=200, repeat_gap_ms=300)
-        once2 = 100 + 2400 + lang + 1600 + lang
+        once2 = 100 + 4000 + lang + 1600 + lang
         self.assertEqual(self.frames(self.lib.build(cfg, 8, 27)[0]), lead + once2 + 2400 + once2 + 2400)
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=0, tones="off", languages=["en"])
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 5)[0]), 80 + 2400)
         # twice = the single tone (100 frames) twice with the tone gap (250 ms) between
         cfg["audio"] = dict(self.cfg["audio"], repeat=1, lead_silence_ms=3000, tones="twice", languages=["en"])
-        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 24000 + 100 + 2000 + 100 + 2400 + 80 + 2400)
+        self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 24000 + 100 + 2000 + 100 + 4000 + 80 + 2400)
         # older config: "chime": false means no tone; no lead silence set = none
         cfg["audio"] = {"repeat": 1, "chime": False, "languages": ["en"]}
         self.assertEqual(self.frames(self.lib.build(cfg, 2, 0)[0]), 80 + 2400)
@@ -1116,6 +1116,30 @@ class Server(unittest.TestCase):
                 return [" ".join(x["text"] for x in json.loads(line)["segments"] if "text" in x) for line in f]
         except OSError:
             return []
+
+    CLARITY_FORM = {"pa_process": "on", "pa_highpass_hz": "300", "pa_presence_db": "4", "pa_compress": "medium",
+                    "pa_level_db": "-3", "tone_speech_gap_ms": "500"}
+
+    def test_pa_clarity_preview_and_save(self):
+        page = self.admin("/admin")[2]
+        self.assertIn("PA clarity is <b>off</b>", page)                   # off until switched on
+        st, ctype, body = self.voice_post("/admin/clarity/preview", dict(self.CLARITY_FORM, code="2", press="27"))
+        self.assertEqual((st, ctype), (200, "audio/wav"))
+        self.assertFalse(self.cfg["audio"]["pa_process"])                   # a preview saves nothing
+        _, loc, _ = self.admin("/admin/clarity/save", self.CLARITY_FORM)
+        self.assertIn("PA clarity is ON", urllib.parse.unquote(loc))
+        self.assertTrue(self.cfg["audio"]["pa_process"])
+        again = R.State(R.load_config(CONFIG), self.tmp, self.tmp)          # kept through a restart
+        self.assertTrue(again.cfg["audio"]["pa_process"])
+        self.assertEqual(again.cfg["audio"]["pa_level_db"], -3)
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        self.assertEqual(self.wait_row()["result"], "sent")
+        _, loc, _ = self.admin("/admin/clarity/save", dict(self.CLARITY_FORM, pa_level_db="5"))
+        self.assertIn("not saved", urllib.parse.unquote(loc))
+        _, loc, _ = self.admin("/admin/clarity/save", {k: v for k, v in self.CLARITY_FORM.items() if k != "pa_process"})
+        self.assertIn("off", urllib.parse.unquote(loc))
+        self.assertFalse(self.cfg["audio"]["pa_process"])
 
     def test_admin_page_updates_in_place_instead_of_reloading(self):
         page = self.admin("/admin")[2]

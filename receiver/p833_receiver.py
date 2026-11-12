@@ -37,12 +37,13 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from p833_audio import AudioError, AudioLibrary, tone_style  # noqa: E402
+import p833_audio  # noqa: E402
 from p833_sip import SipPager  # noqa: E402
 import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.11.1"
+VERSION = "0.12.0"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -278,6 +279,9 @@ def load_config(path):
     audio.setdefault("lang_gap_ms", 400)
     audio.setdefault("repeat_gap_ms", 500)
     audio.setdefault("tone_gap_ms", 250)
+    audio.setdefault("tone_speech_gap_ms", 500)   # after the tone, before the first word
+    for k, v in p833_audio.CLARITY_DEFAULTS.items():  # PA clarity (admin page)
+        audio.setdefault(k, v)
     audio.setdefault("speak_digits", ["en"])     # languages whose press numbers are read digit by digit
     # Voice lab (Piper on the laptop, set up by install/install_tts.sh)
     audio.setdefault("tts_python", os.path.join(here, "tts", "bin", "python"))
@@ -381,6 +385,11 @@ class State:
         self.defaults = json.loads(json.dumps(tuning_of(self.cfg)))
         if isinstance(self.settings.get("tuning"), dict):
             apply_tuning(self.cfg, self.settings["tuning"])
+        if isinstance(self.settings.get("clarity"), dict):
+            self.cfg["audio"].update(p833_audio.clarity_of(self.settings["clarity"]))
+            gap = self.settings["clarity"].get("tone_speech_gap_ms")
+            if isinstance(gap, int) and 0 <= gap <= 800:
+                self.cfg["audio"]["tone_speech_gap_ms"] = gap
         if isinstance(self.settings.get("voice"), dict):
             self.cfg["audio"]["voice"] = self.settings["voice"]
         if isinstance(self.settings.get("sms"), dict):
@@ -405,6 +414,13 @@ class State:
                 self.calls = list(csv.DictReader(f))[-50:]
         except OSError:
             self.calls = []
+
+    def set_clarity(self, c, who=""):
+        with self.lock:
+            self.cfg["audio"].update(c)
+            self.settings["clarity"] = c
+            self._save_settings()
+        LOG.info("PA clarity saved on the admin page (%s): %s", who, json.dumps(c, sort_keys=True))
 
     def set_voice(self, voice, who=""):
         with self.lock:
@@ -870,10 +886,9 @@ def lab_wav(app, form):
     if tone:
         if tone not in lib.tone_names():
             raise AudioError("unknown tone")
-        lead = lib._frames("tones/single/%s.wav" % tone) + b"\x00\x00" * 2400
-    return lib._wrap(lead, body, {"repeat": plays, "lead_silence_ms": 0,
-                                  "repeat_gap_ms": cfg["audio"].get("repeat_gap_ms", 500),
-                                  "gain_db": cfg["audio"].get("gain_db", 0)})
+        lead = lib._level_tone(cfg, lib._frames("tones/single/%s.wav" % tone)) + \
+            p833_audio.silence(cfg["audio"].get("tone_speech_gap_ms", 500))
+    return lib._wrap(lead, lib.speech(cfg, body), dict(cfg["audio"], repeat=plays, lead_silence_ms=0))
 
 
 # ------------------------------------------------------------ web server ---
@@ -1157,8 +1172,8 @@ class Handler(BaseHTTPRequestHandler):
                         tone = self.app["cfg"]["codes"][2].get("tone", "")
                         one = lib._frames("tones/single/%s.wav" % tone) if tone else lib._frames("chime.wav")
                         gap = b"\x00\x00" * (8 * int(self.app["cfg"]["audio"].get("tone_gap_ms", 250)))
-                        wav = lib._wrap(b"", one + gap + one, {"repeat": 1, "lead_silence_ms": 0,
-                                                               "gain_db": self.app["cfg"]["audio"].get("gain_db", 0)})
+                        wav = lib._wrap(b"", lib._level_tone(self.app["cfg"], one + gap + one),
+                                        dict(self.app["cfg"]["audio"], repeat=1, lead_silence_ms=0))
                 except AudioError as e:
                     return self._back("Phone test not run: no audio to play (%s)" % e)
             LOG.info("phone %s from admin page (%s)", "digit trial %s" % digits if digits else "connection test", who)
@@ -1206,6 +1221,31 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/admin/voice/"):
             return self._voice_post(path, form, who)
+
+        if path in ("/admin/clarity/preview", "/admin/clarity/save"):
+            c, errs = parse_clarity_form(form)
+            if path == "/admin/clarity/save":
+                if errs:
+                    return self._back("PA clarity not saved: " + "; ".join(errs) + ".")
+                st.set_clarity(c, who)
+                return self._back("PA clarity is %s." % (
+                    "ON: pages are shaped for the PA, at %d dB" % c["pa_level_db"] if c["pa_process"] else
+                    "off: pages play as before, at the page volume"))
+            try:
+                code, press = int(form.get("code", "2")), int(form.get("press", "27"))
+                if code not in self.app["cfg"]["codes"] or not 0 <= press <= 999:
+                    raise ValueError
+            except ValueError:
+                errs.append("pick a code, and a press from 0 to 999")
+            if errs:
+                return self._reply(400, ("PA clarity: " + "; ".join(errs) + ".").encode(), "text/plain; charset=utf-8")
+            cfg = dict(self.app["cfg"], audio=dict(self.app["cfg"]["audio"], **c))   # not saved: just this preview
+            try:
+                wav, _notes = self.app["worker"].audio.build(cfg, code, press, urgent=False,
+                                                             timeout=p833_voice.SLOW_TIMEOUT_S)
+            except AudioError as e:
+                return self._reply(400, ("PA clarity: %s" % e).encode(), "text/plain; charset=utf-8")
+            return self._reply(200, wav, "audio/wav")
 
         if path == "/admin/sms":
             sms_form, errs = parse_sms_form(form)
@@ -1736,6 +1776,69 @@ carrier doesn't flag a burst or a fixed rhythm as spam.</td></tr>
        "\n".join(rows) or "<tr><td colspan=4>none yet</td></tr>")
 
 
+def parse_clarity_form(form):
+    """PA clarity settings from the admin form. Returns (settings, errors)."""
+    errs = []
+    c = {"pa_process": form.get("pa_process") == "on",
+         "pa_compress": form.get("pa_compress", "medium")}
+    if c["pa_compress"] not in p833_audio.COMPRESS:
+        errs.append("pick how much to even out the loudness")
+    for key, label, lo, hi in (("pa_highpass_hz", "Cut the bass below", 0, 600),
+                               ("pa_presence_db", "Clarity boost", 0, 10),
+                               ("pa_level_db", "Output level", -20, 0),
+                               ("tone_speech_gap_ms", "Pause after the tone", 0, 800)):
+        try:
+            c[key] = int(form.get(key, "") or 0)
+            if not lo <= c[key] <= hi:
+                raise ValueError
+        except ValueError:
+            errs.append("%s must be %d to %d" % (label, lo, hi))
+    return c, errs
+
+
+def clarity_html(app):
+    """The PA clarity card: shape pages for a paging horn, hear it, save it."""
+    cfg, e = app["cfg"], html.escape
+    a = cfg["audio"]
+    c = p833_audio.clarity_of(a)
+    sel = "".join("<option value='%s'%s>%s</option>" % (k, " selected" if k == c["pa_compress"] else "", label)
+                  for k, label in (("off", "off"), ("light", "a little"), ("medium", "medium"), ("strong", "a lot")))
+    copts = "".join("<option value='%d'>%d: %s</option>" % (k, k, e(cfg["codes"][k]["who"])) for k in sorted(cfg["codes"]))
+    return """
+<div class=card><h2>PA clarity</h2>
+<p>PA clarity is <b>%s</b>.</p>
+<p class=small>Shapes the speech for paging horns instead of for listening: cuts the bass (it turns to mud
+through a horn), lifts 2-4 kHz where the consonants are ("press" vs "tech"), evens out the loudness so
+every syllable comes through, and keeps the peaks below the top so nothing down the line (HT813, ATA2,
+Norstar, the PA amplifier) is overdriven, which is the usual reason for "I can hear it but can't
+understand it". With it on, the Page volume setting isn't used: Output level sets the level instead.</p>
+<form id=clarityform method=post action='/admin/clarity/save'><div class=w><table>
+<tr><td>Shape pages for the PA</td><td><input type=checkbox name=pa_process%s></td>
+<td class=small>Untick to go back to how pages sounded before (at the Page volume).</td></tr>
+<tr><td>Cut the bass below (Hz)</td><td><input name=pa_highpass_hz type=number min=0 max=600 step=10 value='%d' style='width:5em'></td>
+<td class=small>250 to 300 is usual. 0 = no cut.</td></tr>
+<tr><td>Clarity boost (dB)</td><td><input name=pa_presence_db type=number min=0 max=10 step=1 value='%d' style='width:5em'></td>
+<td class=small>Lifts 2-4 kHz. 3 to 5 is usual; too much sounds harsh.</td></tr>
+<tr><td>Even out the loudness</td><td><select name=pa_compress>%s</select></td>
+<td class=small>More makes quiet syllables louder, so every word carries over machine noise.</td></tr>
+<tr><td>Output level (dB)</td><td><input name=pa_level_db type=number min=-20 max=0 step=1 value='%d' style='width:5em'></td>
+<td class=small>How high the peaks go (0 = the top). If pages sound crunchy or buzzy on the floor, lower
+this and turn the paging amplifier up instead. -3 is a safe start.</td></tr>
+<tr><td>Pause after the tone (ms)</td><td><input name=tone_speech_gap_ms type=number min=0 max=800 step=10 value='%d' style='width:5em'></td>
+<td class=small>Time for ears to turn to the speaker before the first word. 500 is usual; keep it under 800
+(a longer silence can end the page). This one applies with PA clarity on or off.</td></tr>
+</table></div>
+<label>Hear code <select name=code>%s</select></label>
+<label>at press <input name=press type=number min=0 max=999 value=27 style='width:5em'></label>
+<button type=button onclick="p833Clarity()">Preview (in this browser)</button>
+<button>Save</button>
+</form><div id=prev-clarity class=preview></div>
+<p class=small>Preview uses the settings above without saving, so you can tick and untick and compare.
+A laptop or phone speaker isn't a paging horn: the real test is a page on the floor.</p></div>
+""" % ("ON" if c["pa_process"] else "off", " checked" if c["pa_process"] else "", c["pa_highpass_hz"],
+       c["pa_presence_db"], sel, c["pa_level_db"], int(a.get("tone_speech_gap_ms", 500)), copts)
+
+
 def voice_job_line(pv):
     """How "Make all messages" is getting on (updated live on the admin page)."""
     job, e = dict(pv.job), html.escape
@@ -1850,6 +1953,17 @@ function p833Lab(){
   var fd=new FormData(f); fd.set('action','preview');
   box.innerHTML='Speaking... (a few seconds)';
   fetch('/admin/voicelab',{method:'POST',body:new URLSearchParams(fd),credentials:'same-origin'}).then(function(r){
+    if(!r.ok){return r.text().then(function(t){box.innerHTML=p833Esc(t);});}
+    return r.blob().then(function(b){
+      box.innerHTML='<audio controls autoplay src="'+URL.createObjectURL(b)+'"></audio>';});
+  }).catch(function(e){box.innerHTML='Preview failed: '+p833Esc(e);});
+}
+function p833Clarity(){
+  dirty=true;
+  var f=document.getElementById('clarityform'), box=document.getElementById('prev-clarity');
+  if(!f.reportValidity()){return;}
+  box.innerHTML='Making the page...';
+  fetch('/admin/clarity/preview',{method:'POST',body:new URLSearchParams(new FormData(f)),credentials:'same-origin'}).then(function(r){
     if(!r.ok){return r.text().then(function(t){box.innerHTML=p833Esc(t);});}
     return r.blob().then(function(b){
       box.innerHTML='<audio controls autoplay src="'+URL.createObjectURL(b)+'"></audio>';});
@@ -2055,7 +2169,7 @@ def page_html(app, admin, msg=""):
                     "0 = as recorded. 6 is a good start; above that the loud parts are squeezed by a limiter, so "
                     "if it sounds harsh or distorted on the floor, turn it down. Preview and Listen play at this "
                     "volume. Other places to turn it up: the paging amplifier's own volume, and the HT813's FXO "
-                    "port <i>Gain TX</i>.</td></tr>" % int(cfg["audio"]["gain_db"]))
+                    "port <i>Gain TX</i>. Not used while PA clarity is on (see that box).</td></tr>" % int(cfg["audio"]["gain_db"]))
         for key, label, help_ in (
                 ("tone_gap_ms", "Pause between the two tones (ms)", "When the tone plays twice."),
                 ("lang_gap_ms", "Pause between English and Spanish (ms)", ""),
@@ -2150,7 +2264,7 @@ Use an existing ID to rename its cell. Remove boards in the table below.</p></di
 <p class=small>Your own wording (leave Spanish empty for English only). Logged as code "custom".
 Custom text is spoken by Piper with the page voice (Preview lets you hear it); without Piper on the laptop, a live custom page fails.</p></div>
 """ % (switch, live_warn, board_opts, code_opts, audio_html, live_warn, zone_opts) + phone_html + sms_html(app) \
-            + voice_html(app) + lab_html(app) + PREVIEW_JS
+            + clarity_html(app) + voice_html(app) + lab_html(app) + PREVIEW_JS
 
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

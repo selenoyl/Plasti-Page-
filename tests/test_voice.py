@@ -298,8 +298,8 @@ class Pages(unittest.TestCase):
         self.assertEqual([json.loads(c[2])[0]["text"] for c in self.engine.calls],
                          ["Maintenance requested to press two, seven.",
                           "Se solicita mantenimiento en la prensa 27."])
-        # tone 100 + 300 silence, en 800, gap 400 ms, es 800; twice with a 500 ms gap; 300 ms end
-        once = 100 + 2400 + 800 + 3200 + 800
+        # tone 100 + 500 ms pause, en 800, gap 400 ms, es 800; twice with a 500 ms gap; 300 ms end
+        once = 100 + 4000 + 800 + 3200 + 800
         self.assertEqual(self.frames(wav), once * 2 + 4000 + 2400)
 
     def test_press_above_100_is_spoken(self):
@@ -312,7 +312,7 @@ class Pages(unittest.TestCase):
         wav, notes = self.lib.build(self.cfg, 2, 27)
         self.assertEqual(len([n for n in notes if "Piper voice failed (Piper took too long)" in n]), 1)
         self.assertEqual(len(self.engine.calls), 1)          # after one failure, the rest of the page doesn't wait
-        once = 100 + 2400 + 80 + 3200 + 80                  # the fake recorded clips are 10 ms each
+        once = 100 + 4000 + 80 + 3200 + 80                  # the fake recorded clips are 10 ms each
         self.assertEqual(self.frames(wav), once * 2 + 4000 + 2400)
 
     def test_unexpected_error_still_pages(self):
