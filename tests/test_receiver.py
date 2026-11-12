@@ -1158,6 +1158,105 @@ sys.stdout.buffer.write(b.getvalue())
         self.assertEqual(fake.requests[0][1]["message"], "Chapar: Test text from the paging system.")
 
 
+@unittest.skipUnless(shutil.which("openssl"), "needs the openssl command")
+class Https(unittest.TestCase):
+    """The admin page over HTTPS on the same port; boards keep plain HTTP."""
+
+    def setUp(self):
+        import subprocess, ssl
+        self.tmp = tempfile.mkdtemp()
+        cert, key = os.path.join(self.tmp, "cert.pem"), os.path.join(self.tmp, "key.pem")
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                        "-subj", "/CN=p833-test", "-keyout", key, "-out", cert],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cfg = R.load_config(CONFIG)
+        cfg.update(tls_cert=cert, tls_key=key)
+        self.state = R.State(cfg, self.tmp, self.tmp)
+        self.state.dry_run = True
+        self.worker = R.PageWorker(cfg, self.state, FakePager(),
+                                   dry_pager=R.DryRunPager(os.path.join(self.tmp, "lp"), cfg),
+                                   audio=A.AudioLibrary(make_fake_audio(os.path.join(self.tmp, "audio"))))
+        self.worker.start()
+        R.Handler.login_fails.clear()
+        R.Handler.app = {"cfg": cfg, "state": self.state, "worker": self.worker, "key": KEY,
+                         "admin_password": ADMIN_PW, "state_dir": self.tmp}
+        tls, why = R.tls_context(cfg)
+        self.assertIsNotNone(tls, why)
+        self.srv = R.Server(("127.0.0.1", 0), R.Handler, tls=tls)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.ctx = ssl.create_default_context()
+        self.ctx.check_hostname = False
+        self.ctx.verify_mode = ssl.CERT_NONE           # self-signed, like the browser's "proceed"
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        shutil.rmtree(self.tmp)
+
+    def open(self, url, data=None, origin=None, auth=True):
+        req = urllib.request.Request(url, data=data)
+        if auth:
+            req.add_header("Authorization", "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode())
+        if origin:
+            req.add_header("Origin", origin)
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=self.ctx), NoRedirect)
+        try:
+            with opener.open(req, timeout=5) as r:
+                return r.status, r.headers.get("Location", ""), r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Location", ""), e.read().decode()
+
+    def test_admin_over_https(self):
+        st, _, body = self.open("https://127.0.0.1:%d/admin" % self.port)
+        self.assertEqual(st, 200)
+        self.assertIn("Send a test call", body)
+        self.assertNotIn("not encrypted", body)
+        base = "https://127.0.0.1:%d" % self.port
+        st, loc, _ = self.open(base + "/admin/board/add", b"board=X9&cell=Nine", origin=base)
+        self.assertEqual((st, loc[:6]), (303, "/admin"))
+        self.assertIn("X9", self.state.registry)
+
+    def test_plain_http_admin_is_sent_to_https(self):
+        st, loc, _ = self.open("http://127.0.0.1:%d/admin?msg=hi" % self.port, auth=False)
+        self.assertEqual((st, loc), (302, "https://127.0.0.1:%d/admin?msg=hi" % self.port))
+        st, _, body = self.open("http://127.0.0.1:%d/admin/board/add" % self.port, b"board=X8&cell=E",
+                                origin="http://127.0.0.1:%d" % self.port)
+        self.assertEqual(st, 403)                      # never handled over plain HTTP
+        self.assertNotIn("X8", self.state.registry)
+
+    def test_boards_and_status_work_both_ways(self):
+        body = {"board": "RSP_LH", "boot": "b1", "seq": 1, "code": 2, "press": 27}
+        self.assertEqual(S.post("http://127.0.0.1:%d/call" % self.port, body, KEY)[0], 200)
+        req = urllib.request.Request("https://127.0.0.1:%d/heartbeat" % self.port,
+                                     data=json.dumps({"board": "RSP_LH"}).encode(),
+                                     headers={"X-P833-Key": KEY, "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, context=self.ctx, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+        with urllib.request.urlopen("http://127.0.0.1:%d/status.json" % self.port, timeout=5) as r:
+            self.assertEqual(r.status, 200)
+
+    def test_bad_hello_does_not_stop_the_server(self):
+        import socket
+        c = socket.create_connection(("127.0.0.1", self.port))
+        c.sendall(b"\x16\x03\x01garbage")
+        c.settimeout(3)
+        try:
+            c.recv(100)
+        except OSError:
+            pass
+        c.close()
+        self.assertEqual(self.open("https://127.0.0.1:%d/admin" % self.port)[0], 200)
+
+    def test_no_certificate_means_plain_admin_with_a_warning(self):
+        cfg = dict(R.Handler.app["cfg"], tls_cert=os.path.join(self.tmp, "missing.pem"))
+        tls, why = R.tls_context(cfg)
+        self.assertIsNone(tls)
+        self.assertIn("no certificate", why)
+        R.Handler.app["https_problem"] = why
+        self.assertIn("not encrypted", R.page_html(R.Handler.app, True))
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):
         return None

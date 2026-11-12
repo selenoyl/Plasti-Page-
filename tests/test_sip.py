@@ -47,6 +47,10 @@ class Pager(unittest.TestCase):
         self.assertTrue(self.ht.wait_bye())
         self.assertTrue(self.ht.got_ack)
         self.assertEqual(self.ht.digits, ["F", "*", "6", "1", "1"])
+        for _ in range(50):                                        # the fake counts the last
+            if self.ht.audio_frames >= 50:                         # packet a moment after BYE
+                break
+            time.sleep(0.02)
         self.assertEqual(self.ht.audio_frames, 50)                 # 1 s of audio = 50 x 20 ms
         first = self.ht.invites[0][0]
         self.assertTrue(first.startswith("INVITE sip:127.0.0.1:%d SIP/2.0" % self.ht.port), first)

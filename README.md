@@ -32,7 +32,7 @@ No real page can go out.
 - Sends pages one at a time, because there is one phone line. A failed page is retried 3 times, 10 s apart.
 - Logs every call and its result to `/var/log/p833-receiver/calls.csv`. Results are dry-run, sent, FAILED or repeat dropped.
 - Shows each board's last-heard time and the last 50 calls at `http://<laptop>:8833/`. It also logs a warning when a board has been silent for 3 minutes.
-- Has an admin page at `http://<laptop>:8833/admin`, behind a password, for test calls, custom pages, boards and the dry-run switch. See "The admin page" below.
+- Has an admin page at `https://<laptop>:8833/admin` (HTTPS, same port), behind a password, for test calls, custom pages, boards and the dry-run switch. See "The admin page" below.
 
 ## Install on the laptop (AlmaLinux 8 or 9)
 
@@ -64,7 +64,7 @@ No real page can go out.
    - Writes `/etc/p833-receiver/config.json`, with dry run on. If one exists, it is kept and never overwritten.
    - Creates `/etc/p833-receiver/secrets.env` with a random board key and admin page password, and prints the password. Only root can read the file. On an update it is kept, and anything new is added to it.
    - Installs and starts the systemd service `p833-receiver`, which restarts itself if it stops.
-   - Opens only port 8833/tcp in firewalld.
+   - Opens only port 8833/tcp in firewalld (to every network, or only to the networks you list; see "Security").
    - Leaves SELinux on and just restores the normal file labels.
 
 3. Keep the laptop running with the lid shut, then reboot once:
@@ -95,7 +95,7 @@ Without internet: download the new zip on another PC, unzip it into a **new** fo
 
 ## The admin page
 
-Open `http://<laptop IP>:8833/admin`. The browser asks for a user name and password: any user name works, and the password is `P833_ADMIN_PASSWORD` from `secrets.env`. The status page at `/` stays open and read-only.
+Open `https://<laptop IP>:8833/admin` (plain `http://` is sent there). The first time, the browser warns about the certificate: the installer made it on the laptop, so no outside company vouches for it. Check that the fingerprint matches the one the installer printed (`sudo openssl x509 -in /etc/p833-receiver/tls/cert.pem -noout -fingerprint -sha256`), then choose **Advanced > Proceed**. The browser asks for a user name and password: any user name works, and the password is `P833_ADMIN_PASSWORD` from `secrets.env`. The status page at `/` stays open and read-only.
 
 | Section | What it does |
 |---|---|

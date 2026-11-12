@@ -23,7 +23,9 @@ import logging
 import os
 import queue
 import re
+import socket
 import socketserver
+import ssl
 import subprocess
 import sys
 import threading
@@ -251,6 +253,11 @@ def load_config(path):
     cfg.setdefault("board_silent_after_s", 180)
     cfg.setdefault("page_retries", 3)
     cfg.setdefault("page_retry_wait_s", 10)
+    # The admin page over HTTPS (same port; boards keep plain HTTP). install.sh makes the
+    # certificate. Without it the admin page stays on plain HTTP and says so.
+    cfg.setdefault("admin_https", True)
+    cfg.setdefault("tls_cert", "/etc/p833-receiver/tls/cert.pem")
+    cfg.setdefault("tls_key", "/etc/p833-receiver/tls/key.pem")
     audio = cfg.setdefault("audio", {})
     here = os.path.dirname(os.path.abspath(__file__))
     # Installed: /opt/p833-receiver/audio. Run from the repo: <repo>/audio.
@@ -953,8 +960,23 @@ class Handler(BaseHTTPRequestHandler):
     def _back(self, msg):
         return self._reply(303, b"", "text/plain", {"Location": "/admin?msg=" + quote(msg)})
 
+    def _https(self):
+        return isinstance(self.connection, ssl.SSLSocket)
+
+    def _needs_https(self):
+        """True when the admin page must be used over HTTPS and this connection is plain."""
+        return self.server is not None and getattr(self.server, "tls", None) is not None and not self._https()
+
+    def _to_https(self):
+        host = self.headers.get("Host", "")
+        if not re.match(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$", host):
+            return self._reply(400, b"Use https:// for the admin page.", "text/plain")
+        return self._reply(302, b"", "text/plain", {"Location": "https://%s%s" % (host, self.path)})
+
     def do_POST(self):
         path = urlsplit(self.path).path
+        if path.startswith("/admin/") and self._needs_https():
+            return self._reply(403, b"Use https:// for the admin page.", "text/plain")
         if path.startswith("/admin/"):
             try:
                 return self._admin_post(path)
@@ -1185,6 +1207,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parts = urlsplit(self.path)
+        if (parts.path == "/admin" or parts.path.startswith("/admin/")) and self._needs_https():
+            return self._to_https()
         if parts.path == "/status.json":
             return self._reply(200, status_obj(self.app))
         if parts.path in ("/", "/index.html"):
@@ -1269,15 +1293,61 @@ def preview_obj(app, q):
             "plays": plays, "mode": mode, "audio": audio, "notes": notes}
 
 
+def tls_context(cfg):
+    """The HTTPS settings for the admin page, or (None, reason) if it can't be used."""
+    if not cfg.get("admin_https", True):
+        return None, "admin_https is off in the config"
+    cert, key = cfg.get("tls_cert", ""), cfg.get("tls_key", "")
+    if not (os.path.exists(cert) and os.path.exists(key)):
+        return None, "no certificate at %s (run: sudo bash install/install.sh)" % cert
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    if hasattr(ctx, "minimum_version"):
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2   # novm (3.7+, checked above)
+    else:                                                    # Python 3.6
+        ctx.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
+    try:
+        ctx.load_cert_chain(cert, key)
+    except (OSError, ssl.SSLError) as e:
+        return None, "could not load the certificate: %s" % e
+    return ctx, ""
+
+
 class Server(socketserver.ThreadingMixIn, HTTPServer):
     """One thread per connection, at most MAX_CONNECTIONS at once: more are closed straight
-    away, so a flood of idle connections can't use up the service (each also times out)."""
+    away, so a flood of idle connections can't use up the service (each also times out).
+
+    With a TLS context, each connection's first byte decides: a TLS hello (0x16) gets
+    HTTPS, anything else plain HTTP. So the admin page can use HTTPS on the same port
+    while the boards keep sending plain HTTP, with no firmware change."""
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, *a, **k):
+    def __init__(self, *a, tls=None, **k):
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self.tls = tls
         super().__init__(*a, **k)
+
+    def finish_request(self, request, client_address):
+        if self.tls is None:
+            return super().finish_request(request, client_address)
+        request.settimeout(Handler.timeout)
+        try:
+            first = request.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return
+        if first != b"\x16":
+            return super().finish_request(request, client_address)
+        try:
+            conn = self.tls.wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            return                      # e.g. the browser said no to the certificate this time
+        try:
+            self.RequestHandlerClass(conn, client_address, self)
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
@@ -1729,7 +1799,9 @@ F = hook flash (Link). On a Norstar desk phone the floor page is PAGE, SPEAKER, 
            c, c, e(cfg["codes"][c]["who"]), " (%s)" % e(cfg["codes"][c]["why"]) if cfg["codes"][c].get("why") else "")
            for c in range(2, 10)),
        e(" / ".join("%s: %s" % (z, v.get("dial") or "not set") for z, v in cfg["zones"].items())))
-        admin_html = """
+        admin_html = ("<div class=card style='border:2px solid var(--warn)'><b>This admin page is not "
+                      "encrypted</b> (%s). Passwords typed here cross the network as plain text.</div>"
+                      % e(app["https_problem"]) if app.get("https_problem") else "") + """
 <div class=card><h2>Settings</h2>%s
 <p class=small>Saved on the laptop and kept through restarts. The config file's "dry_run" is only the default.</p></div>
 <div class=card><h2>Send a test call</h2>%s
@@ -1838,7 +1910,13 @@ def main(argv=None):
             state.check_silent()
     threading.Thread(target=watch, daemon=True).start()
 
-    srv = Server((cfg.get("listen", "0.0.0.0"), int(cfg.get("port", 8833))), Handler)
+    tls, why = tls_context(cfg)
+    if tls:
+        LOG.info("admin page: https://<this laptop>:%s/admin (boards keep plain HTTP)", cfg.get("port", 8833))
+    else:
+        LOG.warning("admin page is NOT encrypted: %s", why)
+    Handler.app["https_problem"] = why
+    srv = Server((cfg.get("listen", "0.0.0.0"), int(cfg.get("port", 8833))), Handler, tls=tls)
     LOG.info("P833 receiver %s listening on %s:%s (%s)", VERSION, cfg.get("listen", "0.0.0.0"),
              cfg.get("port", 8833), "DRY RUN" if state.dry_run else "LIVE")
     try:

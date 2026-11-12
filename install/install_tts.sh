@@ -16,6 +16,7 @@ set -euo pipefail
 APP=/opt/p833-receiver
 VENV=$APP/tts
 VOICES=$APP/voices
+SUMS="$(cd "$(dirname "$0")" && pwd)/voices.sha256"
 DEFAULT_VOICES="en_US-hfc_female-medium en_US-joe-medium en_US-john-medium en_US-mike-medium
 en_US-norman-medium en_US-hfc_male-medium es_MX-claude-high es_MX-ald-medium es_ES-davefx-medium"
 
@@ -40,8 +41,13 @@ echo "Python for Piper: $PY ($($PY --version 2>&1))"
 if [ ! -x "$VENV/bin/python" ]; then
     "$PY" -m venv "$VENV"
 fi
-"$VENV/bin/python" -m pip install --quiet --upgrade pip
-"$VENV/bin/python" -m pip install --quiet --upgrade piper-tts
+# Pinned to the version this was built and tested with (not "newest").
+PIPER_VERSION=1.8.0
+if ! "$VENV/bin/python" -m pip install --quiet "piper-tts==$PIPER_VERSION"; then
+    # an old pip may not know the newer package formats; update pip once and retry
+    "$VENV/bin/python" -m pip install --quiet --upgrade "pip<26"
+    "$VENV/bin/python" -m pip install --quiet "piper-tts==$PIPER_VERSION"
+fi
 echo "Piper: $("$VENV/bin/python" -m pip show piper-tts | sed -n 's/^Version: //p')"
 
 # --- Voices.
@@ -55,6 +61,17 @@ for v in $WANT; do
         "$VENV/bin/python" -m piper.download_voices --download-dir "$VOICES" "$v" \
             || echo "  could not download $v (check the name and the internet connection)"
     fi
+    # Check the files against the checksums on file (install/voices.sha256).
+    for f in "$v.onnx" "$v.onnx.json"; do
+        [ -f "$VOICES/$f" ] || continue
+        want=$(awk -v f="$f" '$2 == f {print $1}' "$SUMS")
+        if [ -z "$want" ]; then
+            echo "  $f: no checksum on file (not one of the default voices); not checked"
+        elif [ "$(sha256sum "$VOICES/$f" | cut -d' ' -f1)" != "$want" ]; then
+            echo "  $f: CHECKSUM DOES NOT MATCH; removed. (The voice may have changed upstream.)"
+            rm -f "$VOICES/$f"
+        fi
+    done
 done
 
 chmod -R a+rX "$VENV" "$VOICES"

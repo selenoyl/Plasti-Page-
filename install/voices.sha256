@@ -1,0 +1,20 @@
+# SHA-256 of the default Piper voices (rhasspy/piper-voices on Hugging Face, checked 12 Nov 2026).
+# install_tts.sh checks each download against this list. By Ethan Brady & Ryan Raikes
+5b3d6e36a33a1eb0e50b54900c229127e3059400885eb5e8f128ff04b31cd73c  en_US-hfc_female-medium.onnx
+b87a53db0f6b15c0d00e960efc0546f8cf57e103e6ccba7bc41b33beb4572556  en_US-hfc_female-medium.onnx.json
+abf4b998e34045cbd00eaf050de2de620f81ded6eb8b85a24b022a1c2b3f08d2  en_US-joe-medium.onnx
+7b5f0293c0bf5bda8e377be1696da84af798befeef31038e43beefc01fe858da  en_US-joe-medium.onnx.json
+789c6c875726e627ddee93d51d8727859abe9c091c3d141591f4b83c2072e988  en_US-john-medium.onnx
+af60f177b6b550f3d7a302720c0fb89e7f94a82b5dca464775ef63b1c69ba09a  en_US-john-medium.onnx.json
+6876866e3dfadc7f044bc5e4fbac16c47b5a1e79eaec04e3bb0c2c6e9da8a857  en_US-mike-medium.onnx
+57893c9e492cc6650e2a91e26ec7aa3bf23c267c080649f7cfb6aa1843fcd6ed  en_US-mike-medium.onnx.json
+b9739443232a80a59c7d18810dd856899bf16a7964725f5ab81ea49b1351cb71  en_US-norman-medium.onnx
+6c2db7f558a4a8deb9fe822583c1c5105f6c4e834dd0f9de8ad17a888ee9fe1d  en_US-norman-medium.onnx.json
+d11e403a02bdf5a670c877b3dc56e0e1c8cece6fb30289586314dffdc0a78cb0  en_US-hfc_male-medium.onnx
+f66847424aed0bf99ecbb5d7cfde47c0a906f426a0daf7c46f305e7d21afd886  en_US-hfc_male-medium.onnx.json
+3ef40a71ea63852cd8ab7e6fa7d2ecdcfa67a0b47c9c48e3f10e02ee02083ea0  es_MX-claude-high.onnx
+1afc81f703c0e4cb3b4d7c0dca096b8b54a98806807f0170cf5eb5557723c12d  es_MX-claude-high.onnx.json
+019b3803293c93e34a206dd2e53a3889209a514e786fd7144f7b70196c579b63  es_MX-ald-medium.onnx
+5a71498158e04afc8099bfd019c7e87c68eb9d042505a2b1a87e5c1ac2b1a61d  es_MX-ald-medium.onnx.json
+d2c9224e122321aac3c33343957fff4d0f465226cb74c66b0f520ca3f8c0dd07  es_ES-davefx-medium.onnx
+531c4051502e1acbc10b42437f11679bfce9e3919e1796e51fabd73e01e7fd2e  es_ES-davefx-medium.onnx.json

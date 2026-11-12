@@ -8,6 +8,12 @@
 # Safe to run again any time. It backs up the old install first, never
 # replaces your config.json, keeps your secrets.env (only adding anything new
 # it needs), keeps the board list and call log, and never turns SELinux off.
+#
+# Optional: let only some networks reach the receiver's port (firewalld), e.g. the
+# IoT network the boards are on and the PC you use for the admin page:
+#   sudo P833_ALLOW_FROM="192.168.83.0/24 10.180.0.25" bash install/install.sh
+# The choice is saved in /etc/p833-receiver/allow_from and used by later updates.
+# P833_ALLOW_FROM=any opens the port to every network again.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -54,12 +60,20 @@ if ! id p833 >/dev/null 2>&1; then
     echo "Created user p833"
 fi
 
-# --- Program files.
+# --- Program files: staged first, and only put in place once they load (below).
+# From a git clone, only the files git tracks are installed (no stray .py files).
+if git -c safe.directory="$PWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    MODULES=$(git -c safe.directory="$PWD" ls-files -- 'receiver/*.py')
+else
+    MODULES=$(ls receiver/*.py)
+fi
+STAGE=$(mktemp -d /root/p833-stage.XXXXXX)
+trap 'rm -rf "$STAGE"' EXIT
+# shellcheck disable=SC2086
+install -m 644 $MODULES "$STAGE"/
+install -m 755 tools/p833_test_sender.py "$STAGE"/
+install -m 644 receiver/config.example.json "$STAGE"/
 install -d -m 755 "$APP"
-# Every receiver module (p833_receiver.py, p833_audio.py, p833_sip.py, ...).
-install -m 644 receiver/*.py "$APP"/
-install -m 755 tools/p833_test_sender.py "$APP"/
-install -m 644 receiver/config.example.json "$APP"/
 # Recorded page audio (made by tools/make_audio.py). Replaced as a whole.
 if [ -f audio/manifest.json ]; then
     rm -rf "$APP/audio.new"
@@ -85,33 +99,76 @@ else
     echo "Installed $ETC/config.json (dry run is ON)"
 fi
 
-# --- Secrets: root-only. Make a random board key the first time.
+# --- Secrets: root-only. A missing or EMPTY value is filled in (the receiver refuses
+# calls without a board key, and keeps the admin page off without a password).
 if [ ! -e "$ETC/secrets.env" ]; then
-    KEY=$($PY -c 'import secrets; print(secrets.token_hex(16))')
-    ( umask 077; printf '# P833 receiver secrets. Root-only. By Ethan Brady & Ryan Raikes\nP833_BOARD_KEY=%s\n' "$KEY" > "$ETC/secrets.env" )
-    echo "Made a new board key in $ETC/secrets.env (see it with: sudo cat $ETC/secrets.env)"
+    ( umask 077; printf '# P833 receiver secrets. Root-only. By Ethan Brady & Ryan Raikes\n' > "$ETC/secrets.env" )
 fi
-# Admin page password (added on update if an older install has none).
-if ! grep -q '^P833_ADMIN_PASSWORD=' "$ETC/secrets.env"; then
-    PW=$($PY -c 'import secrets; print(secrets.token_urlsafe(9))')
+chown root:root "$ETC/secrets.env"
+chmod 600 "$ETC/secrets.env"
+if ! grep -Eq '^P833_BOARD_KEY=.+' "$ETC/secrets.env"; then
+    sed -i '/^P833_BOARD_KEY=/d' "$ETC/secrets.env"
+    KEY=$($PY -c 'import secrets; print(secrets.token_hex(16))')
+    printf 'P833_BOARD_KEY=%s\n' "$KEY" >> "$ETC/secrets.env"
+    echo "Made a new board key in $ETC/secrets.env (see it with: sudo cat $ETC/secrets.env)."
+    echo "  Every board needs this key: set it on each board's serial console ('key ...')."
+fi
+if ! grep -Eq '^P833_ADMIN_PASSWORD=.+' "$ETC/secrets.env"; then
+    sed -i '/^P833_ADMIN_PASSWORD=/d' "$ETC/secrets.env"
+    PW=$($PY -c 'import secrets; print(secrets.token_urlsafe(12))')
     printf 'P833_ADMIN_PASSWORD=%s\n' "$PW" >> "$ETC/secrets.env"
     echo
     echo "  Admin page password: $PW"
     echo "  (user name: anything. See it again with: sudo grep ADMIN $ETC/secrets.env)"
     echo
 fi
-chown root:root "$ETC/secrets.env"
-chmod 600 "$ETC/secrets.env"
 
-# --- Check the config loads before switching over.
-# Check the program loads and the config is valid before switching over. The
-# Python error is shown as it is, so a missing file isn't mistaken for a bad config.
-if ! "$PY" -c "import sys; sys.path.insert(0, '$APP'); import p833_receiver as r; r.load_config('$ETC/config.json')"; then
+# --- HTTPS certificate for the admin page (self-signed, made once, 10 years).
+# Boards keep using plain HTTP on the same port; only the admin page moves to https://.
+TLS=$ETC/tls
+install -d -m 750 -o root -g p833 "$TLS"
+if [ ! -s "$TLS/cert.pem" ] || [ ! -s "$TLS/key.pem" ]; then
+    command -v openssl >/dev/null || dnf install -y openssl
+    SAN="DNS:$(hostname)"
+    for ip in $(hostname -I 2>/dev/null); do
+        case "$ip" in *:*) ;; *) SAN="$SAN,IP:$ip" ;; esac
+    done
+    ( umask 077
+      openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=p833-receiver" \
+          -addext "subjectAltName=$SAN" -keyout "$TLS/key.pem" -out "$TLS/cert.pem" 2>/dev/null \
+      || openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=p833-receiver" \
+          -keyout "$TLS/key.pem" -out "$TLS/cert.pem" 2>/dev/null )
+    echo "Made the admin page's HTTPS certificate in $TLS"
+fi
+chown root:p833 "$TLS/key.pem" "$TLS/cert.pem"
+chmod 640 "$TLS/key.pem"
+chmod 644 "$TLS/cert.pem"
+
+# --- Check the NEW program loads and the config is valid, before anything is replaced.
+# The Python error is shown as it is, so a missing file isn't mistaken for a bad config.
+if ! "$PY" -I -B -c "import sys; sys.path.insert(0, '$STAGE'); import p833_receiver as r; r.load_config('$ETC/config.json')"; then
     echo
-    echo "STOPPED: the receiver program or $ETC/config.json did not load (error above)."
-    echo "The service was not restarted, so the version already running keeps running."
+    echo "STOPPED: the new receiver program or $ETC/config.json did not load (error above)."
+    echo "Nothing was replaced and the service was not restarted: the version running keeps running."
     exit 1
 fi
+# Now put the program in place: copy the new files over, then remove old modules that
+# are no longer part of it.
+cp -p "$STAGE"/*.py "$STAGE"/config.example.json "$APP"/
+for f in "$APP"/*.py; do
+    [ -e "$STAGE/$(basename "$f")" ] || rm -f "$f"
+done
+rm -rf "$APP/__pycache__"
+chown root:root "$APP"/*.py "$APP"/config.example.json
+
+# --- State and logs: readable only by the service (and root). They hold staff phone
+# numbers, the voip.ms account, the text log and line recordings.
+for d in /var/lib/p833-receiver /var/log/p833-receiver; do
+    if [ -d "$d" ]; then
+        chmod 750 "$d"
+        find "$d" -type f -exec chmod o-rwx,g-w {} +
+    fi
+done
 
 # --- systemd service.
 sed "s#@PYTHON@#$PY#" install/p833-receiver.service > "$UNIT"
@@ -123,11 +180,30 @@ if command -v restorecon >/dev/null 2>&1; then
 fi
 echo "SELinux: $(getenforce 2>/dev/null || echo unknown) (left as it is)"
 
-# --- firewalld: open only the receiver's port.
+# --- firewalld: open only the receiver's port; to every network, or only to the
+# networks in P833_ALLOW_FROM (saved for later updates).
+if [ -n "${P833_ALLOW_FROM:-}" ]; then
+    echo "$P833_ALLOW_FROM" > "$ETC/allow_from"
+    chmod 644 "$ETC/allow_from"
+fi
+ALLOW=$(cat "$ETC/allow_from" 2>/dev/null || echo any)
 if systemctl is-active --quiet firewalld; then
-    firewall-cmd --quiet --permanent --add-port=${PORT}/tcp
+    # Remove any earlier rules for the port, then add the ones wanted now.
+    firewall-cmd --quiet --permanent --remove-port=${PORT}/tcp 2>/dev/null || true
+    { firewall-cmd --permanent --list-rich-rules | grep "port=\"${PORT}\"" || true; } | while read -r rule; do
+        firewall-cmd --quiet --permanent --remove-rich-rule="$rule"
+    done
+    if [ "$ALLOW" = "any" ]; then
+        firewall-cmd --quiet --permanent --add-port=${PORT}/tcp
+        echo "firewalld: opened ${PORT}/tcp to every network (to limit it, see the top of this script)"
+    else
+        for src in $ALLOW; do
+            fam=ipv4; case "$src" in *:*) fam=ipv6 ;; esac
+            firewall-cmd --quiet --permanent --add-rich-rule="rule family=\"$fam\" source address=\"$src\" port port=\"${PORT}\" protocol=\"tcp\" accept"
+        done
+        echo "firewalld: opened ${PORT}/tcp only to: $ALLOW"
+    fi
     firewall-cmd --quiet --reload
-    echo "firewalld: opened ${PORT}/tcp"
 else
     echo "firewalld is not running; nothing opened"
 fi
@@ -141,4 +217,7 @@ echo
 IP=$(hostname -I | awk '{print $1}')
 echo "Done. Version $(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$APP/p833_receiver.py") installed."
 echo "  Status page: http://${IP}:${PORT}/"
-echo "  Admin page:  http://${IP}:${PORT}/admin"
+echo "  Admin page:  https://${IP}:${PORT}/admin"
+echo "    The browser warns once about the certificate (it is made by this laptop, not bought)."
+echo "    Check it matches this fingerprint, then choose Advanced > Proceed:"
+echo "    $(openssl x509 -in "$TLS/cert.pem" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)"

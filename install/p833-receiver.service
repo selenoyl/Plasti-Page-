@@ -10,18 +10,40 @@ StartLimitIntervalSec=0
 Type=simple
 User=p833
 Group=p833
-# Root-only file with the board key. systemd reads it as root before starting.
-EnvironmentFile=-/etc/p833-receiver/secrets.env
+# Root-only file with the board key and admin password. systemd reads it as root
+# before starting; the service won't start without it (install.sh makes it).
+EnvironmentFile=/etc/p833-receiver/secrets.env
 ExecStart=@PYTHON@ /opt/p833-receiver/p833_receiver.py --config /etc/p833-receiver/config.json
 Restart=always
 RestartSec=5
-# /var/lib/p833-receiver (board state) and /var/log/p833-receiver (calls.csv)
+# /var/lib/p833-receiver (board state, settings) and /var/log/p833-receiver (calls.csv,
+# texts.csv): only the service user can read them; new files get no access for others.
 StateDirectory=p833-receiver
+StateDirectoryMode=0750
 LogsDirectory=p833-receiver
+LogsDirectoryMode=0750
+UMask=0027
+LimitNOFILE=4096
+# Sandbox. Settings an older systemd doesn't know are skipped with a note in the log.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target
