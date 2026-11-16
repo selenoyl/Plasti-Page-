@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.17.2:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.17.3:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -144,7 +144,7 @@ The admin page is in tabs, so it isn't one long list: **Overview** (dry run, boa
 | **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
 | **Send a test call** | Pick a board, a call type (2 to 9) and a press. **1. Preview** shows the exact words and plays the exact audio, sending nothing. **2. Send** goes through exactly the same path as a real call from that board, and is logged with the detail "admin page test". |
 | **Add or rename a board** | Enter the board ID (it must match the ID in that board's firmware) and a cell name. Using an existing ID renames its cell. |
-| **Send a custom page** | Type your own English and, optionally, Spanish text and pick a zone. It is spoken by Piper with the page voice (see "Page voice"), and **Preview** lets you hear it. Without Piper installed, a live custom page fails. It is logged as code "custom". |
+| **Send a custom page** | Type your own English and, optionally, Spanish text and pick a zone. It is spoken by Piper with the page voice (see "Page voice"), and **Preview** lets you hear it. It is refused at once if Piper isn't installed or the zone has no dial digits yet. The message after **Send** says *queued*: whether it really went out (sent or FAILED, and why) shows in **Recent calls** a few seconds later. It is logged as code "custom". |
 | **Boards table** | **Remove** takes a board off the list. A board that calls in but isn't on the list shows an **Add** box in its row. |
 
 With dry run off, every test or custom page is really dialed.
@@ -466,6 +466,8 @@ Set "Line check after dialing" under Phone and paging setup:
 | **off** | No check |
 
 Start with warn. Once real pages on your line show no false warnings, switch to retry. The admin page keeps the line audio of the last page ("Last live page") and of the last failed try ("Last failed page try"). It also waits **6 s between calls** ("Gap between calls"), so the HT813 and Norstar fully release the line; the HT813 itself waits 4 s.
+
+**"Sent" but nothing played?** "Sent" means the HT813 answered, the zone's digits were dialed and the audio played down the line; the receiver can't hear the speakers. So if a zone's dial digits are wrong, a page can say sent and still play nowhere. A **yellow** row in Recent calls means the line check heard dial tone, busy or ringing after dialing (see its Detail). To find a zone's code (for example the office), use **Try page digits** on the Phone tab: it dials what you type and plays a short bell, so you can try candidates, then put the one that works in that zone's dial box and Save.
 
 **When pages fail with "busy",** the call's Detail (Recent calls) says which kind:
 - **"HT813 said busy (486 Busy Here): its phone line is still in another call"**: the HT813 is still holding the line in an earlier call that was never hung up. Up to 0.17.1 this happened when the receiver was stopped in the middle of a page (an update restarts it). Since 0.17.2 the receiver hangs up first when it's stopped, the installer waits for a page in progress to finish, and a call left open by a crash or power cut is hung up at the next start. To clear it now: reboot the HT813 (its web page, or unplug it for 10 s), then **Call the HT813 (no dialing)** on the Phone tab.

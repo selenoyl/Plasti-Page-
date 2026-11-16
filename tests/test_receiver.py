@@ -874,10 +874,21 @@ class Server(unittest.TestCase):
     def test_custom_page(self):
         st, loc, _ = self.admin("/admin/custom", {"zone": "floor", "en": "Test page one.", "es": "Prueba uno."})
         self.assertEqual(st, 303)
-        self.wait_pages(1)
-        self.assertEqual(self.pager.sent, [])        # live: no audio for custom text yet
+        self.assertIn("not sent: custom text needs Piper", urllib.parse.unquote(loc))   # live, no Piper: said at once
+        self.assertEqual(self.worker.jobs.qsize(), 0)
+        self.use_fake_tts()
+        _, loc, _ = self.admin("/admin/custom", {"zone": "office", "en": "Office page."})
+        self.assertIn("zone office has no dial digits yet", urllib.parse.unquote(loc))   # (not "sent")
+        self.assertIn("office (no dial digits yet)", self.admin("/admin")[2])
+        _, loc, _ = self.admin("/admin/custom", {"zone": "floor", "en": "Test page one.", "es": "Prueba uno."})
+        msg = urllib.parse.unquote(loc)
+        self.assertIn("queued for zone floor (dial F,*60,2,1)", msg)
+        self.assertIn("Recent calls", msg)
+        self.assertNotIn(" sent to zone", msg)
+        self.wait_pages()
         row = self.wait_row()
-        self.assertEqual((row["code"], row["result"]), ("custom", "FAILED"))
+        self.assertEqual((row["code"], row["result"]), ("custom", "sent"))
+        self.assertEqual(self.pager.sent[-1][:3], ("floor", "F,*60,2,1", "Test page one."))
         self.state.dry_run = True
         self.admin("/admin/custom", {"zone": "floor", "en": "Test page two."})
         self.wait_pages()
@@ -954,10 +965,18 @@ class Server(unittest.TestCase):
         self.assertIn("no audio", row["detail"])
         self.assertEqual(self.pager.sent, [])
 
-    def test_custom_page_live_has_no_audio_yet(self):
-        self.admin("/admin/custom", {"zone": "floor", "en": "Hello."})
+    def test_custom_page_live_without_piper_is_refused_at_once(self):
+        _, loc, _ = self.admin("/admin/custom", {"zone": "floor", "en": "Hello."})
+        self.assertIn("not sent", urllib.parse.unquote(loc))
         self.wait_pages()
-        self.assertEqual(self.wait_row()["result"], "FAILED")
+        self.assertEqual(self.log_rows() if os.path.exists(os.path.join(self.tmp, "calls.csv")) else [], [])
+
+    def test_line_warning_stands_out_in_recent_calls(self):
+        self.state.record({"time": R.now_text(), "board": "admin", "cell": "Admin page", "code": "custom",
+                           "who": "Custom", "message": "Office page.", "result": "sent", "attempts": 1,
+                           "detail": "dialed F,*60,2,2 via HT813 x, played 9 s; WARNING: the line sent dial tone"})
+        live = json.loads(self.admin("/admin/live")[2])
+        self.assertIn("<tr class='warn'>", live["calls"])
 
     def test_listen(self):
         st, _, _ = self.admin("/admin/listen?code=8&press=27", pw=None)

@@ -46,7 +46,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.17.2"
+VERSION = "0.17.3"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -1798,7 +1798,8 @@ class Handler(BaseHTTPRequestHandler):
             if repeat:
                 return self._back("Dropped as a repeat (same board, code and press within %d s): %s"
                                   % (self.app["cfg"]["same_call_window_s"], en))
-            return self._back("Test call sent from %s: %s" % (st.cell_name(board), en))
+            return self._back("Test call queued from %s: %s. Whether it went out shows in Recent calls."
+                              % (st.cell_name(board), en))
 
         if path == "/admin/board/add":
             board, cell = form.get("board", ""), form.get("cell", "")
@@ -1821,6 +1822,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._back("Custom page not sent: pick a zone.")
             if not en or len(en) > 200 or len(es) > 200 or not (en + es).isprintable():
                 return self._back("Custom page not sent: English text is needed, each text up to 200 characters.")
+            dial = self.app["cfg"]["zones"][zone].get("dial", "")
+            if not st.dry_run and not dial:
+                return self._back("Custom page not sent: zone %s has no dial digits yet, so it can't be paged. Set "
+                                  "them on the Phone tab (Zone %s dial); find them with Try page digits." % (zone, zone))
+            lib = self.app["worker"].audio
+            if not st.dry_run and (lib.voice is None or not lib.voice.ready()):
+                return self._back("Custom page not sent: custom text needs Piper on the laptop to be spoken "
+                                  "(sudo bash install/install_tts.sh).")
             rec = {"time": now_text(), "board": "admin", "cell": "Admin page", "press": "",
                    "code": "custom", "who": "Custom", "message": en, "en": en, "es": es,
                    "zone": zone, "note": "custom page from admin page"}
@@ -1830,7 +1839,10 @@ class Handler(BaseHTTPRequestHandler):
             self.app["worker"].jobs.put(rec)
             if self.app.get("sms"):
                 self.app["sms"].text_for_call(rec, test_call=True)
-            return self._back("Custom page sent to zone %s: %s" % (zone, en))
+            if st.dry_run:
+                return self._back("Custom page logged (dry run, not dialed) for zone %s: %s" % (zone, en))
+            return self._back("Custom page queued for zone %s (dial %s): %s. It goes out in a few seconds; whether it "
+                              "went out (sent or FAILED, and why) shows in Recent calls." % (zone, dial, en))
 
         if path == "/admin/tuning":
             t, errs = parse_tuning(form, self.app["cfg"], self.app["worker"].audio.tone_names())
@@ -2429,12 +2441,12 @@ def status_obj(app, admin=False):
 
 
 PAGE_STYLE = """
-:root{--bg:#fff;--fg:#111;--line:#bbb;--head:#eee;--bad:#fdd;--card:#f6f6f6;--good:#070;--warn:#b60}
-@media (prefers-color-scheme: dark){:root{--bg:#161616;--fg:#eee;--line:#555;--head:#2a2a2a;--bad:#5a2323;--card:#222;--good:#5c5;--warn:#c80}}
+:root{--bg:#fff;--fg:#111;--line:#bbb;--head:#eee;--bad:#fdd;--card:#f6f6f6;--good:#070;--warn:#b60;--warnbg:#fff1c4}
+@media (prefers-color-scheme: dark){:root{--bg:#161616;--fg:#eee;--line:#555;--head:#2a2a2a;--bad:#5a2323;--card:#222;--good:#5c5;--warn:#c80;--warnbg:#4a3a0e}}
 body{font-family:sans-serif;margin:16px;background:var(--bg);color:var(--fg)}
 .w{overflow-x:auto} table{border-collapse:collapse;margin-bottom:24px;width:100%}
 td,th{border:1px solid var(--line);padding:4px 8px;text-align:left;font-size:14px}
-th{background:var(--head)} tr.bad td{background:var(--bad)} td.ok{color:var(--good);font-weight:bold}
+th{background:var(--head)} tr.bad td{background:var(--bad)} tr.warn td{background:var(--warnbg)} td.ok{color:var(--good);font-weight:bold}
 .mode{padding:6px 10px;display:inline-block;color:#fff;font-weight:bold}
 .card{background:var(--card);border:1px solid var(--line);padding:12px 16px;margin-bottom:20px;max-width:820px}
 .card label{display:inline-block;margin:4px 12px 4px 0}
@@ -2993,7 +3005,7 @@ def live_parts(app, admin, s=None):
                          e(b["ip"]), e(str(b["rssi"])), action))
     crow = []
     for c in s["calls"]:
-        cls = "bad" if c.get("result") == "FAILED" else ""
+        cls = "bad" if c.get("result") == "FAILED" else ("warn" if "WARNING" in str(c.get("detail", "")) else "")
         crow.append("<tr class='%s'>%s</tr>" % (cls, "".join(
             "<td>%s</td>" % e(str(c.get(k, ""))) for k in
             ("time", "cell", "press", "code", "who", "message", "result", "attempts", "detail"))))
@@ -3028,8 +3040,9 @@ def page_html(app, admin, msg=""):
             for c in range(2, 10))
         live_warn = ("" if s["dry_run"] else
                      "<p><b>LIVE: a test really pages the zone.</b></p>")
-        zone_opts = "".join("<option value='%s'>%s (dial %s)</option>" % (e(z), e(z), e(str(v.get("dial", ""))))
-                            for z, v in cfg["zones"].items())
+        zone_opts = "".join("<option value='%s'>%s (%s)</option>" % (
+            e(z), e(z), "dial " + e(str(v["dial"])) if v.get("dial") else "no dial digits yet")
+            for z, v in cfg["zones"].items())
         if s["dry_run"]:
             switch = ("<p>Dry run is <b>ON</b>: pages are logged, not dialed.</p>"
                       "<form method=post action='/admin/dryrun' onsubmit=\"return confirm("
