@@ -14,6 +14,7 @@ Needs fonttools, on any PC (not on the laptop):
 """
 
 import argparse
+import math
 import os
 
 from fontTools.pens.svgPathPen import SVGPathPen
@@ -34,18 +35,62 @@ def num(v):
     return ("%.1f" % v).rstrip("0").rstrip(".") if abs(v) >= 0.05 else "0"
 
 
+TILT = 25.0                 # degrees the north pole leans toward the viewer, as on EPC's globe
+
+
+def _curve(c0, a, b, t0, t1):
+    """SVG path data for c0 + a cos(t) + b sin(t), t from t0 to t1 (radians): how a circle on the
+    globe (a line of latitude or longitude) looks from the front, an ellipse. Drawn as cubic
+    Beziers of 90 degrees or less (exact for an ellipse, as for a circle). Points have y up."""
+    n = max(1, int(math.ceil((t1 - t0) / (math.pi / 2) - 1e-9)))
+    step = (t1 - t0) / n
+    k = 4.0 / 3.0 * math.tan(step / 4.0)
+    c = SIZE / 2.0
+
+    def at(t):
+        return c0[0] + a[0] * math.cos(t) + b[0] * math.sin(t), c0[1] + a[1] * math.cos(t) + b[1] * math.sin(t)
+
+    def slope(t):
+        return -a[0] * math.sin(t) + b[0] * math.cos(t), -a[1] * math.sin(t) + b[1] * math.cos(t)
+
+    def xy(p):
+        return "%s %s" % (num(c + p[0]), num(c - p[1]))      # to the page: y down
+    p0 = at(t0)
+    out = ["M" + xy(p0)]
+    for i in range(n):
+        s, e = t0 + i * step, t0 + (i + 1) * step
+        p0, p3, d0, d3 = at(s), at(e), slope(s), slope(e)
+        out.append("C%s %s %s" % (xy((p0[0] + k * d0[0], p0[1] + k * d0[1])),
+                                  xy((p3[0] - k * d3[0], p3[1] - k * d3[1])), xy(p3)))
+    return "".join(out)
+
+
+def globe_grid(r):
+    """The visible half of a globe's grid (every 30 degrees), the north pole tipped TILT toward us."""
+    t = math.radians(TILT)
+    paths = []
+    for lat in (-60, -30, 0, 30, 60):                       # lines of latitude
+        f = math.radians(lat)
+        c0, a, b = (0, r * math.sin(f) * math.cos(t)), (0, -r * math.cos(f) * math.sin(t)), (r * math.cos(f), 0)
+        q = -math.tan(f) * math.tan(t)                       # visible where cos(longitude) >= q
+        if q >= 1:
+            continue
+        lv = math.pi if q <= -1 else math.acos(q)
+        paths.append(_curve(c0, a, b, -lv, lv))
+    for lon in (0, 30, 60, 90, 120, 150):                   # lines of longitude (each with its far half)
+        g = math.radians(lon)
+        a, b = (r * math.sin(g), -r * math.cos(g) * math.sin(t)), (0, r * math.cos(t))
+        mid = math.atan2(math.sin(t), math.cos(g) * math.cos(t))   # the front-most point of this circle
+        paths.append(_curve((0, 0), a, b, mid - math.pi / 2, mid + math.pi / 2))
+    return paths
+
+
 def mark():
     """The red square, the blue globe with its grid, and a paging horn sounding out."""
     c, r = SIZE / 2.0, SIZE / 2.0 - 1
     out = ['<rect x="5" y="5" width="%d" height="%d" fill="%s"/>' % (SIZE - 10, SIZE - 10, RED),
            '<circle cx="%s" cy="%s" r="%s" fill="%s"/>' % (num(c), num(c), num(r), BLUE)]
-    grid = ['<line x1="%s" y1="%s" x2="%s" y2="%s"/>' % (num(c), num(c - r), num(c), num(c + r))]
-    for k in (0.5, 0.866):                                   # meridians 30 and 60 degrees from the middle
-        grid.append('<ellipse cx="%s" cy="%s" rx="%s" ry="%s"/>' % (num(c), num(c), num(r * k), num(r)))
-    for d in (0.0, 0.423, -0.423, 0.766, -0.766):           # the equator, and 25 and 50 degrees north and south
-        y, half = c + r * d, r * (1 - d * d) ** 0.5
-        grid.append('<line x1="%s" y1="%s" x2="%s" y2="%s"/>' % (num(c - half), num(y), num(c + half), num(y)))
-    out.append('<g fill="none" stroke="#fff" stroke-width="1.6">%s</g>' % "".join(grid))
+    out.append('<path fill="none" stroke="#fff" stroke-width="1.5" d="%s"/>' % "".join(globe_grid(r)))
     # the paging horn (light, like the land on EPC's globe), pointing right, and three sound waves
     out.append('<g fill="%s" stroke="%s" stroke-width="2.4" stroke-linejoin="round">'
                '<rect x="22" y="47" width="12" height="18" rx="2.5"/>'
@@ -101,8 +146,9 @@ WORDMARK = '%s'  # noqa: E501
 
 def svg(css_class="logo"):
     """The logo as inline SVG. It's hidden from screen readers: the page's heading names it."""
-    return ('<svg class="%%s" viewBox="0 0 %%d %%d" width="%%d" height="%%d" aria-hidden="true" focusable="false">'
-            '%%s<g class="wm" fill="%%s">%%s</g></svg>' %% (css_class, WIDTH, HEIGHT, WIDTH, HEIGHT, MARK, BLUE, WORDMARK))
+    return ('<svg class="%%s" viewBox="0 0 %%d %%d" width="%%d" height="%%d" preserveAspectRatio="xMinYMid meet" '
+            'style="aspect-ratio:%%d/%%d" aria-hidden="true" focusable="false">%%s<g class="wm" fill="%%s">%%s</g></svg>'
+            %% (css_class, WIDTH, HEIGHT, WIDTH, HEIGHT, WIDTH, HEIGHT, MARK, BLUE, WORDMARK))
 
 
 # The mark alone, as the browser tab's icon.

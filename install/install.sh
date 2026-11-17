@@ -289,7 +289,7 @@ IP=$(hostname -I | awk '{print $1}')
 echo "Done. Version $(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$APP/p833_receiver.py") installed."
 echo "  Starts by itself when the laptop starts: $(systemctl is-enabled p833-receiver 2>/dev/null || echo unknown)"
 echo "  Weekly updates from GitHub: $UPDATE_NOTE"
-echo "  Paging page: https://${IP}:${PORT}/  (for supervisors; set its password on the admin page)"
+echo "  Paging page: https://${IP}:${PORT}/  (everyone signs in; make accounts on the admin page's Users tab)"
 echo "  Log page:    http://${IP}:${PORT}/log"
 echo "  Admin page:  https://${IP}:${PORT}/admin"
 echo "    The browser warns once about the certificate (it is made by this laptop, not bought)."

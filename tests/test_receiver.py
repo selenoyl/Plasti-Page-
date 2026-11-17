@@ -536,16 +536,16 @@ class Server(unittest.TestCase):
             c.putheader(hdr, val.encode("latin-1"))
             c.putheader("Content-Length", "2")
             c.endheaders(b"{}")
-            self.assertIn(c.getresponse().status, (401, 403))
+            self.assertIn(c.getresponse().status, (303, 401, 403))
             c.close()
 
     def test_wrong_passwords_lock_the_address_out(self):
         self.addCleanup(R.Handler.login_fails.clear)
         for _ in range(3 * R.LOGIN_FAILS):                 # the same wrong one again and again (a page left
-            self.assertEqual(self.admin("/admin", pw="old-saved")[0], 401)   # open with an old saved password)
+            self.assertEqual(self.admin("/admin", pw="old-saved")[0], 303)   # open with an old saved password)
         self.assertEqual(self.admin("/admin")[0], 200)     # ...counts once: nobody is locked out
         for i in range(R.LOGIN_FAILS - 2):
-            self.assertEqual(self.admin("/admin", pw="wrong-%d" % i)[0], 401)
+            self.assertEqual(self.admin("/admin", pw="wrong-%d" % i)[0], 303)
         self.assertEqual(self.admin("/admin", pw="wrong-last")[0], 429)          # 10 different ones: locked
         st, _, body = self.admin("/admin")                 # even the right one, for a while
         self.assertEqual(st, 429)
@@ -823,9 +823,10 @@ class Server(unittest.TestCase):
             return e.code, e.headers.get("Location", ""), e.read().decode()
 
     def test_admin_needs_password(self):
-        self.assertEqual(self.admin("/admin", pw=None)[0], 401)
-        self.assertEqual(self.admin("/admin", pw="wrong")[0], 401)
-        self.assertEqual(self.admin("/admin/board/add", {"board": "X1", "cell": "X"}, pw=None)[0], 401)
+        st, loc, _ = self.admin("/admin", pw=None)
+        self.assertEqual((st, loc), (303, "/login?next=%2Fadmin"))         # to the sign-in page
+        self.assertEqual(self.admin("/admin", pw="wrong")[0], 303)
+        self.assertEqual(self.admin("/admin/board/add", {"board": "X1", "cell": "X"}, pw=None)[0], 303)
         self.assertNotIn("X1", self.state.registry)
         st, _, body = self.admin("/admin")
         self.assertEqual(st, 200)
@@ -1522,6 +1523,186 @@ class Server(unittest.TestCase):
         self.assertFalse(sender.has_password())
         self.assertEqual(self.cfg["sms"]["api_username"], "boss@example.com")   # the rest is saved
 
+    # ---- the sign-in page, accounts and roles
+    def browse(self, path, form=None, cookie="", headers=None, origin="self"):
+        """Like a browser using the sign-in page: no Basic password, only the sign-in cookie."""
+        url = "http://127.0.0.1:%d%s" % (self.port, path)
+        data = urllib.parse.urlencode(form).encode() if form is not None else None
+        req = urllib.request.Request(url, data=data, headers=dict(headers or {}))
+        req.add_header("Sec-Fetch-Mode", "navigate")
+        if cookie:
+            req.add_header("Cookie", cookie)
+        if data is not None and origin:
+            req.add_header("Origin", "http://127.0.0.1:%d" % self.port if origin == "self" else origin)
+        try:
+            with urllib.request.build_opener(NoRedirect).open(req) as r:
+                return r.status, r.headers.get("Location", ""), r.read().decode(), r.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Location", ""), e.read().decode(), e.headers
+
+    def sign_in(self, name, pw, next_="/"):
+        st, loc, body, h = self.browse("/login", {"name": name, "password": pw, "next": next_})
+        self.assertEqual(st, 303, body[:300])
+        cookie = h["Set-Cookie"].split(";")[0]
+        self.assertTrue(cookie.startswith("p833s="), cookie)
+        self.assertIn("HttpOnly", h["Set-Cookie"])
+        return cookie, loc
+
+    def add_user(self, name, pw, role):
+        return urllib.parse.unquote(self.admin("/admin/users/add", {"name": name, "password": pw, "role": role})[1])
+
+    def test_sign_in_page_and_sign_out(self):
+        st, _, page, _ = self.browse("/login")
+        self.assertEqual(st, 200)
+        for bit in ("<form method=post action='/login'>", "autocomplete=current-password", "Show password",
+                    '<svg class="logo"', "class=band"):
+            self.assertIn(bit, page)
+        self.assertEqual(self.browse("/")[:2], (303, "/login?next=%2F"))      # not signed in: to the sign-in page
+        st, _, page, _ = self.browse("/login", {"name": "Sam", "password": "nope-nope", "next": "/"})
+        self.assertEqual(st, 401)
+        self.assertIn("Wrong name or password.", page)
+        self.assertIn("value='Sam'", page)                                    # the name stays filled in
+        cookie, loc = self.sign_in("Ryan", ADMIN_PW, "/admin")                # the admin password: any name
+        self.assertEqual(loc, "/admin")
+        st, _, page, _ = self.browse("/admin", cookie=cookie)
+        self.assertEqual(st, 200)
+        self.assertIn("Signed in as Ryan (Admin)", page)
+        self.assertIn("href='/admin?tab=users'", page)                        # the Users link
+        page = self.browse("/", cookie=cookie)[2]
+        self.assertIn("Signed in as Ryan (Admin)", page)
+        self.assertIn("href='/admin?tab=users'", page)                        # ...from the home screen too
+        self.assertEqual(self.browse("/logout", {}, cookie=cookie, origin="http://evil.example")[0], 403)
+        st, loc, _, h = self.browse("/logout", {}, cookie=cookie)
+        self.assertEqual((st, loc), (303, "/login?bye=1"))
+        self.assertIn("Max-Age=0", h["Set-Cookie"])
+        self.assertEqual(self.browse("/", cookie=cookie)[0], 303)             # that session is over
+        self.assertIn("You&#x27;re signed out.", self.browse("/login?bye=1")[2])
+
+    def test_a_browser_must_use_the_sign_in_page(self):
+        # a password a browser saved from the old sign-in box doesn't get past the sign-in page
+        req = urllib.request.Request("http://127.0.0.1:%d/admin" % self.port)
+        req.add_header("Authorization", "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode())
+        req.add_header("Sec-Fetch-Mode", "navigate")
+        try:
+            with urllib.request.build_opener(NoRedirect).open(req) as r:
+                st = r.status
+        except urllib.error.HTTPError as e:
+            st = e.code
+        self.assertEqual(st, 303)
+        self.assertEqual(self.admin("/admin")[0], 200)                        # (scripts still can)
+        st, _, _, h = self.browse("/page/live")
+        self.assertEqual(st, 401)
+        self.assertIsNone(h.get("WWW-Authenticate"))                          # no browser password box any more
+
+    def test_after_sign_in_only_this_laptops_pages(self):
+        for bad in ("//evil.example/x", "https://evil.example/", "/\\evil", "javascript:x", "/login", "/logout"):
+            self.assertEqual(self.sign_in("Ryan", ADMIN_PW, bad)[1], "/", bad)
+
+    def test_users_added_on_the_admin_page(self):
+        self.assertIn("added as Supervisor", self.add_user("Sam Lee", "sam-pass-1", "supervisor"))
+        self.assertIn("added as Office", self.add_user("Olga", "olga-pass-1", "office"))
+        self.assertIn("added as Admin", self.add_user("Ann", "ann-pass-1", "admin"))
+        for name, pw, role, why in (("Sam lee", "another-1", "supervisor", "already an account"),
+                                     ("admin", "admin-pass-1", "admin", "kept for the built-in admin"),
+                                     ("Bo", "short", "supervisor", "8 to 64"),
+                                     ("<b>x</b>", "long-enough-1", "supervisor", "a name is"),
+                                     ("Cy", "long-enough-1", "boss", "pick a role")):
+            self.assertIn(why, self.add_user(name, pw, role), name)
+        page = self.admin("/admin?tab=users")[2]
+        users_tab = re.search(r"<section data-tab=users>(.*?)</section>", page, re.S).group(1)
+        for name in ("Sam Lee", "Olga", "Ann"):
+            self.assertIn("<b>%s</b>" % name, users_tab)
+        self.assertNotIn("<b>x</b>", page)
+        path = os.path.join(self.tmp, "users.json")
+        with open(path, encoding="utf-8") as f:
+            self.assertNotIn("sam-pass-1", f.read())                          # only hashes
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        cookie, _ = self.sign_in("sam LEE", "sam-pass-1")                     # the name: any case
+        page = self.browse("/", cookie=cookie)[2]
+        self.assertIn("Signed in as Sam Lee (Supervisor)", page)
+        self.assertNotIn("href='/admin?tab=users'", page)
+        st, _, page, _ = self.browse("/admin", cookie=cookie)
+        self.assertEqual(st, 403)
+        self.assertIn("Admins only", page)
+        with open(os.path.join(self.tmp, "sessions.json"), encoding="utf-8") as f:
+            self.assertNotIn(cookie.split("=", 1)[1], f.read())               # only a hash of the cookie
+
+    def test_password_role_and_removal_apply_at_once(self):
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        cookie, _ = self.sign_in("Sam", "sam-pass-1")
+        self.assertEqual(self.browse("/", cookie=cookie)[0], 200)
+        self.admin("/admin/users/role", {"key": "sam", "role": "office"})
+        self.assertIn("Signed in as Sam (Office)", self.browse("/", cookie=cookie)[2])   # same session, new role
+        msg = urllib.parse.unquote(self.admin("/admin/users/password", {"key": "sam", "password": "new-pass-22"})[1])
+        self.assertIn("signed out on every device", msg)
+        self.assertEqual(self.browse("/", cookie=cookie)[0], 303)             # the new password signed them out
+        self.assertEqual(self.browse("/login", {"name": "Sam", "password": "sam-pass-1", "next": "/"})[0], 401)
+        cookie, _ = self.sign_in("Sam", "new-pass-22")
+        self.assertIn("removed", urllib.parse.unquote(self.admin("/admin/users/remove", {"key": "sam"})[1]))
+        self.assertEqual(self.browse("/", cookie=cookie)[0], 303)             # removed: signed out
+        self.assertEqual(self.browse("/login", {"name": "Sam", "password": "new-pass-22", "next": "/"})[0], 401)
+
+    def test_sessions_survive_a_restart(self):
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        cookie, _ = self.sign_in("Sam", "sam-pass-1")
+        R.Handler.app["users"], R.Handler.app["sessions"] = None, None        # as after a restart: from disk
+        self.assertIn("Signed in as Sam", self.browse("/", cookie=cookie)[2])
+
+    def test_office_and_admin_users_type_to_the_office(self):
+        self.use_fake_tts()
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        self.add_user("Olga", "olga-pass-1", "office")
+        sam, olga = self.sign_in("Sam", "sam-pass-1")[0], self.sign_in("Olga", "olga-pass-1")[0]
+        self.assertNotIn("type=radio name=zone", self.browse("/", cookie=sam)[2])
+        loc = self.browse("/page/custom", {"zone": "office", "en": "Office test."}, cookie=sam)[1]
+        self.assertIn("can page the floor only", urllib.parse.unquote_plus(loc))
+        self.assertIn("type=radio name=zone value=office data-off=1", self.browse("/", cookie=olga)[2])
+        loc = self.browse("/page/custom", {"zone": "office", "en": "Office test."}, cookie=olga)[1]
+        self.assertIn("office zone isn't set up yet", urllib.parse.unquote_plus(loc))    # no dial digits yet
+        self.cfg["zones"]["office"]["dial"] = "F,*60,2,2"
+        self.assertNotIn("data-off=1", self.browse("/", cookie=olga)[2])
+        loc = self.browse("/page/custom", {"zone": "office", "en": "Office test."}, cookie=olga)[1]
+        self.assertIn("Paging now", urllib.parse.unquote_plus(loc))
+        self.wait_pages()
+        self.assertEqual(self.pager.sent[-1][:3], ("office", "F,*60,2,2", "Office test."))
+        self.assertIn("by Olga, to the office", self.wait_row()["detail"])
+        loc = self.browse("/page/custom", {"zone": "floor", "en": "Floor test."}, cookie=olga)[1]
+        self.assertIn("Paging now", urllib.parse.unquote_plus(loc))             # each zone has its own 5 minutes
+        loc = self.browse("/page/custom", {"zone": "office", "en": "Again."}, cookie=olga)[1]
+        self.assertIn("less than 5 minutes ago", urllib.parse.unquote_plus(loc))
+        self.wait_pages()
+
+    def test_admins_wait_30_seconds_not_5_minutes(self):
+        self.add_user("Ann", "ann-pass-1", "admin")
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        ann, sam = self.sign_in("Ann", "ann-pass-1")[0], self.sign_in("Sam", "sam-pass-1")[0]
+
+        def send(cookie, code, press):
+            return urllib.parse.unquote_plus(self.browse("/page/send", {"code": str(code), "press": str(press)},
+                                                    cookie=cookie)[1])
+        self.assertIn("ok=1", send(ann, 2, 10))
+        msg = send(ann, 2, 11)
+        self.assertIn("less than 30 seconds ago", msg)                      # still 30 s (a double tap)
+        self.assertIn("Maintenance again in", msg)
+        self.assertIn("less than 5 minutes ago", send(sam, 2, 12))          # supervisors: 5 minutes
+        self.assertIn("once every 30 seconds", self.browse("/", cookie=ann)[2])
+        self.assertIn("once every 5 minutes", self.browse("/", cookie=sam)[2])
+        with self.state.lock:                                               # 31 s on
+            self.state.home_sent = {k: (t - 31, rec) for k, (t, rec) in self.state.home_sent.items()}
+        self.assertIn("ok=1", send(ann, 2, 13))
+        self.assertIn("less than 5 minutes ago", send(sam, 2, 14))          # the admin's page counts for them too
+        self.assertLessEqual(json.loads(self.browse("/page/live", cookie=ann)[2])["wait"]["2"], 30)
+        self.wait_pages()
+
+    def test_shared_password_still_signs_in_supervisors(self):
+        self.set_paging_pw()
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        cookie, _ = self.sign_in("Rosa", self.PAGING_PW)
+        self.assertIn("Signed in as Rosa (Supervisor)", self.browse("/", cookie=cookie)[2])
+        self.assertEqual(self.browse("/login", {"name": "Sam", "password": self.PAGING_PW, "next": "/"})[0], 401)
+        self.admin("/admin/paging", {"clear": "on"})
+        self.assertEqual(self.browse("/", cookie=cookie)[0], 303)             # removed: those sessions end
+
     # ---- the paging page (the home screen) for supervisors
     PAGING_PW = "floor-pass-123"
 
@@ -1560,9 +1741,9 @@ class Server(unittest.TestCase):
         self.assertIn("PLASTI-PAGE RECEIVER - Log", page)
         self.assertIn("Recent calls", page)
         self.assertIn("location.replace", page)                        # refreshes itself, as before
-        self.assertEqual(self.home("/", pw=None)[0], 401)
-        self.assertEqual(self.home("/", pw="wrong-password")[0], 401)
-        self.assertEqual(self.home("/", pw=self.PAGING_PW)[0], 401)     # no paging password set yet
+        self.assertEqual(self.home("/", pw=None)[:2], (303, "/login?next=%2F"))   # to the sign-in page
+        self.assertEqual(self.home("/", pw="wrong-password")[0], 303)
+        self.assertEqual(self.home("/", pw=self.PAGING_PW)[0], 303)     # no shared password set yet
         st, _, page = self.home("/", pw=ADMIN_PW)                       # ...so only the admin's opens it
         self.assertEqual(st, 200)
         self.assertIn("Page someone to a press", page)
@@ -1584,7 +1765,7 @@ class Server(unittest.TestCase):
         self.assertIn("<b>set</b>", self.admin("/admin")[2])
         # it doesn't open the admin page, and isn't counted as a wrong guess there
         R.Handler.login_fails.clear()
-        self.assertEqual(self.admin("/admin", pw=self.PAGING_PW)[0], 401)
+        self.assertEqual(self.admin("/admin", pw=self.PAGING_PW)[0], 403)            # admins only
         self.assertFalse(R.Handler.login_fails.get("127.0.0.1"))
         # kept through a restart
         self.assertTrue(R.PagingPassword(path).check(self.PAGING_PW))
@@ -1592,7 +1773,7 @@ class Server(unittest.TestCase):
         # removed: only the admin password again
         self.admin("/admin/paging", {"clear": "on"})
         self.assertFalse(os.path.exists(path))
-        self.assertEqual(self.home("/")[0], 401)
+        self.assertEqual(self.home("/")[0], 303)
 
     def test_home_screen_pages_the_floor_and_each_department_once_in_5_minutes(self):
         self.set_paging_pw()
@@ -1625,6 +1806,7 @@ class Server(unittest.TestCase):
         self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 5, "press": 7})
         self.wait_pages()
         self.assertTrue(self.send_home(5, 7)[0])
+        self.wait_pages()
         # 5 minutes on, Maintenance can be paged again
         with self.state.lock:
             self.state.home_sent = {k: (t - R.DEPARTMENT_WAIT_S, rec) for k, (t, rec) in self.state.home_sent.items()}
@@ -1643,7 +1825,7 @@ class Server(unittest.TestCase):
         self.assertTrue(self.send_home(6, 4)[0])
         self.wait_pages()
         self.assertEqual(self.pager.sent[0][:2], ("floor", "F,*60,2,1"))
-        self.assertNotIn("name=zone", self.home("/")[2])
+        self.assertNotIn("type=radio name=zone", self.home("/")[2])        # a supervisor: no office choice
 
     def test_home_screen_typed_message(self):
         self.set_paging_pw()
@@ -1668,7 +1850,7 @@ class Server(unittest.TestCase):
         page = self.home("/")[2]
         self.assertIn("<fieldset id=cfs disabled>", page)
         self.assertIn("You can send another typed message in 5 min.", page)
-        self.assertGreater(json.loads(self.home("/page/live")[2])["wait"]["custom"], 250)
+        self.assertGreater(json.loads(self.home("/page/live")[2])["wait"]["custom"]["floor"], 250)
         ok, msg = self.home_msg(self.home("/page/custom", {"en": "Otro."}, headers={"Cookie": "p833_lang=es"})[1])
         self.assertIn("ya se envi\u00f3 un mensaje escrito desde aqu\u00ed hace menos de 5 minutos", msg)
         for bad in ({"en": "", "es": ""}, {"en": " ", "es": " "}, {"en": "x" * 201}, {"es": "x" * 201},
@@ -1722,8 +1904,10 @@ class Server(unittest.TestCase):
         page = self.home("/", headers=es)[2]
         self.assertIn("c\u00e1mara ca\u00edda", page)
         self.assertIn("camera fault", self.home("/", headers={"Cookie": "p833_lang=en"})[2])
-        # the sign-in answer is in both languages
-        self.assertIn("P\u00e1gina de voceo", self.home("/", pw=None)[2])
+        # the sign-in page in Spanish too
+        page = self.home("/login", pw=None, headers=es)[2]
+        self.assertIn("<html lang=es>", page)
+        self.assertIn("Contrase\u00f1a", page)
 
     def test_logo_on_every_page(self):
         import xml.etree.ElementTree as ET
@@ -1746,7 +1930,7 @@ class Server(unittest.TestCase):
     def test_home_screen_safety(self):
         self.set_paging_pw()
         self.assertEqual(self.home("/page/send", {"code": "2", "press": "5"}, origin="http://evil.example")[0], 403)
-        self.assertEqual(self.home("/page/send", {"code": "2", "press": "5"}, pw="wrong-password")[0], 401)
+        self.assertEqual(self.home("/page/send", {"code": "2", "press": "5"}, pw="wrong-password")[0], 303)
         self.assertEqual(self.home("/page/live", pw=None)[0], 401)
         for bad in ({"code": "11", "press": "5"}, {"code": "2", "press": "0"}, {"code": "2", "press": "1000"},
                     {"code": "2", "press": "x"}, {"code": "custom", "press": "5"}, {"press": "5"}):
@@ -1815,7 +1999,7 @@ class Server(unittest.TestCase):
         self.assertEqual(self.cfg["codes"][8], R.load_config(CONFIG)["codes"][8])
         with open(os.path.join(self.tmp, "settings.json"), encoding="utf-8") as f:
             self.assertNotIn("wording", json.load(f))
-        self.assertEqual(self.admin("/admin/wording", self.wording_form(), pw=None)[0], 401)
+        self.assertEqual(self.admin("/admin/wording", self.wording_form(), pw=None)[0], 303)
 
     def test_bad_wording_is_refused(self):
         for bad in ({"en_8": "Camera fault."},                         # no {press}
@@ -1868,7 +2052,7 @@ class Server(unittest.TestCase):
         self.assertIn("<nav class=tabs>", page)
         sections = dict(re.findall(r"<section data-tab=(\w+)>(.*?)</section>", page, re.S))
         self.assertEqual(sorted(sections), sorted(k for k, _ in R.TABS))
-        where = {"Settings": "overview", "Paging page": "overview", "Boards": "overview", "Recent calls": "overview",
+        where = {"Settings": "overview", "Users": "users", "Shared paging password (old)": "users", "Boards": "overview", "Recent calls": "overview",
                  "Add or rename a board": "overview", "Send a test call": "send", "Send a custom page": "send",
                  "Page wording": "wording", "Audio": "sound", "PA clarity": "sound", "Page voice": "sound",
                  "Voice lab": "sound", "Phone and paging setup": "phone", "Text messages (voip.ms)": "texts"}
@@ -1935,7 +2119,7 @@ class Server(unittest.TestCase):
                          ("5554443333", "Chapar: Forklift at dock 2"))
         _, loc, _ = self.admin("/admin/sms/send", {"number": "12", "message": "x"})
         self.assertIn("not sent", urllib.parse.unquote(loc))
-        self.assertEqual(self.admin("/admin/sms/send", {"number": "5554443333", "message": "x"}, pw=None)[0], 401)
+        self.assertEqual(self.admin("/admin/sms/send", {"number": "5554443333", "message": "x"}, pw=None)[0], 303)
 
     def test_sms_test_button(self):
         sender, fake = self.use_sms(enabled=False)
@@ -2036,6 +2220,19 @@ class Https(unittest.TestCase):
         self.assertIn("ok=1", loc)
         with urllib.request.urlopen(plain + "/log", timeout=5) as r:
             self.assertEqual(r.status, 200)                         # the open log stays on plain HTTP
+
+    def test_sign_in_page_over_https_only(self):
+        base, plain = "https://127.0.0.1:%d" % self.port, "http://127.0.0.1:%d" % self.port
+        st, loc, _ = self.open(plain + "/login", auth=False)
+        self.assertEqual((st, loc), (302, base + "/login"))
+        self.assertEqual(self.open(plain + "/login", b"name=a&password=b", origin=plain, auth=False)[0], 403)
+        req = urllib.request.Request(base + "/login", data=("name=Ryan&password=%s&next=/admin" % ADMIN_PW).encode(),
+                                     headers={"Origin": base})
+        try:
+            urllib.request.build_opener(urllib.request.HTTPSHandler(context=self.ctx), NoRedirect).open(req, timeout=5)
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 303)
+            self.assertIn("; Secure", e.headers["Set-Cookie"])                # the cookie only goes over HTTPS
 
     def test_bad_hello_does_not_stop_the_server(self):
         import socket

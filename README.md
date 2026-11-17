@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.17.3:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.18.0:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -130,7 +130,7 @@ the laptop's BIOS setup, if it has it.
 
 ## The admin page
 
-Open `https://<laptop IP>:8833/admin` (plain `http://` is sent there). The first time, the browser warns about the certificate: the installer made it on the laptop, so no outside company vouches for it. Check that the fingerprint matches the one the installer printed (`sudo openssl x509 -in /etc/p833-receiver/tls/cert.pem -noout -fingerprint -sha256`), then choose **Advanced > Proceed**. The browser asks for a user name and password: any user name works, and the password is `P833_ADMIN_PASSWORD` from `secrets.env`. The home screen `/` is the supervisors' paging page (see "Paging page"); the open, read-only log of boards and calls is at `/log`.
+Open `https://<laptop IP>:8833/admin` (plain `http://` is sent there). The first time, the browser warns about the certificate: the installer made it on the laptop, so no outside company vouches for it. Check that the fingerprint matches the one the installer printed (`sudo openssl x509 -in /etc/p833-receiver/tls/cert.pem -noout -fingerprint -sha256`), then choose **Advanced > Proceed**. The **sign-in page** asks for a name and password: an admin account's, or any name with the built-in admin password, `P833_ADMIN_PASSWORD` from `secrets.env` (see "Signing in and accounts"). The home screen `/` is the supervisors' paging page (see "Paging page"); the open, read-only log of boards and calls is at `/log`.
 
 The admin page doesn't reload itself: the mode line, the boards, the recent calls and the Make all progress update in place every 10 s, so what you're typing or listening to is left alone.
 
@@ -138,7 +138,7 @@ The admin page is in tabs, so it isn't one long list: **Overview** (dry run, boa
 
 | Section | What it does |
 |---|---|
-| **Paging page** (Overview tab) | Sets or removes the paging page's own password (see "Paging page"). |
+| **Users** (Users tab) | Everyone who can sign in: add a person (name, password, role), change a role, set a new password, remove. The **Users** link at the top of the admin page (and of the home screen, for admins) opens this tab. Also the old **Shared paging password**. See "Signing in and accounts". |
 | **Page wording** (Wording tab) | What each call type says, in English and Spanish, for example the camera fault message (code 8). Put `{press}` where the press number goes. Also the short reason shown on the admin page and the paging page's buttons ("camera fault"; a Spanish one for the paging page in Spanish, else the built-in translation, such as "falla de cámara") and, under "when the press number is unknown", the text for press 0. Saved on the laptop on top of the config file's wording and kept through restarts and updates; **Back to the config file's wording** undoes it. A reworded message is spoken by Piper in the recordings' voice (or in the Page voice, if you use one) and then kept, so the next time plays at once; messages you didn't change keep their recordings. Without Piper on the laptop, the old recording plays and the Audio box says so. Texts use the new wording too. Check a change with the test call **Preview**. |
 | **Phone and paging setup** | HT813 address and ports, 1-stage or 2-stage dialing, the timing waits, each zone's **dial digits** (0-9 * #, comma = half-second pause, F = hook flash), which zone each code pages, each code's department tone, the tone once, twice or off, the silence at the start, and how many times the message plays. Saved on the laptop on top of the config file's values; **Reset** goes back to the config. |
 | **Settings** | Turns dry run on or off. Turning it off asks for confirmation. The choice is saved on the laptop and kept through restarts and updates; the config's `dry_run` is only the first-time default. |
@@ -153,20 +153,36 @@ With dry run off, every test or custom page is really dialed.
 
 Open `https://<laptop IP>:8833/` (plain `http://` is sent there), on a PC, tablet or phone that can reach the laptop. It is made for the floor:
 
-- **Logo:** the PLASTI-PAGE logo, styled after the EPC logo, heads the paging page, the log and the admin page, and is the browser tab's icon.
+- **Logo:** the PLASTI-PAGE logo, styled after the EPC logo (a red square behind a blue globe, here with a paging horn, then the name in bold blue), heads every page and is the browser tab's icon. EPC's blue and red also mark the band under it, the headings and the main buttons.
 - **English / Español:** the switch in the top-right corner puts the whole page in English or Spanish: the buttons (Mantenimiento, Técnico, Calidad, Empaque, ...), the help text and the answers. The browser remembers the choice; the first time, it follows the phone's or PC's language. The pages themselves still play in English, then Spanish.
 
 - **Page someone to a press:** tap who (Maintenance, Technician, Supervisor, Quality, Packaging, or one with a reason, such as Maintenance, camera fault), type the press number, check the "Will say" line and tap **Page now**. It asks once more before it pages.
-- **Type a message:** in English, Spanish or both (English plays first). It is spoken by the computer voice (Piper) after a chime. Without Piper on the laptop this part is off.
+- **Type a message:** in English, Spanish or both (English plays first). It is spoken by the computer voice (Piper) after a chime. Without Piper on the laptop this part is off. People with an **Office** or **Admin** account also choose **Floor** or **Office** (the office needs its dial digits on the Phone tab first).
 - **Recent pages:** the last 8 pages from anywhere, with their result; it updates by itself. **Full log** opens `/log`.
-- Pages from here go to the **floor zone only**, never the office, whatever zone a call type is set to.
-- **Each department can be paged from here once every 5 minutes.** Maintenance covers all three Maintenance buttons (plain, camera fault, Red Rabbit), and Supervisor both of its buttons. A department paged lately is greyed out with "again in N min", and the laptop refuses it too. A page that FAILED doesn't count, so it can be tried again at once. Calls from the boards don't count.
-- **One typed message every 5 minutes** from the paging page, whatever the text (all supervisors together), so it can't be used to spam the floor. The message box is greyed out with "You can send another typed message in N min" until then. A typed message that FAILED doesn't count.
+- Pages of a department go to the **floor zone only**, whatever zone a call type is set to; only typed messages from Office and Admin accounts can go to the office.
+- **Each department can be paged from here once every 5 minutes** (**30 seconds** for Admin accounts). Maintenance covers all three Maintenance buttons (plain, camera fault, Red Rabbit), and Supervisor both of its buttons. A department paged lately is greyed out with "again in N min", and the laptop refuses it too. A page that FAILED doesn't count, so it can be tried again at once. Calls from the boards don't count.
+- **One typed message every 5 minutes** to each zone from the paging page (30 seconds for Admin accounts), whatever the text and whoever sends it, so it can't be used to spam the floor. The message box is greyed out with "You can send another typed message in N min" until then. A typed message that FAILED doesn't count.
 - At most 6 pages a minute leave the paging page in all, and none while 20 pages are already waiting.
 - Pages from here are logged as from "Paging page", with the name the supervisor signed in with, and are texted like board calls when texts are on.
 - In dry run the page says **PRACTICE MODE**: pages are logged, not played.
 
-**Password:** set the paging password on the admin page (Overview tab, **Paging page**). Supervisors sign in with **their name as the user name** (it goes in the log) and the paging password; the browser can remember both. The admin password also opens the paging page, but the paging password never opens the admin page. Until a paging password is set, only the admin password opens it. The laptop keeps only a hash of it (`/var/lib/p833-receiver/paging_password.json`, readable by the service only), so it can't be shown again: to change it, save a new one. 10 *different* wrong passwords from one address lock that address out of both pages for 10 minutes; the same wrong one again (a browser that saved an old password) counts once. After a password change, a page left open says it **stopped updating**: reload it and sign in with the new password.
+### Signing in and accounts
+
+Everyone signs in on the **sign-in page** with their own **name and password** (no more browser password box). The name goes in the log with each page they send. **Sign out** is at the top of every page; otherwise a device stays signed in for 14 days after it was last used.
+
+**Accounts** are made on the admin page's **Users** tab (the **Users** link at the top). Each has a role:
+
+| Role | Can |
+|---|---|
+| **Supervisor** | Page people to the floor; typed messages to the floor. 5 minutes between pages of one department, and between typed messages. |
+| **Office** | The same, plus typed messages to the office. |
+| **Admin** | The same as Office, plus the admin page; **30 seconds** (not 5 minutes) between pages of one department or typed messages. |
+
+- A role change applies at once. A new password, or removing an account, also signs that person out on every device.
+- The **built-in admin** is `P833_ADMIN_PASSWORD` from `secrets.env`: it signs in as an admin with any name, so you can always get in to make the first accounts.
+- The **shared paging password** from before accounts (Users tab, "Shared paging password (old)") still signs in, as a Supervisor, with any name that isn't an account's. Remove it once everyone has an account.
+- Passwords are 8 to 64 characters. The laptop keeps only salted hashes (`/var/lib/p833-receiver/users.json`), and for each signed-in device only a hash of its sign-in cookie (`sessions.json`); both are readable by the service only. A forgotten password can't be shown: set a new one on the Users tab.
+- 10 *different* wrong passwords from one address lock that address out for 10 minutes; the same wrong one again counts once. A page left open after its password was changed says it **stopped updating**: reload it and sign in again.
 
 **Many people at once:** tested with 40 people loading the page at the same moment from one address (all behind one router, or on one PC): every page loaded. The receiver serves up to 24 connections from one address and 128 in all (16 kept for the boards); at a busy moment a connection waits up to 5 seconds for a free one instead of being refused.
 
@@ -498,7 +514,8 @@ What protects what (receiver 0.10.0, board firmware 1.1.3):
 | Texts | voip.ms API password write-only, stored 0600, sent only to voip.ms over checked HTTPS (no redirects). Only boards on the list send texts. Queue and hourly caps. |
 | Phone line | The laptop uses only SIP and audio from the HT813's address that belong to the call, so other devices can't hang up or divert a page. Optional password on calls (above). |
 | Laptop | Service runs as `p833` in a systemd sandbox; logs and state readable only by root and the service; secrets root-only; SELinux on; firewalld opens only 8833/tcp. The installer checks a new version loads before installing it; `update.sh` asks first. |
-| Paging page | Its own password (only a PBKDF2 hash kept) or the admin password, over HTTPS; shares the admin page's lock-out. Forms only from the page itself. Floor zone only; each department once every 5 minutes; 6 pages a minute in all. Name, wording and messages escaped. |
+| Sign-in | Accounts with roles (Supervisor, Office, Admin); passwords kept as salted PBKDF2-SHA256 hashes; a random sign-in cookie (HttpOnly, SameSite=Lax, Secure over HTTPS), of which only a hash is kept; a session ends on Sign out, after 14 days unused, or when its password changes or its account is removed. 10 different wrong passwords lock an address out for 10 minutes. HTTPS only (plain HTTP is sent there). A browser can't use a saved Basic password (scripts can). |
+| Paging page | Signed-in people only. Forms only from the page itself. Department pages to the floor only; typed messages to the office only for Office and Admin accounts; 5 minutes per department and per zone's typed messages (30 s for admins); 6 pages a minute in all. Names, wording and messages escaped. |
 | Open log page (`/log`) | Shows no call details, dial digits, HT813 address or board addresses (those are on the admin page). |
 
 **To do on site** (see also the AAR's open points):
