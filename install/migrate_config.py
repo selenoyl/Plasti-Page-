@@ -98,6 +98,7 @@ OLD_NESTED_DEFAULTS = [
     ("audio", "gain_db", 6),               # 0.5.3 default; +8 was found clearer on the floor
     ("audio", "lead_silence_ms", 2500),    # 0.4.1 default; the feedback eliminator needs no lead-in
     ("phone", "wait_after_dial_ms", 2000),  # 1000 worked on the floor
+    ("phone", "line_check", "warn"),        # 0.18.3: a page that didn't open is tried again
 ]
 
 

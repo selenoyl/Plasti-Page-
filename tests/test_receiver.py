@@ -308,6 +308,95 @@ class SavedTones(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+class SavedLineCheck(unittest.TestCase):
+    """0.18.3: a line check saved as warn (the old default) becomes retry, once."""
+
+    def test_saved_line_check_warn_becomes_retry_once(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp, "settings.json"), "w") as f:
+                json.dump({"dry_run": False, "changes_applied": ["tones-2026-11-12", "tones-2026-11-12b"],
+                           "tuning": {"phone": {"line_check": "warn", "min_gap_s": 9}}}, f)
+            st = R.State(R.load_config(CONFIG), tmp, tmp)
+            self.assertEqual(st.cfg["phone"]["line_check"], "retry")
+            self.assertEqual(st.cfg["phone"]["min_gap_s"], 9)                 # the rest kept
+            st.settings["tuning"]["phone"]["line_check"] = "warn"             # set back on purpose: stays
+            st._save_settings()
+            again = R.State(R.load_config(CONFIG), tmp, tmp)
+            self.assertEqual(again.cfg["phone"]["line_check"], "warn")
+        finally:
+            shutil.rmtree(tmp)
+
+
+class LeftOverPages(unittest.TestCase):
+    """A page accepted but not yet logged when the receiver stops (an update's restart, a crash, a
+    power cut) is noted on disk. The next start sends it once, or logs it as not sent if it's old."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.cfg = R.load_config(CONFIG)
+        self.cfg["page_retry_wait_s"] = 0
+        self.path = os.path.join(self.tmp, "pages_waiting.json")
+        self.audio_dir = make_fake_audio(os.path.join(self.tmp, "audio"))
+
+    def start(self, pager):
+        """A receiver start: its state and page worker (not yet running)."""
+        state = R.State(self.cfg, self.tmp, self.tmp)
+        state.dry_run = False
+        worker = R.PageWorker(self.cfg, state, pager, audio=A.AudioLibrary(self.audio_dir))
+        worker.take_left_over(self.path)
+        return state, worker
+
+    @staticmethod
+    def rec(**over):
+        r = {"time": R.now_text(), "board": "RSP_LH", "cell": "RSP LH", "press": 27, "code": 2,
+             "who": "Maintenance", "message": "Maintenance requested to press 27.", "note": "",
+             "en": "Maintenance requested to press 27.", "es": "Se solicita mantenimiento en la prensa 27.",
+             "zone": "floor"}
+        r.update(over)
+        return r
+
+    def noted(self):
+        with open(self.path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_page_cut_off_by_a_stop_is_sent_at_the_next_start(self):
+        _, first = self.start(FakePager())
+        first.jobs.put(self.rec())             # accepted; the receiver stops before it is sent
+        self.assertEqual(len(self.noted()), 1)
+        pager = FakePager()
+        state, second = self.start(pager)
+        second.start()
+        second.jobs.join()
+        self.assertEqual(len(pager.sent), 1)
+        self.assertEqual(state.calls[-1]["result"], "sent")
+        self.assertIn("sent after a restart", state.calls[-1]["detail"])
+        self.assertEqual(self.noted(), [])     # logged: no longer noted
+
+    def test_old_resent_or_unknown_pages_are_logged_not_sent(self):
+        _, first = self.start(FakePager())
+        first.jobs.put(self.rec(queued_at=time.time() - 3600))      # an hour old (a power cut)
+        first.jobs.put(self.rec(resent=True))                       # already sent again once
+        first.jobs.put(self.rec(zone="nowhere"))                    # its zone is gone
+        pager = FakePager()
+        state, second = self.start(pager)
+        self.assertEqual(pager.sent, [])
+        self.assertEqual([c["result"] for c in state.calls], ["FAILED"] * 3)
+        details = " | ".join(c["detail"] for c in state.calls)
+        for want in ("60 min old", "already been sent again once", "no longer set up"):
+            self.assertIn(want, details)
+        self.assertFalse(os.path.exists(self.path))
+        self.assertEqual(second.jobs.qsize(), 0)
+
+    def test_a_damaged_note_is_ignored(self):
+        with open(self.path, "w") as f:
+            f.write("{not json")
+        state, worker = self.start(FakePager())
+        self.assertEqual((state.calls, worker.jobs.qsize()), ([], 0))
+        self.assertFalse(os.path.exists(self.path))
+
+
 class RecentCalls(unittest.TestCase):
     def test_pages_show_the_newest_20_and_the_log_keeps_all(self):
         tmp = tempfile.mkdtemp()
@@ -345,6 +434,8 @@ class ConfigUpdate(unittest.TestCase):
             cfg["zones"]["floor"]["dial"] = "##61"
             cfg["audio"]["keep_dry_run_pages"] = 20           # the old default
             del cfg["audio"]["lead_silence_ms"]               # a setting the laptop doesn't have yet
+            cfg["phone"]["line_check"] = "warn"               # the default before 0.18.3
+            del cfg["phone"]["replay_wait"]                   # new in 0.18.3
             path = os.path.join(tmp, "config.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f)
@@ -361,6 +452,7 @@ class ConfigUpdate(unittest.TestCase):
             self.assertEqual(new["codes"][7]["tone"], "4_quality_flute")
             self.assertEqual(new["zones"]["floor"]["dial"], "##61")
             self.assertEqual(new["audio"]["keep_dry_run_pages"], 0)
+            self.assertEqual((new["phone"]["line_check"], new["phone"]["replay_wait"]), ("retry", "on"))
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f)["audio"]["lead_silence_ms"], 0)
             out = subprocess.check_output([sys.executable, script, path, CONFIG]).decode()
@@ -1036,10 +1128,19 @@ class Server(unittest.TestCase):
         R.State(cfg3, self.tmp, self.tmp)
         self.assertEqual(cfg3["zones"]["floor"]["dial"], "F,*60,2,1")
 
+    def test_replay_wait_setting_saved(self):
+        self.assertIn("name=replay_wait", self.admin("/admin")[2])
+        self.admin("/admin/tuning", self.tuning_form(replay_wait="off", line_check="retry"))
+        self.assertEqual((self.cfg["phone"]["replay_wait"], self.cfg["phone"]["line_check"]), ("off", "retry"))
+        self.assertIn("<option selected>off</option>", self.admin("/admin")[2])
+        self.admin("/admin/tuning", self.tuning_form())
+        self.assertEqual(self.cfg["phone"]["replay_wait"], "on")       # (not in the form: on)
+
     def test_tuning_bad_values_not_saved(self):
         for bad in ({"ht813_ip": "300.1.1.1"}, {"dial_floor": "PAGE1"}, {"dtmf_ms": "5"},
                     {"tone_2": "no_such_tone"}, {"tones": "loud"}, {"gain_db": "20"}, {"lead_silence_ms": "20000"},
-                    {"zone_3": "nowhere"}, {"repeat": "9"}, {"dial_method": "3-stage"}):
+                    {"zone_3": "nowhere"}, {"repeat": "9"}, {"dial_method": "3-stage"},
+                    {"line_check": "sometimes"}, {"replay_wait": "maybe"}):
             _, loc, _ = self.admin("/admin/tuning", self.tuning_form(**bad))
             self.assertIn("Not saved", urllib.parse.unquote(loc), bad)
         self.assertEqual(self.cfg["phone"]["ht813_ip"], "192.168.83.20")
@@ -1100,7 +1201,8 @@ class Server(unittest.TestCase):
         ht = FakeHT813(**kw)
         self.addCleanup(ht.close)
         self.cfg["phone"].update(ht813_ip="127.0.0.1", sip_port=ht.port, local_sip_port=0, min_gap_s=0,
-                                 wait_after_answer_ms=60, dtmf_ms=60, dtmf_gap_ms=40, wait_after_dial_ms=60)
+                                 wait_after_answer_ms=60, dtmf_ms=60, dtmf_gap_ms=40, wait_after_dial_ms=60,
+                                 replay_wait="off")
         self.cfg["audio"].update(lead_silence_ms=0, repeat=1)
         self.worker.live = R.SipPager(self.cfg)
         self.worker.state_dir = self.tmp
@@ -1136,17 +1238,43 @@ class Server(unittest.TestCase):
             self.assertTrue(f.read().startswith(b"RIFF"))
         self.assertIn("name=line_check", self.admin("/admin")[2])
 
-    def test_line_check_warn_is_the_default(self):
-        self.assertEqual(R.load_config(CONFIG)["phone"]["line_check"], "warn")
+    def test_line_check_retry_and_replay_wait_are_the_defaults(self):
+        for cfg in (R.load_config(CONFIG), R.PHONE_DEFAULTS):
+            self.assertEqual(cfg.get("phone", cfg)["line_check"], "retry")
+            self.assertEqual(cfg.get("phone", cfg)["replay_wait"], "on")
+
+    def test_line_check_warn_plays_anyway(self):
         ht = self.use_fake_ht813(line_tone="dial")
         self.cfg["phone"]["wait_after_dial_ms"] = 600
-        self.cfg["phone"]["line_check"] = R.load_config(CONFIG)["phone"]["line_check"]
+        self.cfg["phone"]["line_check"] = "warn"
         self.cfg["zones"]["floor"]["dial"] = "F61"
         self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
         self.wait_pages()
         row = self.wait_row()
         self.assertEqual((row["result"], row["attempts"]), ("sent", "1"))   # played once, not retried
         self.assertIn("WARNING: the line still had dial tone", row["detail"])
+        self.assertEqual(ht.calls, 1)
+
+    def test_phone_events_on_the_phone_tab(self):
+        ht = self.use_fake_ht813()
+        self.cfg["zones"]["floor"]["dial"] = "F61"
+        self.assertIn("none since the receiver started", self.admin("/admin")[2])
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 1, "code": 2, "press": 27})
+        self.wait_pages()
+        body = self.admin("/admin")[2]
+        self.assertIn("<h2>Recent phone events</h2>", body)
+        for want in ("page to zone floor: Maintenance requested to press 27.", "dialed F61",
+                     "line check: no dial, busy or ringing tone", "hung up"):
+            self.assertIn(want, body)
+        events = json.loads(self.admin("/admin/live")[2])["phoneevents"]
+        self.assertLess(events.index("hung up"), events.index("dialed F61"))      # newest first
+        self.assertNotIn("phoneevents", R.live_parts(R.Handler.app, False))         # admin page only
+        ht.mode = "busy"                                                            # a failed page: a red row
+        self.post("/call", {"board": "RSP_LH", "boot": "b", "seq": 2, "code": 2, "press": 28})
+        self.wait_pages()
+        events = json.loads(self.admin("/admin/live")[2])["phoneevents"]
+        self.assertRegex(events, r"<tr class='bad'><td>[^<]+</td><td>page failed: HT813 said busy")
+        self.assertRegex(events, r"<tr class='warn'><td>[^<]+</td><td>HT813 said 486 Busy Here")
 
     def test_live_page_without_dial_digits_fails(self):
         ht = self.use_fake_ht813()

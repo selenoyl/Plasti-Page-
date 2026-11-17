@@ -31,7 +31,8 @@ def tone_wav(seconds):
 def cfg_for(ht, **over):
     ph = {"ht813_ip": "127.0.0.1", "sip_port": ht.port, "local_sip_port": 0, "dial_method": "2-stage",
           "wait_after_answer_ms": 100, "dtmf_ms": 60, "dtmf_gap_ms": 40, "wait_after_dial_ms": 100,
-          "max_call_s": 10, "ht813_user": "", "min_gap_s": 0, "line_check": "retry"}
+          "max_call_s": 10, "ht813_user": "", "min_gap_s": 0, "line_check": "retry",
+          "replay_wait": "off"}      # (on in the test of it: it makes every next call wait)
     ph.update(over)
     return {"phone": ph}
 
@@ -118,7 +119,13 @@ pager.page("floor", "61", "en", "es", buf.getvalue())
         state, code = self.stopped_mid_page(signal.SIGTERM)          # what systemctl restart (an update) does
         self.assertIsNone(self.ht.open_call)                         # the HT813's line is free again
         self.assertEqual(code, 0)
-        ok, detail = S.SipPager(cfg_for(self.ht), state_dir=state).page("floor", "61", "en", "es", tone_wav(0.2))
+        # The feedback eliminator now replays the part that went out: the next start waits for it.
+        self.assertTrue(os.path.exists(os.path.join(state, "replay_until.json")))
+        pager = S.SipPager(cfg_for(self.ht), state_dir=state)
+        self.assertFalse(os.path.exists(os.path.join(state, "replay_until.json")))
+        self.assertGreater(pager.replay_until - time.monotonic(), S.REPLAY_MARGIN_S - 0.5)
+        self.assertLess(pager.replay_until - time.monotonic(), S.REPLAY_MARGIN_S + 3)
+        ok, detail = pager.page("floor", "61", "en", "es", tone_wav(0.2))
         self.assertTrue(ok, detail)
 
     def test_call_left_open_is_hung_up_next_time(self):
@@ -159,6 +166,96 @@ pager.page("floor", "61", "en", "es", buf.getvalue())
                 break
             time.sleep(0.02)
         self.assertTrue(any(r.startswith("CANCEL ") for r in self.ht.requests))
+
+    def test_lost_ack_is_sent_again(self):
+        # The HT813 doesn't get the laptop's ACK: it sends its answer again, and hangs up if no
+        # ACK ever comes (a page cut short). Each answer again gets an ACK again.
+        self.ht = FakeHT813(lose_acks=1, ack_timeout=2.0)
+        ok, detail = S.SipPager(cfg_for(self.ht)).page("floor", "61", "en", "es", tone_wav(3.0))
+        self.assertTrue(ok, detail)
+        self.assertGreaterEqual(self.ht.answers_sent, 2)
+        self.assertEqual(self.ht.acks, 1)
+        self.assertEqual(self.ht.hung_up_by_me, [])
+
+    def _page_with_short_answer_time(self, pager):
+        old = S.ANSWER_S
+        S.ANSWER_S = 1
+        try:
+            t0 = time.monotonic()
+            ok, detail = pager.page("floor", "61", "en", "es", tone_wav(0.2))
+            return ok, detail, time.monotonic() - t0
+        finally:
+            S.ANSWER_S = old
+
+    def test_answer_after_the_cancel_is_hung_up(self):
+        # The HT813 answers just as the laptop gives up waiting. That call must be hung up,
+        # or the HT813 keeps its line in it and says busy to every call after.
+        self.ht = FakeHT813(one_line=True, answer_delay=1.5, cancel_too_late=True)
+        pager = S.SipPager(cfg_for(self.ht))
+        ok, detail, _ = self._page_with_short_answer_time(pager)
+        self.assertFalse(ok)
+        self.assertIn("did not answer", detail)
+        self.assertIsNone(self.ht.open_call)
+        self.assertEqual(self.ht.byes[-1][1], 200)
+        self.assertTrue(self.ht.got_ack)
+        self.assertTrue(any("answered after the cancel" in text for _, text in pager.events))
+        self.ht.answer_delay = 0
+        ok, detail = pager.page("floor", "61", "en", "es", tone_wav(0.2))
+        self.assertTrue(ok, detail)                         # not "busy"
+
+    def test_cancelled_call_is_acknowledged(self):
+        # Cancelled in time: the HT813 says 487, which gets its ACK, and the wait ends at once.
+        self.ht = FakeHT813(one_line=True, answer_delay=5)
+        pager = S.SipPager(cfg_for(self.ht))
+        ok, detail, took = self._page_with_short_answer_time(pager)
+        self.assertFalse(ok)
+        self.assertLess(took, 3)
+        for _ in range(100):                     # the fake takes the ACK a moment later
+            if self.ht.got_ack:
+                break
+            time.sleep(0.02)
+        self.assertTrue(self.ht.got_ack)
+        self.assertIsNone(self.ht.open_call)
+        self.ht.answer_delay = 0
+        ok, detail = pager.page("floor", "61", "en", "es", tone_wav(0.2))
+        self.assertTrue(ok, detail)
+
+    def test_waits_for_the_feedback_eliminator_to_replay(self):
+        # The feedback eliminator plays each page again after the call, and a page during that
+        # finds the zone busy. So the next call waits about as long as the last page was open.
+        self.ht = FakeHT813()
+        old = S.REPLAY_MARGIN_S
+        S.REPLAY_MARGIN_S = 0.5
+        try:
+            pager = S.SipPager(cfg_for(self.ht, replay_wait="on"))
+            ok, detail = pager.page("floor", "61", "en", "es", tone_wav(1.5))
+            self.assertTrue(ok, detail)
+            ok, detail = pager.page("floor", "61", "en", "es", tone_wav(0.2))
+            self.assertTrue(ok, detail)
+            waits = [float(re.search(r"waiting ([\d.]+) s", t).group(1)) for _, t in pager.events
+                     if "to replay the last page" in t]
+            self.assertEqual(len(waits), 1)
+            self.assertGreater(waits[0], 1.9)        # 0.1 s wait after dialing + 1.5 s + 0.5 s
+            self.assertLess(waits[0], 3.0)
+            texts = [t for _, t in pager.events]
+            for want in ("page to zone floor: en", "HT813 answered in", "dialed 61",
+                         "line check: no dial, busy or ringing tone", "played 2 s", "hung up"):
+                self.assertTrue(any(t.startswith(want) for t in texts), (want, texts))
+            # A test call that dials nothing pages nobody: nothing replays after it.
+            ok, _ = pager.connection_test(seconds=0.3)
+            self.assertTrue(ok)
+            n = len(pager.events)
+            ok, detail = pager.page("floor", "61", "en", "es", tone_wav(0.2))
+            self.assertTrue(ok, detail)
+            self.assertFalse(any("to replay" in t for _, t in list(pager.events)[n:]))
+            # Turned off on the admin page: no wait.
+            pager.cfg["phone"]["replay_wait"] = "off"
+            n = len(pager.events)
+            ok, detail = pager.page("floor", "61", "en", "es", tone_wav(0.2))
+            self.assertTrue(ok, detail)
+            self.assertFalse(any("to replay" in t for _, t in list(pager.events)[n:]))
+        finally:
+            S.REPLAY_MARGIN_S = old
 
     def test_ht813_hangs_up_mid_page(self):
         self.ht = FakeHT813(mode="hangup", hangup_after=0.4)

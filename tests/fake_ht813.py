@@ -8,6 +8,11 @@
 # one_line: like the real FXO port, one call at a time: while a call that nobody hung up
 #       is open, every new call gets 486 Busy Here (until a BYE for that call arrives)
 # password: if set, INVITEs must answer a Digest challenge with it (user "p833")
+# answer_delay: seconds between "100 Trying" and the answer. A CANCEL before then gets
+#       "487 Request Terminated", unless cancel_too_late: then the answer still comes (it
+#       crossed the cancel on the network), and the call is up until someone hangs it up
+# lose_acks: ignore this many ACKs. Like a real phone, the answer is sent again until an ACK
+#       comes; with none after ack_timeout seconds, it hangs up (a real one waits 32 s)
 
 import hashlib
 import re
@@ -21,7 +26,8 @@ EVENT_CHARS.update({10: "*", 11: "#", 16: "F"})
 
 
 class FakeHT813:
-    def __init__(self, mode="answer", hangup_after=0.5, line_tone="quiet", password="", one_line=False):
+    def __init__(self, mode="answer", hangup_after=0.5, line_tone="quiet", password="", one_line=False,
+                 answer_delay=0.0, cancel_too_late=False, lose_acks=0, ack_timeout=32.0):
         # line_tone: what the "line" sends back during the call: quiet (an open page),
         # dial (dial tone: flash or digits not taken), busy, or ring (called a phone)
         self.mode, self.hangup_after, self.line_tone = mode, hangup_after, line_tone
@@ -41,6 +47,13 @@ class FakeHT813:
         self.got_ack = False
         self.one_line, self.open_call = one_line, None     # the call-id of the call on the line now
         self.byes = []                # (call-id, the answer: 200 or 481)
+        self.answer_delay, self.cancel_too_late = answer_delay, cancel_too_late
+        self.lose_acks, self.ack_timeout = lose_acks, ack_timeout
+        self.pending = {}             # call-id: the timer that will answer it (answer_delay)
+        self.acked = set()            # call-ids whose answer was acknowledged
+        self.acks = 0                 # ACKs taken (not counting the lost ones)
+        self.answers_sent = 0         # 200 OKs to INVITEs, resends included
+        self.hung_up_by_me = []       # call-ids this fake hung up itself
         self._last_event_ts = None
         self._stop = False
         self._peer = None
@@ -59,7 +72,10 @@ class FakeHT813:
         msg = ("SIP/2.0 %d %s\r\nVia: %s\r\nFrom: %s\r\nTo: %s\r\nCall-ID: %s\r\nCSeq: %s\r\n%s"
                "Content-Length: %d\r\n\r\n%s" % (code, text, h.get("via", ""), h.get("from", ""), to,
                                                 h.get("call-id", ""), h.get("cseq", ""), extra, len(body), body))
-        self.sip.sendto(msg.encode(), addr)
+        try:
+            self.sip.sendto(msg.encode(), addr)
+        except OSError:
+            pass                      # closed at the end of a test
 
     def _sip_loop(self):
         while not self._stop:
@@ -90,20 +106,19 @@ class FakeHT813:
                     continue
                 if self.one_line:
                     self.open_call = h.get("call-id")
-                sdp = ("v=0\r\no=ht 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"
-                       "m=audio %d RTP/AVP 0 101\r\na=rtpmap:101 telephone-event/8000\r\n" % self.rtp_port)
-                self._reply(addr, 200, "OK", h, sdp, "Contact: <sip:fxo@127.0.0.1:%d>\r\n"
-                            "Content-Type: application/sdp\r\n" % self.port)
-                far = None
-                for line in body.splitlines():
-                    if line.startswith("m=audio "):
-                        far = ("127.0.0.1", int(line.split()[1]))
-                if far:
-                    threading.Thread(target=self._send_tone_back, args=(far,), daemon=True).start()
-                if self.mode == "hangup":
-                    threading.Timer(self.hangup_after, self._hang_up, args=(addr, h)).start()
+                if self.answer_delay > 0:
+                    t = threading.Timer(self.answer_delay, self._answer, args=(addr, h, body))
+                    self.pending[h.get("call-id")] = (t, addr, h)
+                    t.start()
+                else:
+                    self._answer(addr, h, body)
             elif first.startswith("ACK "):
+                if self.lose_acks > 0:
+                    self.lose_acks -= 1
+                    continue
                 self.got_ack = True
+                self.acks += 1
+                self.acked.add(h.get("call-id"))
             elif first.startswith("BYE "):
                 if self.one_line and h.get("call-id") != self.open_call:
                     self.byes.append((h.get("call-id"), 481))
@@ -115,6 +130,49 @@ class FakeHT813:
                 self._reply(addr, 200, "OK", h)
             elif first.startswith("CANCEL "):
                 self._reply(addr, 200, "OK", h)
+                waiting = self.pending.get(h.get("call-id"))
+                if waiting and not self.cancel_too_late:
+                    waiting[0].cancel()
+                    del self.pending[h.get("call-id")]
+                    if self.open_call == h.get("call-id"):
+                        self.open_call = None
+                    self._reply(waiting[1], 487, "Request Terminated", waiting[2])
+
+    def _answer(self, addr, h, body):
+        """Answer the call: 200 OK (sent again until it is acknowledged), and the line's audio."""
+        self.pending.pop(h.get("call-id"), None)
+        sdp = ("v=0\r\no=ht 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"
+               "m=audio %d RTP/AVP 0 101\r\na=rtpmap:101 telephone-event/8000\r\n" % self.rtp_port)
+        extra = "Contact: <sip:fxo@127.0.0.1:%d>\r\nContent-Type: application/sdp\r\n" % self.port
+        self._reply(addr, 200, "OK", h, sdp, extra)
+        self.answers_sent += 1
+        threading.Thread(target=self._resend_answer, args=(addr, h, sdp, extra), daemon=True).start()
+        far = None
+        for line in body.splitlines():
+            if line.startswith("m=audio "):
+                far = ("127.0.0.1", int(line.split()[1]))
+        if far:
+            threading.Thread(target=self._send_tone_back, args=(far,), daemon=True).start()
+        if self.mode == "hangup":
+            threading.Timer(self.hangup_after, self._hang_up, args=(addr, h)).start()
+
+    def _resend_answer(self, addr, h, sdp, extra):
+        """Send the answer again (0.5 s, 1 s, 2 s, 4 s apart) until an ACK comes; give up and
+        hang up after ack_timeout, as a real phone does."""
+        start, wait = time.monotonic(), 0.5
+        while not self._stop:
+            time.sleep(wait)
+            if h.get("call-id") in self.acked or self._stop:
+                return
+            if time.monotonic() - start >= self.ack_timeout:
+                self._hang_up(addr, h)
+                return
+            try:
+                self._reply(addr, 200, "OK", h, sdp, extra)
+                self.answers_sent += 1
+            except OSError:
+                return
+            wait = min(wait * 2, 4.0)
 
     def _auth_ok(self, first, h):
         """Digest check like the HT813's 'Authenticate incoming INVITE'. Replies 401/403 itself."""
@@ -160,6 +218,7 @@ class FakeHT813:
 
     def _hang_up(self, addr, h):
         self.open_call = None
+        self.hung_up_by_me.append(h.get("call-id"))
         msg = ("BYE sip:p833@%s SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:%d;branch=z9hG4bKfakebye\r\n"
                "From: %s;tag=fake1\r\nTo: %s\r\nCall-ID: %s\r\nCSeq: 1 BYE\r\nContent-Length: 0\r\n\r\n" % (
                    addr[0], self.port, h.get("to", ""), h.get("from", ""), h.get("call-id", "")))

@@ -38,7 +38,8 @@
     "wait_after_dial_ms": 1000,
     "max_call_s": 90,
     "min_gap_s": 6,
-    "line_check": "warn"
+    "line_check": "retry",
+    "replay_wait": "on"
   },
   "boards": {
     "RSP_LH": {

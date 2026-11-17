@@ -18,6 +18,7 @@
 #
 # Standard library only; Python 3.6+.
 
+import collections
 import hashlib
 import io
 import json
@@ -229,6 +230,11 @@ def local_ip_towards(host):
         s.close()
 
 
+ANSWER_S = 15           # the HT813 must answer a call within this long, or it is cancelled
+LATE_ANSWER_S = 4       # after cancelling, listen this long for a late answer (to hang it up properly)
+REPLAY_MARGIN_S = 3     # the feedback eliminator replays each page after the call: this much more on top
+
+
 class CallFailed(Exception):
     pass
 
@@ -245,17 +251,30 @@ class SipPager:
         self.password = password          # for the HT813's password check, if it asks (secrets.env)
         self.line = threading.Lock()      # one phone line: one call at a time
         self.active = None                # the call going on now (hung up first if the receiver stops)
+        self.events = collections.deque(maxlen=120)  # (time, text): the recent phone events, for the admin page
+        self.replay_until = 0.0           # the feedback eliminator is (probably) replaying the last page until
         # The call going on now is also noted on disk until it is hung up: if the receiver stops
         # mid-page without hanging up (crash, power cut), the next start hangs it up. Otherwise
         # the HT813 keeps its line in that call and answers every new call "486 Busy Here".
         self.open_file = os.path.join(state_dir, "open_call.json") if state_dir else None
+        # When the receiver is stopped mid-page, the feedback eliminator replays the part that
+        # went out: noted here, so the next start doesn't send its first page into that replay.
+        self.replay_file = os.path.join(state_dir, "replay_until.json") if state_dir else None
+        self.opened = None                # when the page zone of the call going on now opened
+        self._load_replay()
         self.last_end = 0.0               # when the last call hung up (for the gap between calls)
         self.last_check = ""              # what the line check found on the last call
         self.last_recording = b""         # what the line sent back during the last test (WAV)
 
+    def note(self, text):
+        """A phone event: in the receiver's log and in the admin page's list of recent ones."""
+        self.events.append((time.time(), text))
+        self.log("phone: " + text)
+
     # -- the public entry point used by the receiver's page worker
     def page(self, zone, dial, en, es, audio=None):
         with self.line:
+            self.note("page to zone %s: %s" % (zone, (en or es or "")[:60]))
             return self._page(zone, dial, audio)
 
     def connection_test(self, seconds=3, digits="", wav=None, what="the bell"):
@@ -271,6 +290,8 @@ class SipPager:
         except ValueError as e:
             return False, str(e)
         with self.line:
+            self.note("phone test: dial %s, then play %s" % (digits, what) if digits else
+                      "phone test: call the HT813, dial nothing")
             self.last_recording = b""
             try:
                 secs = self.call(ph, digits, pcm, record=True)
@@ -282,8 +303,10 @@ class SipPager:
                 return True, ("HT813 %s:%s answered, held the line %.0f s and hung up. Nothing was dialed."
                               % (ph["ht813_ip"], ph["sip_port"], secs))
             except CallFailed as e:
+                self.note("test failed: %s" % e)
                 return False, "phone: %s" % e
             except OSError as e:
+                self.note("test failed: network error: %s" % e)
                 return False, "phone: network error: %s" % e
 
     # -- a call left open: noted on disk while it lasts, hung up by the next start
@@ -343,9 +366,31 @@ class SipPager:
     def hang_up_now(self):
         """The receiver is stopping: hang up the call going on, if any, at once. (It stays noted
         on disk: the next start hangs it up again in case this didn't get through.)"""
-        d = self.active
+        d, opened = self.active, self.opened
         if d is not None and not d.hung_up:
             d.bye(quick=True)
+            if opened is not None and self.replay_file:
+                now = time.monotonic()
+                try:
+                    with open(self.replay_file, "w", encoding="utf-8") as f:
+                        json.dump({"until": time.time() + (now - opened) + REPLAY_MARGIN_S}, f)
+                except OSError:
+                    pass
+
+    def _load_replay(self):
+        """A replay the last run noted as it stopped (see hang_up_now): wait for it too."""
+        if not self.replay_file:
+            return
+        try:
+            with open(self.replay_file, encoding="utf-8") as f:
+                left = float(json.load(f)["until"]) - time.time()
+            self.replay_until = time.monotonic() + min(max(0.0, left), 300.0)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        try:
+            os.remove(self.replay_file)
+        except OSError:
+            pass
 
     def _page(self, zone, dial, audio):
         ph = self.cfg["phone"]
@@ -363,8 +408,10 @@ class SipPager:
             return True, "dialed %s via HT813 %s, waited %.1f s, played %.0f s%s" % (
                 dial, ph["ht813_ip"], int(ph["wait_after_dial_ms"]) / 1000.0, secs, warn)
         except CallFailed as e:
+            self.note("page failed: %s" % e)
             return False, "phone: %s" % e
         except OSError as e:
+            self.note("page failed: network error: %s" % e)
             return False, "phone: network error: %s" % e
 
     # -- one call
@@ -378,12 +425,17 @@ class SipPager:
         user = ph.get("ht813_user", "") if two_stage else dial.replace(",", "").replace("F", "")
         me = local_ip_towards(host)
         # Give the HT813 and the Norstar time to release the line after the last call
-        # (the HT813 waits 4 s between outgoing calls by default).
-        wait = self.last_end + float(ph.get("min_gap_s", 6)) - time.monotonic()
-        if wait > 0:
-            self.log("phone: waiting %.1f s for the line to settle after the last call" % wait)
-            time.sleep(wait)
+        # (the HT813 waits 4 s between outgoing calls by default), and the feedback
+        # eliminator time to replay the last page (a call meanwhile finds the page zone busy).
+        now = time.monotonic()
+        gap = self.last_end + float(ph.get("min_gap_s", 6)) - now
+        replay = self.replay_until - now if ph.get("replay_wait", "on") == "on" else 0
+        if max(gap, replay) > 0:
+            self.note("waiting %.1f s %s" % (max(gap, replay), "for the feedback eliminator to replay the last page"
+                                             if replay > gap else "for the line to settle after the last call"))
+            time.sleep(max(gap, replay))
         self.last_check = ""
+        self.opened = None
 
         sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -399,11 +451,13 @@ class SipPager:
             if self._hang_up_leftover(sip):
                 time.sleep(1.0)                    # give the HT813 a moment to free its line
             auth_id = ph.get("ht813_auth_id", "") or ph.get("ht813_user", "") or "p833"
-            d = Dialog(sip, me, lport, host, port, user, (auth_id, self.password))
+            d = Dialog(sip, me, lport, host, port, user, (auth_id, self.password), note=self.note)
+            t0 = time.monotonic()
             far = d.invite(rport, deadline)
             self.active = d
             self._remember(d)
-            self.log("phone: HT813 answered; audio to %s:%d" % far)
+            self.note("HT813 answered in %.1f s" % (time.monotonic() - t0))
+            opened, played = None, 0
             try:
                 stream = RtpStream(rtp, far, record, d.peer_ip)
                 stream.silence(int(ph["wait_after_answer_ms"]), d)
@@ -414,21 +468,35 @@ class SipPager:
                         else:
                             stream.dtmf(DTMF_EVENTS[ch], int(ph["dtmf_ms"]), d)
                             stream.silence(int(ph["dtmf_gap_ms"]), d)
+                if two_stage and dial:
+                    self.note("dialed %s" % dial)
+                opened = self.opened = time.monotonic() if dial else None    # the page zone opens about now
                 mark = len(stream.got)
                 stream.silence(int(ph["wait_after_dial_ms"]), d)
-                if two_stage and dial and ph.get("line_check", "warn") != "off":
+                if two_stage and dial and ph.get("line_check", "retry") != "off":
                     found = line_check(stream.got[mark:])
                     if found:
                         self.last_check = found
-                        self.log("phone: line check: %s" % found)
-                        if ph.get("line_check", "warn") == "retry":
+                        self.note("line check: %s" % found)
+                        if ph.get("line_check", "retry") == "retry":
                             raise CallFailed("page did not open: " + found)
+                    else:
+                        self.note("line check: no dial, busy or ringing tone (the page opened)")
                 played = stream.play(pcm, d, deadline)
+                self.note(("played %.0f s" if dial else "held the line %.0f s (silence)") % played)
             finally:
                 if d.bye():                        # hung up (or the HT813 did): no longer open
                     self._forget()
+                    self.note("the HT813 had hung up" if d.far_hung_up else "hung up")
+                else:
+                    self.note("hung up, but the HT813 didn't answer: it is hung up again before the next call")
                 self.active = None
                 self.last_end = time.monotonic()
+                if opened is not None:
+                    # The feedback eliminator recorded the page from when it opened until now,
+                    # and plays that recording to the speakers after the call: about as long again.
+                    self.replay_until = self.last_end + (self.last_end - opened) + REPLAY_MARGIN_S
+                self.opened = None
                 if record:
                     self.last_recording = pcm_to_wav(stream.heard())
             return played
@@ -442,7 +510,9 @@ class Dialog:
 
     MAX_PER_CHECK = 20       # SIP messages handled per audio frame (a flood can't stall the page)
 
-    def __init__(self, sock, me, lport, host, port, user, auth=("", "")):
+    def __init__(self, sock, me, lport, host, port, user, auth=("", ""), note=None):
+        self.note = note or (lambda text: None)
+        self.far_hung_up = False
         self.sock, self.me, self.lport = sock, me, lport
         self.host, self.port, self.user = host, port, user
         self.auth = auth
@@ -494,11 +564,14 @@ class Dialog:
         msg = new_invite()
         self._send(msg)
         resend_at, interval, got_provisional = time.monotonic() + 0.5, 0.5, False
-        answer_by = min(deadline, time.monotonic() + 15)
+        answer_by = min(deadline, time.monotonic() + ANSWER_S)
         while True:
             now = time.monotonic()
             if now > answer_by:
                 self._cancel()
+                self.note("no answer in %d s: cancelled" % ANSWER_S)
+                if got_provisional:                    # it was there (said "trying"): an answer may still come
+                    self._after_cancel()
                 raise CallFailed("HT813 at %s:%d did not answer the call (check its address, FXO SIP "
                                  "port, and that it accepts direct calls)" % (self.host, self.port))
             if not got_provisional and now >= resend_at:      # UDP retransmit until we hear anything
@@ -522,6 +595,7 @@ class Dialog:
             self.ttag = _param(h.get("to", ""), "tag")
             if code >= 300:
                 self._ack_failure(h)
+                self.note("HT813 said %s" % first[8:][:60])
                 challenge = h.get("www-authenticate") or h.get("proxy-authenticate") or ""
                 if code in (401, 407) and challenge.lower().startswith("digest"):
                     if not self.auth[1]:
@@ -559,6 +633,35 @@ class Dialog:
                 self.bye()
                 raise CallFailed("HT813 asked for the audio to go to another address (%s); refused" % far[0])
             return far
+
+    def _after_cancel(self):
+        """After cancelling: an answer may still come (it crossed the cancel). Acknowledge it,
+        and hang up a call the HT813 thinks it answered; else it keeps its line in that call."""
+        end = time.monotonic() + LATE_ANSWER_S
+        while time.monotonic() < end:
+            r = self._recv(0.2)
+            if not r:
+                continue
+            first, h, _ = r
+            if not first.startswith("SIP/2.0 ") or h.get("cseq", "") != "%d INVITE" % self.cseq:
+                continue
+            try:
+                code = int(first.split()[1])
+            except (IndexError, ValueError):
+                continue
+            if code < 200:
+                continue
+            self.ttag = _param(h.get("to", ""), "tag")
+            if code >= 300:                            # 487: the cancel worked
+                self._ack_failure(h)
+                return
+            m = re.search(r"<([^>]+)>", h.get("contact", ""))
+            if m:
+                self.remote_target = m.group(1)
+            self._ack()
+            self.note("the HT813 answered after the cancel: hung that call up")
+            self.bye()
+            return
 
     def _ack(self):
         self._send("ACK %s SIP/2.0\r\n" % self.remote_target + self._headers("ACK", _tag() + _tag(), self.cseq) +
@@ -598,11 +701,15 @@ class Dialog:
             if not r:
                 return
             first, h, _ = r
+            if first.startswith("SIP/2.0 2") and h.get("cseq", "") == "%d INVITE" % self.cseq:
+                self._ack()                                    # the answer again: our ACK was lost
+                continue
             if not first.startswith("SIP/2.0 ") and not self._in_dialog(h):
                 continue                                       # a request that isn't for this call
             if first.startswith("BYE "):
                 self._reply_ok(h)
                 self.hung_up = True
+                self.far_hung_up = True
                 raise CallFailed("HT813 hung up during the page (line dropped or busy?)")
             if first.startswith(("OPTIONS ", "INFO ", "NOTIFY ")):
                 self._reply_ok(h)

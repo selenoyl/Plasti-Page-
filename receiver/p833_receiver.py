@@ -47,7 +47,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.18.2"
+VERSION = "0.18.3"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -94,7 +94,8 @@ PHONE_DEFAULTS = {
     "ht813_user": "",      # SIP user to call; empty = call the HT813 by address (direct IP call)
     "ht813_auth_id": "",   # user for the HT813's password check (config file only); default ht813_user or p833
     "min_gap_s": 6,        # gap after a call before the next, so the HT813 and Norstar release the line
-    "line_check": "warn",  # after dialing, listen for dial/busy/ringing tone: retry, warn or off
+    "line_check": "retry",  # after dialing, listen for dial/busy/ringing tone: retry, warn or off
+    "replay_wait": "on",   # before a call, wait while the feedback eliminator replays the last page: on or off
 }
 # (key, label, low, high, help) for the number fields on the admin page.
 PHONE_NUMBERS = [
@@ -179,6 +180,11 @@ def parse_tuning(form, cfg, tone_names=None):
         phone["line_check"] = check
     else:
         errs.append("line check must be retry, warn or off")
+    replay = form.get("replay_wait", "on")
+    if replay in ("on", "off"):
+        phone["replay_wait"] = replay
+    else:
+        errs.append("wait for the feedback eliminator must be on or off")
     for key, label, lo, hi, _ in PHONE_NUMBERS:
         try:
             v = int(form.get(key, ""))
@@ -386,31 +392,34 @@ class State:
         LOG.warning("dry run turned %s on the admin page (%s)%s", "ON" if on else "OFF", who,
                     "" if on else ": PAGES WILL BE DIALED")
 
-    # One-time changes to settings saved on the admin page: (name, code, old value, new value).
+    # One-time changes to settings saved on the admin page: (name, part, key, old value, new value).
     # Only a value still at the old default changes, so a choice made on purpose stays.
     SETTINGS_CHANGES = [
-        ("tones-2026-11-12", "2", "1_maintenance_bell", "6_maintenance_doorbell"),
-        ("tones-2026-11-12", "8", "1_maintenance_bell", "6_maintenance_doorbell"),
-        ("tones-2026-11-12", "9", "1_maintenance_bell", "6_maintenance_doorbell"),
-        ("tones-2026-11-12", "4", "3_supervisor_glide", "1_maintenance_bell"),
-        ("tones-2026-11-12", "7", "3_supervisor_glide", "1_maintenance_bell"),
-        ("tones-2026-11-12b", "4", "1_maintenance_bell", "4_quality_flute"),     # Supervisor <-> Quality
-        ("tones-2026-11-12b", "7", "1_maintenance_bell", "4_quality_flute"),
-        ("tones-2026-11-12b", "5", "4_quality_flute", "1_maintenance_bell"),
+        ("tones-2026-11-12", "code_tone", "2", "1_maintenance_bell", "6_maintenance_doorbell"),
+        ("tones-2026-11-12", "code_tone", "8", "1_maintenance_bell", "6_maintenance_doorbell"),
+        ("tones-2026-11-12", "code_tone", "9", "1_maintenance_bell", "6_maintenance_doorbell"),
+        ("tones-2026-11-12", "code_tone", "4", "3_supervisor_glide", "1_maintenance_bell"),
+        ("tones-2026-11-12", "code_tone", "7", "3_supervisor_glide", "1_maintenance_bell"),
+        ("tones-2026-11-12b", "code_tone", "4", "1_maintenance_bell", "4_quality_flute"),   # Supervisor <-> Quality
+        ("tones-2026-11-12b", "code_tone", "7", "1_maintenance_bell", "4_quality_flute"),
+        ("tones-2026-11-12b", "code_tone", "5", "4_quality_flute", "1_maintenance_bell"),
+        # 0.18.3: a page that didn't open (busy, dial tone) is tried again, not played into nothing
+        ("line-check-2026-11-17", "phone", "line_check", "warn", "retry"),
     ]
 
     def _change_saved_settings(self):
         done = self.settings.setdefault("changes_applied", [])
         if not isinstance(done, list):
             done = self.settings["changes_applied"] = []
-        names = sorted({n for n, _, _, _ in self.SETTINGS_CHANGES} - set(done))
+        names = sorted({c[0] for c in self.SETTINGS_CHANGES} - set(done))
         if not names:
             return
-        tones = self.settings.get("tuning", {}).get("code_tone") if isinstance(self.settings.get("tuning"), dict) else None
-        for name, code, old, new in self.SETTINGS_CHANGES:
-            if name in names and isinstance(tones, dict) and tones.get(code) == old:
-                tones[code] = new
-                LOG.info("saved setting: code %s tone is now %s (was %s)", code, new, old)
+        tuning = self.settings.get("tuning") if isinstance(self.settings.get("tuning"), dict) else {}
+        for name, part, key, old, new in self.SETTINGS_CHANGES:
+            saved = tuning.get(part)
+            if name in names and isinstance(saved, dict) and saved.get(key) == old:
+                saved[key] = new
+                LOG.info("saved setting: %s %s is now %s (was %s)", part.replace("_", " "), key, new, old)
         done.extend(names)
         self._save_settings()
 
@@ -830,17 +839,68 @@ def hang_up_on_stop(pager):
     signal.signal(signal.SIGTERM, stop)
 
 
+class PageQueue(queue.Queue):
+    """The pages waiting to go out. Each is also noted on disk (pages_waiting.json) from when
+    it's accepted until it's logged, so a stop (an update's restart, a crash, a power cut, even
+    in the middle of the page) doesn't lose it: the next start sends it or logs it as not sent."""
+
+    def __init__(self, path=None):
+        super().__init__()
+        self.path = path
+        self.noted = {}                   # job id: the page, until it is logged
+        self.disk = threading.Lock()
+
+    def put(self, rec, block=True, timeout=None):
+        if self.path:
+            rec.setdefault("job", "%x-%x" % (int(time.time() * 1000), id(rec)))
+            rec.setdefault("queued_at", time.time())
+            with self.disk:
+                self.noted[rec["job"]] = rec
+                self._save()
+        super().put(rec, block, timeout)
+
+    def logged(self, rec):
+        """The page went out, or failed, and is in the call log: no longer noted."""
+        with self.disk:
+            if self.noted.pop(rec.get("job"), None) is not None:
+                self._save()
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(list(self.noted.values()), f)
+            os.replace(tmp, self.path)
+        except (OSError, TypeError, ValueError) as e:
+            LOG.warning("could not note the pages waiting on disk (%s): a restart now would lose them", e)
+
+    def left_over(self):
+        """The pages the last run accepted but never logged (and forget them on disk)."""
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                recs = json.load(f)
+        except (OSError, ValueError):
+            recs = []
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+        return [r for r in recs if isinstance(r, dict)] if isinstance(recs, list) else []
+
+
 class PageWorker(threading.Thread):
     """Sends pages one at a time (there is one phone line), with retries.
 
     Dry run is checked for each page, so the admin switch takes effect at once."""
+
+    RESEND_WITHIN_S = 300     # a page left waiting by a stop is sent at the next start if it's newer than this
 
     def __init__(self, cfg, state, live_pager, dry_pager=None, audio=None):
         super().__init__(daemon=True)
         self.cfg, self.state = cfg, state
         self.live, self.dry = live_pager, dry_pager or DryRunPager()
         self.audio = audio or AudioLibrary(cfg["audio"]["dir"])
-        self.jobs = queue.Queue()
+        self.jobs = PageQueue()
         self.state_dir = None      # where the last live page's line recording is kept
 
     def make_audio(self, rec):
@@ -902,7 +962,36 @@ class PageWorker(threading.Thread):
                 rec["result"] = "FAILED"
                 LOG.error("PAGE FAILED after %d tries: %s", n, rec["message"])
             self.state.record(rec)
+            self.jobs.logged(rec)
             self.jobs.task_done()
+
+    def take_left_over(self, path):
+        """Start noting the pages waiting in `path`; first, deal with any the last run left there
+        (it stopped before they were logged): send each again once, or log it as not sent if it
+        is too old to be of use now (the crew can call again)."""
+        self.jobs.path = path
+        for rec in self.jobs.left_over():
+            try:
+                age = time.time() - float(rec.get("queued_at", 0))
+                code = rec.get("code")
+                fine = (rec.get("zone") in self.cfg["zones"] and (code == "custom" or code in self.cfg["codes"])
+                        and all(isinstance(rec.get(k, ""), str) for k in ("en", "es", "message", "note")))
+            except (TypeError, ValueError):
+                age, fine = 0, False
+            if fine and age <= self.RESEND_WITHIN_S and not rec.get("resent"):
+                rec["resent"] = True
+                rec["note"] = (rec["note"] + "; " if rec.get("note") else "") + \
+                    "sent after a restart (the receiver stopped before this page was done)"
+                LOG.warning("page left waiting when the receiver stopped: sending it now: %s", rec.get("message"))
+                self.jobs.put(rec)
+                continue
+            why = ("its zone or code is no longer set up" if not fine else
+                   "it had already been sent again once after a restart" if rec.get("resent") else
+                   "it was %d min old when the receiver started again" % (age // 60))
+            rec.update(result="FAILED", attempts=0, detail="not sent: the receiver stopped (an update, a restart "
+                       "or a power cut) before this page was done, and %s" % why)
+            LOG.error("PAGE NOT SENT (the receiver stopped before it was done): %s", rec.get("message"))
+            self.state.record(rec)
 
 
 # ------------------------------------------------------------- voice lab ---
@@ -2195,8 +2284,9 @@ class Handler(BaseHTTPRequestHandler):
             if repeat:
                 return self._back("Dropped as a repeat (same board, code and press within %d s): %s"
                                   % (self.app["cfg"]["same_call_window_s"], en))
-            return self._back("Test call queued from %s: %s. Whether it went out shows in Recent calls."
-                              % (st.cell_name(board), en))
+            return self._back("Test call queued from %s: %s Whether it went out shows in Recent calls; each step "
+                              "of the call in Recent phone events (Phone tab)."
+                              % (st.cell_name(board), en if en.endswith((".", "!", "?")) else en + "."))
 
         if path == "/admin/board/add":
             board, cell = form.get("board", ""), form.get("cell", "")
@@ -2238,8 +2328,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.app["sms"].text_for_call(rec, test_call=True)
             if st.dry_run:
                 return self._back("Custom page logged (dry run, not dialed) for zone %s: %s" % (zone, en))
-            return self._back("Custom page queued for zone %s (dial %s): %s. It goes out in a few seconds; whether it "
-                              "went out (sent or FAILED, and why) shows in Recent calls." % (zone, dial, en))
+            return self._back("Custom page queued for zone %s (dial %s): %s. It goes out after any page ahead of it "
+                              "(and that page's replay by the feedback eliminator). Whether it went out (sent or "
+                              "FAILED, and why) shows in Recent calls; each step of the call in Recent phone events "
+                              "(Phone tab)." % (zone, dial, en))
 
         if path == "/admin/tuning":
             t, errs = parse_tuning(form, self.app["cfg"], self.app["worker"].audio.tone_names())
@@ -2912,6 +3004,7 @@ th{background:var(--head)} tr.bad td{background:var(--bad)} tr.warn td{backgroun
 .mode{padding:6px 10px;display:inline-block;color:#fff;font-weight:bold}
 .card{background:var(--card);border:1px solid var(--line);padding:12px 16px;margin-bottom:20px;max-width:820px}
 .card label{display:inline-block;margin:4px 12px 4px 0}
+.card label{max-width:100%} .card input,.card select,.card textarea{max-width:100%;box-sizing:border-box}
 .card table td{vertical-align:top}
 input,select,button{font-size:15px;padding:4px 6px}
 button{cursor:pointer} .msg{padding:8px 12px;border:2px solid var(--good);margin-bottom:16px;max-width:820px}
@@ -3376,6 +3469,7 @@ CARD_TABS = {"Settings": "overview", "Users": "users", "Shared paging password (
              "Add or rename a board": "overview", "Send a test call": "send",
              "Send a custom page": "send", "Page wording": "wording", "Audio": "sound", "PA clarity": "sound",
              "Page voice": "sound", "Voice lab": "sound", "Phone and paging setup": "phone",
+             "Recent phone events": "phone",
              "Text messages (voip.ms)": "texts"}
 
 
@@ -3436,7 +3530,7 @@ var timer=setInterval(function(){
       s.textContent='This page stopped updating: its sign-in no longer works. Reload the page to sign in again.';return null;}
     return r.ok?r.json():null;}).then(function(p){
     if(!p){return;}
-    ['status','boards','calls','voicejob'].forEach(function(k){
+    ['status','boards','calls','voicejob','phoneevents'].forEach(function(k){
       var el=document.getElementById(k==='status'?'statusline':k);
       if(el&&p[k]!==undefined&&el.innerHTML!==p[k]){el.innerHTML=p[k];}
     });
@@ -3494,7 +3588,24 @@ def live_parts(app, admin, s=None):
            "calls": "\n".join(crow) or "<tr><td colspan=9>none yet</td></tr>"}
     if admin and app.get("voice") is not None:
         out["voicejob"] = voice_job_line(app["voice"])
+    if admin:
+        out["phoneevents"] = phone_event_rows(app)
     return out
+
+
+PHONE_EVENT_BAD = ("page failed", "test failed")
+PHONE_EVENT_WARN = ("line check: the", "HT813 said", "no answer in", "hung up, but", "the HT813 had hung up",
+                    "the HT813 answered after the cancel")
+
+
+def phone_event_rows(app):
+    """The phone line's recent events (from the HT813 pager), newest first, as table rows."""
+    e = html.escape
+    rows = []
+    for t, text in reversed(list(getattr(app["worker"].live, "events", ()))):
+        cls = "bad" if text.startswith(PHONE_EVENT_BAD) else ("warn" if text.startswith(PHONE_EVENT_WARN) else "")
+        rows.append("<tr class='%s'><td>%s</td><td>%s</td></tr>" % (cls, e(now_text(t)), e(text)))
+    return "\n".join(rows) or "<tr><td colspan=2>none since the receiver started</td></tr>"
 
 
 def page_html(app, admin, msg="", who=None):
@@ -3549,11 +3660,20 @@ def page_html(app, admin, msg="", who=None):
                 "<td class=small>The HT813's fixed IP address on the IoT network.</td></tr>" % e(ph["ht813_ip"])]
         rows.append("<tr><td>Line check after dialing</td><td><select name=line_check>%s</select></td>"
                     "<td class=small>Listens to the line while waiting after the digits. Dial tone, a busy or "
-                    "reorder tone, or ringing means the page did not open. <b>retry</b>: the page counts as "
-                    "failed and is tried again (up to 3 times). <b>warn</b>: plays anyway and notes it in the "
-                    "log. <b>off</b>: no check. Needs a wait after dialing of at least 400 ms.</td></tr>" % "".join(
-                        "<option%s>%s</option>" % (" selected" if ph.get("line_check", "warn") == m else "", m)
+                    "reorder tone, or ringing means the page did not open. <b>retry</b> (normal): that try "
+                    "hangs up before the message and the page is tried again (up to 3 times). <b>warn</b>: "
+                    "plays anyway and notes it (a yellow row). <b>off</b>: no check. Needs a wait after "
+                    "dialing of at least 400 ms. If good pages ever fail with \"page did not open\", "
+                    "set warn and send the Last failed page try recording below.</td></tr>" % "".join(
+                        "<option%s>%s</option>" % (" selected" if ph.get("line_check", "retry") == m else "", m)
                         for m in ("retry", "warn", "off")))
+        rows.append("<tr><td>Wait for the feedback eliminator</td><td><select name=replay_wait>%s</select></td>"
+                    "<td class=small>The feedback eliminator plays each page to the speakers after the call "
+                    "ends, and a page sent while it plays can be lost. <b>on</b> (normal): the next call waits "
+                    "about as long as the last page was open, plus 3 s. <b>off</b>: only the gap between "
+                    "calls below.</td></tr>" % "".join(
+                        "<option%s>%s</option>" % (" selected" if ph.get("replay_wait", "on") == m else "", m)
+                        for m in ("on", "off")))
         rows.append("<tr><td>Dial method</td><td><select name=dial_method>%s</select></td><td class=small>"
                     "2-stage: the HT813 picks up the ATA2 line, the laptop hears dial tone and sends the "
                     "digits as tones (pauses and flash work). 1-stage: the digits go inside the call and the "
@@ -3619,6 +3739,13 @@ def page_html(app, admin, msg="", who=None):
                     % int(cfg["audio"]["repeat"]))
         tuned = "tuning" in app["state"].settings
         phone_html = """
+<div class=card><h2>Recent phone events</h2>
+<p class=small>What happened on the phone line in the last pages and phone tests, newest first: the wait before
+each call, the HT813's answer, the digits dialed, the line check, how long the message played, and the
+hang-up. When a page doesn't go out, this shows where it stopped. Updates by itself every 10 s; starts empty
+when the receiver starts (the same lines are in the receiver's log).</p>
+<div class=w><table><thead><tr><th>Time</th><th>Event</th></tr></thead>
+<tbody id=phoneevents>%s</tbody></table></div></div>
 <div class=card><h2>Phone and paging setup</h2>
 <p class=small>Change these here while tuning the phone side. They're saved on the laptop, kept through restarts
 and updates, and replace the config file's values. %s</p>
@@ -3652,7 +3779,8 @@ It works: the digits a real call dials are different (see "Dial digits in use no
 is the audio; play "Last phone test" to hear what the line did. To find a page code without paging a message, use the bell. 0-9 * #, comma = half-second pause,
 F = hook flash (Link). On a Norstar desk phone the floor page is PAGE, SPEAKER, 1; from the ATA2 line try
 <b>F,*62</b>, then <b>F,*621</b>. When one works, put it in "Zone floor dial" above and Save.</p></div>
-""" % ("<b>Saved settings in use.</b>" if tuned else "Now using the config file's values.", "\n".join(rows),
+""" % (live["phoneevents"], "<b>Saved settings in use.</b>" if tuned else "Now using the config file's values.",
+       "\n".join(rows),
        e(cfg["zones"].get("floor", {}).get("dial") or "F,*60,2,1"),
        "".join("<option value='page%d'>a full test page: code %d %s%s, press 27</option>" % (
            c, c, e(cfg["codes"][c]["who"]), " (%s)" % e(cfg["codes"][c]["why"]) if cfg["codes"][c].get("why") else "")
@@ -3766,6 +3894,7 @@ def main(argv=None):
     hang_up_on_stop(worker.live)
     threading.Thread(target=worker.live.hang_up_leftover, daemon=True).start()   # one left open last time
     worker.state_dir = args.state_dir
+    worker.take_left_over(os.path.join(args.state_dir, "pages_waiting.json"))    # pages a stop cut off
     if worker.audio.load_error:
         LOG.warning("AUDIO: %s", worker.audio.load_error)
     else:

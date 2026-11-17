@@ -54,3 +54,5 @@ result for each step.
 | C1 | Admin page: "Try page digits" with `F,*60,2,1` (HT813 Hook Flash Duration 300 ms) | the floor speakers play the bell, and desk phone 5939 does not ring. Done 11 Nov 2026 | ☑ |
 | C2 | One live test page, at an agreed quiet time | heard on the floor, in English then Spanish | ☐ |
 | C3 | Unplug the HT813, then a call | logged FAILED after 3 tries | ☐ |
+| C4 | Three test calls in a row (Test and send tab, a different press each), watching the feedback eliminator | it records and plays each page, one after another; Recent phone events (Phone tab) shows "waiting … for the feedback eliminator to replay the last page" before the 2nd and 3rd; all three "sent" | ☐ |
+| C5 | Start a test page, then `sudo systemctl restart p833-receiver` while it plays | the page is cut off, then (after its replay) sent again once, marked "sent after a restart"; the HT813 doesn't say busy afterwards | ☐ |
