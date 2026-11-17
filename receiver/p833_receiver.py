@@ -47,7 +47,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.18.1"
+VERSION = "0.18.2"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -1496,6 +1496,12 @@ textarea{width:100%;box-sizing:border-box;font-size:16px;padding:6px;font-family
 .msg.err{border-color:var(--warn)}
 """
 
+WARM_JS = """<script>
+(function(){var done=false;document.addEventListener('input',function(ev){
+  if(done||!ev.target.closest||!ev.target.closest('#customform')){return;}
+  done=true;fetch('/page/warm',{method:'POST',credentials:'same-origin'}).catch(function(){});});})();
+</script>"""
+
 HOME_JS = """<script>
 (function(){
   var T=@TEXTS@, L=@UI@, f=document.getElementById('pageform'), out=document.getElementById('willsay');
@@ -1667,7 +1673,7 @@ def home_html(app, lang="en", who=None, msg="", ok=True):
         e(T["card_type"]), custom, e(T["card_recent"]), "".join("<th>%s</th>" % e(x) for x in T["cols"]),
         live["calls"],
         HOME_JS.replace("@TEXTS@", _script_json(texts)).replace("@UI@", _script_json(ui))
-        .replace("@WAIT@", _script_json(live["wait"])))
+        .replace("@WAIT@", _script_json(live["wait"])) + WARM_JS)
 
 
 def shared_password_card(app):
@@ -2088,6 +2094,11 @@ class Handler(BaseHTTPRequestHandler):
         raw = self._raw_body()
         form = {k: v[0].strip() for k, v in parse_qs((raw or b"").decode("utf-8", "replace")).items()}
         app, st, cfg = self.app, self.app["state"], self.app["cfg"]
+        if path == "/page/warm":                      # someone started typing a message
+            voice = app["worker"].audio.voice
+            if voice is not None:
+                voice.warm_typed()
+            return self._reply(204, b"", "text/plain")
         lang = self._home_lang()
 
         def say(key, **kw):
@@ -3696,7 +3707,7 @@ Custom text is spoken by Piper with the page voice (Preview lets you hear it); w
 """ % ("<th></th>" if admin else "", live["boards"], RECENT_CALLS, live["calls"],
        "The boards and calls above update by themselves every 10 s; the rest of the page stays as you left it."
        if admin else "Refreshes every 10 s.")
-    body = tab_sections(admin_html, tables) + PREVIEW_JS + TABS_JS if admin else tables
+    body = tab_sections(admin_html, tables) + PREVIEW_JS + TABS_JS + WARM_JS if admin else tables
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PLASTI-PAGE Receiver</title><link rel=icon href="%s"><style>%s</style></head><body>

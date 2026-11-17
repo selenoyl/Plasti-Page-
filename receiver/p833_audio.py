@@ -580,7 +580,7 @@ class AudioLibrary:
             raise AudioError("custom text needs Piper on the laptop (sudo bash install/install_tts.sh)")
         vs = vs or self.voice.settings()
         opts = cfg.get("audio", {})
-        end = time.monotonic() + getattr(self.voice, "page_budget", 10)
+        end = time.monotonic() + getattr(self.voice, "typed_budget", 60)   # no recording to fall back on
         parts = []
         for lang, text in (("en", en), ("es", es)):
             if not text or (lang == "es" and en and "es" not in opts.get("languages", ["en", "es"])):

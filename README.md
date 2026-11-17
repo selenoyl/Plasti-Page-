@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.18.1:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.18.2:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -157,7 +157,7 @@ Open `https://<laptop IP>:8833/` (plain `http://` is sent there), on a PC, table
 - **English / Español:** the switch in the top-right corner puts the whole page in English or Spanish: the buttons (Mantenimiento, Técnico, Calidad, Empaque, ...), the help text and the answers. The browser remembers the choice; the first time, it follows the phone's or PC's language. The pages themselves still play in English, then Spanish.
 
 - **Page someone to a press:** tap who (Maintenance, Technician, Supervisor, Quality, Packaging, or one with a reason, such as Maintenance, camera fault), type the press number, check the "Will say" line and tap **Page now**. It asks once more before it pages.
-- **Type a message:** in English, Spanish or both (English plays first). It is spoken by the computer voice (Piper) after a chime. Without Piper on the laptop this part is off. People with an **Office** or **Admin** account also choose **Floor** or **Office** (the office needs its dial digits on the Phone tab first).
+- **Type a message:** in English, Spanish or both (English plays first). It is spoken by the computer voice (Piper) after a chime. Without Piper on the laptop this part is off. As soon as you start typing, the laptop gets the voice ready (Piper stops after 10 idle minutes, and starting it can take several seconds on the laptop); a typed message waits up to a minute for it, since it has no recording to fall back on. People with an **Office** or **Admin** account also choose **Floor** or **Office** (the office needs its dial digits on the Phone tab first).
 - **Recent pages:** the last 8 pages from anywhere, with their result; it updates by itself. **Full log** opens `/log`.
 - Pages of a department go to the **floor zone only**, whatever zone a call type is set to; only typed messages from Office and Admin accounts can go to the office.
 - **Each department can be paged from here once every 5 minutes** (**30 seconds** for Admin accounts). Maintenance covers all three Maintenance buttons (plain, camera fault, Red Rabbit), and Supervisor both of its buttons. A department paged lately is greyed out with "again in N min", and the laptop refuses it too. A page that FAILED doesn't count, so it can be tried again at once. Calls from the boards don't count.

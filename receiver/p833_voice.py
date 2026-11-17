@@ -238,15 +238,17 @@ class PiperEngine:
     def cooling(self):
         return time.monotonic() < self.cool_until
 
-    def speak(self, voice, pace, segments, timeout, urgent=False):
+    def speak(self, voice, pace, segments, timeout, urgent=False, fallback=True):
         """WAV bytes (8 kHz 16-bit mono), or AudioError. timeout covers waiting for the helper
         to be free AND its answer; only a slow answer counts as the helper being stuck.
-        urgent (a page): skipped while Piper is recovering; other requests wait for pages."""
+        urgent (a page): other requests wait for it. A page with a recording to fall back on
+        (fallback) is skipped while Piper is recovering and waits only briefly for it; a typed
+        message (no recording) isn't, and does."""
         if not self.ready():
             raise AudioError("Piper isn't installed on this laptop (sudo bash install/install_tts.sh)")
         end = time.monotonic() + timeout
         if urgent:
-            if self.cooling():
+            if fallback and self.cooling():
                 raise AudioError("Piper is recovering from a problem; recorded clips are used meanwhile")
             with self.turn:
                 self.urgent += 1
@@ -254,12 +256,12 @@ class PiperEngine:
             self.wait_turn(timeout)               # a page waiting for Piper goes first
         try:
             wait = end - time.monotonic()
-            if urgent:
+            if urgent and fallback:
                 wait = min(wait, PAGE_LOCK_WAIT_S)
             if not self.lock.acquire(timeout=max(0.05, wait)):
                 raise AudioError("Piper was busy (another request)")
             try:
-                if urgent and end - time.monotonic() < MIN_ANSWER_S:
+                if urgent and fallback and end - time.monotonic() < MIN_ANSWER_S:
                     raise AudioError("not enough time left for Piper on this page")
                 wav = self._ask({"voice": voice, "length_scale": pace, "segments": segments}, end)
                 self.cool_until = 0.0
@@ -423,6 +425,8 @@ class PageVoice:
         self.job_thread = None
         self.writes = 0
         self.page_budget = PAGE_BUDGET_S
+        self.typed_budget = SLOW_TIMEOUT_S     # a typed message has no recording to fall back on
+        self._warm_until = 0.0
         self.engine.on_trouble = self.warm_up      # after a hang: reload the voices in the background
         self._remove_leftovers()
 
@@ -488,12 +492,12 @@ class PageVoice:
             pass
         return pcm
 
-    def frames(self, lang, lv, segments, urgent=True, timeout=PAGE_BUDGET_S):
+    def frames(self, lang, lv, segments, urgent=True, timeout=PAGE_BUDGET_S, fallback=True):
         """16-bit PCM of the segments in this voice: kept audio, or made now and kept."""
         pcm = self.kept(lang, lv, segments)
         if pcm is not None:
             return pcm
-        wav = self.engine.speak(lv["voice"], float(lv["pace"]), segments, timeout, urgent)
+        wav = self.engine.speak(lv["voice"], float(lv["pace"]), segments, timeout, urgent, fallback)
         pcm = _wav_pcm(wav)
         if not pcm.strip(b"\x00"):                 # empty or all silence: nothing was said
             raise AudioError("Piper made no sound")
@@ -528,20 +532,44 @@ class PageVoice:
         lv = vs[lang]
         return self.frames(lang, lv, sentence_segments(self.cfg, lv, lang, code, press), urgent, timeout)
 
-    def text(self, lang, text, vs=None, urgent=True, timeout=PAGE_BUDGET_S):
-        """Free text (a custom page). There is no recording to fall back on, so if the chosen
-        voice isn't installed, any installed voice for the language is used."""
-        vs = vs or self.settings()
-        segs = text_segments(lang, text)
-        if not segs:
-            raise AudioError("no text to speak")
+    def _typed_voice(self, lang, vs):
+        """The voice for typed text: the chosen one, or (not installed) any for the language."""
         lv = vs[lang]
         installed = self.installed()
         if installed and lv["voice"] not in installed:
             other = [v for v in installed if v.startswith(lang + "_")]
             if other:
                 lv = dict(lv, voice=other[0])
-        return self.frames(lang, lv, segs, urgent, timeout)
+        return lv
+
+    def text(self, lang, text, vs=None, urgent=True, timeout=SLOW_TIMEOUT_S):
+        """Free text (a typed message). There is no recording to fall back on: it waits for Piper
+        (to start, if it had stopped), even while Piper is recovering from a problem."""
+        vs = vs or self.settings()
+        segs = text_segments(lang, text)
+        if not segs:
+            raise AudioError("no text to speak")
+        return self.frames(lang, self._typed_voice(lang, vs), segs, urgent, timeout, fallback=False)
+
+    def warm_typed(self):
+        """Someone started typing a message: start Piper and load the voices for typed text in
+        the background, so it's ready when they send it. At most once every few minutes."""
+        now = time.monotonic()
+        if not self.ready() or now < self._warm_until:
+            return False
+        self._warm_until = now + 240
+
+        def go():
+            vs = self.settings()
+            for lang in LANGS:
+                try:
+                    self.engine.wait_turn()
+                    lv = self._typed_voice(lang, vs)
+                    self.engine.speak(lv["voice"], float(lv["pace"]), [{"text": "OK."}], SLOW_TIMEOUT_S)
+                except AudioError as e:
+                    LOG.warning("page voice: could not get the %s voice ready for a typed message: %s", lang, e)
+        threading.Thread(target=go, daemon=True).start()
+        return True
 
     # -- housekeeping
     def _current_dirs(self):

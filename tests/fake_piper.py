@@ -8,6 +8,8 @@
 # A text containing SLOW makes it wait 5 s; DIE makes it exit at once;
 # NOSOUND makes it answer with no audio. Each request it speaks is appended to
 # requests.log in the voices folder it was given (a test's temporary folder).
+# A file start_delay in that folder (a number of seconds) makes "serve" take that long to
+# start, like the real Piper loading onnxruntime and a voice on a slow laptop.
 
 import io
 import json
@@ -50,6 +52,11 @@ def main():
             sys.stderr.write("%s\n" % e)
             sys.exit(1)
     elif cmd == "serve":
+        try:
+            with open(os.path.join(sys.argv[2], "start_delay"), encoding="utf-8") as f:
+                time.sleep(float(f.read()))
+        except (OSError, ValueError):
+            pass
         for line in sys.stdin.buffer:
             try:
                 wav = speak(json.loads(line))

@@ -127,7 +127,7 @@ class FakeEngine:
     def wait_turn(self, timeout=30):
         pass
 
-    def speak(self, voice, pace, segments, timeout, urgent=False):
+    def speak(self, voice, pace, segments, timeout, urgent=False, fallback=True):
         self.calls.append((voice, pace, json.dumps(segments), urgent))
         if self.fail:
             raise A.AudioError(self.fail)
@@ -326,7 +326,7 @@ class Pages(unittest.TestCase):
 
     def test_no_recordings_and_one_language_fails(self):
         class EnglishOnly(FakeEngine):
-            def speak(self, voice, pace, segments, timeout, urgent=False):
+            def speak(self, voice, pace, segments, timeout, urgent=False, fallback=True):
                 if voice.startswith("es_"):
                     raise A.AudioError("no Spanish")
                 return FakeEngine.speak(self, voice, pace, segments, timeout, urgent)

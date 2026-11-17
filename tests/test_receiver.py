@@ -1798,6 +1798,49 @@ class Server(unittest.TestCase):
         self.assertEqual(R.safe_next("/admin\n"), "/")
         self.assertEqual(R.safe_next("/admin?tab=users"), "/admin?tab=users")
 
+    # ---- typed messages: no recording to fall back on, so Piper gets time to start
+    def slow_piper(self, seconds):
+        """Piper that takes this long to start (as after it stopped when idle, on a slow laptop)."""
+        self.use_fake_tts()
+        with open(os.path.join(self.tmp, "voices", "start_delay"), "w", encoding="utf-8") as f:
+            f.write(str(seconds))
+        self.worker.audio.voice.page_budget = 2         # (a department page waits this long, then a recording)
+
+    def test_typed_message_waits_for_piper_to_start(self):
+        self.slow_piper(3)
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        sam, _ = self.sign_in("Sam", "sam-pass-1")
+        t0 = time.monotonic()
+        self.browse("/page/custom", {"zone": "floor", "en": "Lunch is here."}, cookie=sam)
+        self.wait_pages()
+        row = self.wait_row()
+        self.assertEqual(row["result"], "sent", row["detail"])               # not "took too long"
+        self.assertGreater(time.monotonic() - t0, 2.5)
+        self.assertEqual(self.pager.sent[-1][2], "Lunch is here.")
+        with self.state.lock:                                               # 5 minutes on
+            self.state.home_sent = {k: (t - R.CUSTOM_WAIT_S, rec) for k, (t, rec) in self.state.home_sent.items()}
+        self.worker.audio.voice.engine.cool_until = time.monotonic() + 60   # even while Piper "recovers"
+        self.browse("/page/custom", {"zone": "floor", "en": "Second message."}, cookie=sam)
+        self.wait_pages()
+        self.assertEqual(self.wait_row()["result"], "sent")
+
+    def test_typing_gets_piper_ready(self):
+        self.slow_piper(1)
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        sam, _ = self.sign_in("Sam", "sam-pass-1")
+        self.assertIn("/page/warm", self.browse("/", cookie=sam)[2])          # the page asks when you start typing
+        st = self.browse("/page/warm", {}, cookie=sam)[0]
+        self.assertEqual(st, 204)
+        engine = self.worker.audio.voice.engine
+        for _ in range(100):
+            if len(self.spoken()) >= 2:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(engine.proc)                                   # started, both voices loaded
+        self.assertGreaterEqual(len(self.spoken()), 2)
+        self.assertEqual(self.browse("/page/warm", {}, cookie=sam, origin="http://evil.example")[0], 403)
+        self.assertEqual(self.browse("/page/warm", {})[0], 303)              # signed in only
+
     def test_shared_password_still_signs_in_supervisors(self):
         self.set_paging_pw()
         self.add_user("Sam", "sam-pass-1", "supervisor")
