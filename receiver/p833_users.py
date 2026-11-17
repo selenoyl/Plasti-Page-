@@ -27,6 +27,7 @@ PW_MIN, PW_MAX = 8, 64
 ITERATIONS = 200000           # PBKDF2-SHA256 rounds (about a tenth of a second per sign-in)
 SESSION_DAYS = 14             # signed in on a device for this long after it was last used
 MAX_SESSIONS = 500
+MAX_PER_PERSON = 20           # sessions kept per account (or per address for the shared and built-in passwords)
 RESERVED = ("admin",)         # the built-in admin: its password is P833_ADMIN_PASSWORD in secrets.env
 _DUMMY = {"salt": "00" * 16, "iterations": ITERATIONS, "hash": "00" * 32}
 
@@ -65,6 +66,17 @@ def password_problem(pw):
     return ""
 
 
+def _good_user(key, u):
+    """An account record from users.json that can be used (a damaged one is left out)."""
+    try:
+        return (isinstance(u, dict) and u.get("role") in ROLES and isinstance(u.get("name"), str)
+                and key_of(u["name"]) == key and isinstance(u.get("pw_set"), int)
+                and isinstance(u.get("iterations"), int) and bool(bytes.fromhex(u["salt"]))
+                and len(bytes.fromhex(u["hash"])) == 32)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _read(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -90,12 +102,24 @@ class Users:
     def __init__(self, path):
         self.path = path
         self.lock = threading.Lock()
-        raw = _read(path).get("users", {})
-        self.users = {k: u for k, u in raw.items() if isinstance(u, dict) and u.get("role") in ROLES
-                      and isinstance(u.get("name"), str) and key_of(u["name"]) == k}
+        raw = _read(path).get("users")
+        raw = raw if isinstance(raw, dict) else {}
+        self.users = {k: u for k, u in raw.items() if _good_user(k, u)}
 
     def _save(self):
         _write(self.path, {"users": self.users})
+
+    def _save_or_undo(self, before):
+        """Save; if the disk refuses (full?), put the accounts back as they were and say so."""
+        try:
+            self._save()
+            return ""
+        except OSError as e:
+            self.users = before
+            return "the accounts couldn't be saved (%s)" % e
+
+    def _copy(self):
+        return {k: dict(u) for k, u in self.users.items()}
 
     def get(self, key):
         u = self.users.get(key)
@@ -107,9 +131,6 @@ class Users:
             return [{k: v for k, v in dict(u, key=key).items() if k not in ("salt", "hash", "iterations")}
                     for key, u in sorted(self.users.items())]
 
-    def has_admin(self):
-        return any(u["role"] == "admin" for u in self.users.values())
-
     def add(self, name, pw, role):
         """Add an account. Returns a problem ("" when added)."""
         name = " ".join(str(name or "").split())
@@ -119,11 +140,10 @@ class Users:
         with self.lock:
             if key_of(name) in self.users:
                 return "there is already an account called %s" % self.users[key_of(name)]["name"]
-            now = int(time.time())
+            now, before = int(time.time()), self._copy()
             self.users[key_of(name)] = dict(hash_password(pw), name=name, role=role, pw_set=now, created=now,
                                             last_login=0)
-            self._save()
-        return ""
+            return self._save_or_undo(before)
 
     def set_password(self, key, pw):
         problem = password_problem(pw)
@@ -133,9 +153,9 @@ class Users:
             if key not in self.users:
                 return "no such account"
             # a new password also ends that account's sessions (they remember pw_set)
+            before = self._copy()
             self.users[key].update(hash_password(pw), pw_set=max(int(time.time()), self.users[key]["pw_set"] + 1))
-            self._save()
-        return ""
+            return self._save_or_undo(before)
 
     def set_role(self, key, role):
         if role not in ROLES:
@@ -143,16 +163,16 @@ class Users:
         with self.lock:
             if key not in self.users:
                 return "no such account"
+            before = self._copy()
             self.users[key]["role"] = role
-            self._save()
-        return ""
+            return self._save_or_undo(before)
 
     def remove(self, key):
         with self.lock:
+            before = self._copy()
             if self.users.pop(key, None) is None:
                 return "no such account"
-            self._save()
-        return ""
+            return self._save_or_undo(before)
 
     def check(self, name, pw):
         """The account if the name and password match, else None. Takes about as long either way,
@@ -161,11 +181,18 @@ class Users:
         ok = check_password(u if u else _DUMMY, pw)
         return dict(u, key=key_of(name)) if (u and ok) else None
 
+    def admins(self):
+        return [u["name"] for u in self.users.values() if u["role"] == "admin"]
+
     def note_login(self, key):
+        """Note when someone last signed in (a full disk mustn't stop them signing in)."""
         with self.lock:
             if key in self.users:
                 self.users[key]["last_login"] = int(time.time())
-                self._save()
+                try:
+                    self._save()
+                except OSError:
+                    pass
 
 
 class Sessions:
@@ -181,8 +208,10 @@ class Sessions:
             self.secret = bytes.fromhex(data["secret"])
         except (KeyError, ValueError, TypeError):
             self.secret = os.urandom(16)
-        raw = data.get("sessions", {})
-        self.sessions = {k: v for k, v in raw.items() if isinstance(v, dict) and v.get("kind")}
+        raw = data.get("sessions")
+        raw = raw if isinstance(raw, dict) else {}
+        self.sessions = {k: v for k, v in raw.items() if isinstance(v, dict) and isinstance(v.get("kind"), str)
+                         and isinstance(v.get("seen"), int) and isinstance(v.get("created"), int)}
 
     def _save(self):
         try:
@@ -198,15 +227,22 @@ class Sessions:
     def _digest(token):
         return hashlib.sha256(str(token).encode("utf-8", "replace")).hexdigest()
 
-    def create(self, kind, key, name, check):
+    def create(self, kind, key, name, check, address=""):
+        """A new session. Each person keeps at most MAX_PER_PERSON (an account; for the shared and
+        built-in passwords, each address), so signing in over and over can't push others out."""
         token = secrets.token_urlsafe(32)
         now = int(time.time())
+        who = "user:" + key if kind == "user" else "%s@%s" % (kind, address)
         with self.lock:
             self.sessions[self._digest(token)] = {"kind": kind, "key": key, "name": name, "check": check,
-                                                  "created": now, "seen": now}
+                                                  "who": who, "created": now, "seen": now}
+            mine = sorted((d for d, s in self.sessions.items() if s.get("who") == who),
+                          key=lambda d: self.sessions[d]["seen"])
+            for d in mine[:max(0, len(mine) - MAX_PER_PERSON)]:
+                del self.sessions[d]
             if len(self.sessions) > MAX_SESSIONS:          # forget the least recently used
-                for k in sorted(self.sessions, key=lambda d: self.sessions[d]["seen"])[:len(self.sessions) - MAX_SESSIONS]:
-                    del self.sessions[k]
+                for d in sorted(self.sessions, key=lambda d: self.sessions[d]["seen"])[:len(self.sessions) - MAX_SESSIONS]:
+                    del self.sessions[d]
             self._save()
         return token
 

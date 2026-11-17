@@ -47,7 +47,7 @@ import p833_sms  # noqa: E402
 import p833_voice  # noqa: E402
 from p833_voice import tts_env, tts_ready  # noqa: E402,F401
 
-VERSION = "0.18.0"
+VERSION = "0.18.1"
 LOG = logging.getLogger("p833")
 
 CSV_FIELDS = ["time", "board", "cell", "press", "code", "who", "message",
@@ -64,8 +64,9 @@ REQUEST_DEADLINE_S = 15   # the whole request (TLS hello, headers, body) must ar
 MAX_WAITING_PAGES = 20    # pages queued but not yet sent; calls over it get "busy" and the board retries
 MAX_CALLS_PER_MIN = 6     # accepted calls from one board ID in a minute
 MAX_UNKNOWN_BOARDS = 50   # boards not on the list that are remembered on the status page
-LOGIN_FAILS = 10          # different wrong passwords from one address...
-LOGIN_WINDOW_S = 600      # ...in this many seconds lock that address out for this long
+LOGIN_FAILS = 10          # different wrong passwords for one name lock that name out...
+ADDRESS_FAILS = 30        # ...and different wrong name-and-password pairs from one address, that address...
+LOGIN_WINDOW_S = 600      # ...when tried in this many seconds, for this long
 
 
 csv_safe = p833_sms.csv_safe
@@ -1095,7 +1096,7 @@ def app_sessions(app):
 def safe_next(target):
     """Where to go after signing in: a page of this laptop only."""
     t = str(target or "")
-    if not re.match(r"^/[A-Za-z0-9/_.?=&%-]*$", t) or t.startswith("//") or t.startswith(("/login", "/logout")):
+    if not re.match(r"/[A-Za-z0-9/_.?=&%-]*\Z", t) or t.startswith("//") or t.startswith(("/login", "/logout")):
         return "/"
     return t
 
@@ -1118,6 +1119,7 @@ LOGIN_TEXT = {
            "stay": "You stay signed in on this device for 14 days after you last use it, or until you sign out.",
            "wrong": "Wrong name or password.",
            "locked": "Too many wrong passwords from this device. Try again in 10 minutes.",
+           "name_locked": "Too many wrong passwords for this name. Try again in 10 minutes.",
            "bye": "You're signed out.",
            "plain": "This page isn't encrypted (no HTTPS certificate on the laptop): passwords cross the network as "
                     "plain text. Tell the admin.",
@@ -1129,6 +1131,7 @@ LOGIN_TEXT = {
            "stay": "Su sesión sigue abierta en este equipo por 14 días después de usarlo, o hasta que la cierre.",
            "wrong": "Nombre o contraseña incorrectos.",
            "locked": "Demasiadas contraseñas equivocadas desde este equipo. Intente de nuevo en 10 minutos.",
+           "name_locked": "Demasiadas contraseñas equivocadas para este nombre. Intente de nuevo en 10 minutos.",
            "bye": "Cerró su sesión.",
            "plain": "Esta página no está cifrada (no hay certificado HTTPS en la laptop): las contraseñas viajan "
                     "sin cifrar. Avise al administrador.",
@@ -1694,13 +1697,18 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "P833Receiver/" + VERSION
     app = None  # set in main()
     timeout = 20          # seconds a connection may sit idle or trickle in; then it's closed
-    login_fails = {}      # address -> {a wrong password's digest: when it was last tried}
+    login_fails = {}      # address -> {digest of a wrong name and password: when last tried}
+    name_fails = {}       # name -> {digest of a wrong password for it: when last tried}
     login_lock = threading.Lock()
 
     def log_message(self, fmt, *args):  # keep the journal quiet
         pass
 
     def _reply(self, status, obj, ctype="application/json", headers=None):
+        refresh = getattr(self, "_refresh_cookie", "")
+        if refresh and ctype.startswith("text/html") and "Set-Cookie" not in (headers or {}):
+            headers = dict(headers or {}, **{"Set-Cookie": "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax%s" % (
+                SESSION_COOKIE, refresh, p833_users.SESSION_DAYS * 86400, "; Secure" if self._https() else "")})
         data = obj if isinstance(obj, bytes) else json.dumps(obj).encode()
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -1748,36 +1756,71 @@ class Handler(BaseHTTPRequestHandler):
         return bool(key) and hmac.compare_digest(given.encode("utf-8", "replace"), key.encode("utf-8"))
 
     # -- who is signed in: the sign-in page's cookie, or (scripts only, not browsers) HTTP Basic
-    def _recent_fails(self, ip, now=None):
-        """How many different wrong passwords this address tried lately (login_lock held)."""
-        now = now or time.time()
-        tried = {k: t for k, t in self.login_fails.get(ip, {}).items() if now - t < LOGIN_WINDOW_S}
+    @classmethod
+    def clear_fails(cls):
+        with cls.login_lock:
+            cls.login_fails.clear()
+            cls.name_fails.clear()
+
+    @staticmethod
+    def _recent(table, key, now):
+        """How many different wrong tries `key` (an address or a name) has lately (login_lock held)."""
+        tried = {k: t for k, t in table.get(key, {}).items() if now - t < LOGIN_WINDOW_S}
         if tried:
-            self.login_fails[ip] = tried
+            table[key] = tried
         else:
-            self.login_fails.pop(ip, None)
+            table.pop(key, None)
         return len(tried)
 
-    def _locked(self):
-        with self.login_lock:
-            return self._recent_fails(self.client_address[0]) >= LOGIN_FAILS
+    def _recent_fails(self, ip, now=None):
+        return self._recent(self.login_fails, ip, now or time.time())
 
-    def _note_wrong(self, given):
-        """Count a wrong password from this address. The same wrong one again (a browser resending
-        one it saved) counts once; LOGIN_FAILS different ones in LOGIN_WINDOW_S lock it out."""
-        ip, now = self.client_address[0], time.time()
-        digest = hmac.new(_LOGIN_KEY, ("\0" if given is None else given).encode("utf-8", "replace"),
-                          "sha256").digest()[:12]
+    def _locked(self, name=None):
+        """"locked" (this address), "name_locked" (this name) or "": too many different wrong tries lately."""
+        now = time.time()
         with self.login_lock:
-            tried = self.login_fails.setdefault(ip, {})
-            new = digest not in tried
-            tried[digest] = now
-            n = self._recent_fails(ip, now)
-            if len(self.login_fails) > 1000:          # keep the table small
+            if self._recent(self.login_fails, self.client_address[0], now) >= ADDRESS_FAILS:
+                return "locked"
+            if name is not None and self._recent(self.name_fails, p833_users.key_of(home_name(name)), now) >= LOGIN_FAILS:
+                return "name_locked"
+        return ""
+
+    def _try_login(self, name, given):
+        """Check a name and password, with the lock-out. Returns (who, check, why): why is ""
+        (signed in), "wrong", "locked" (this address) or "name_locked". The try is counted before
+        the (slow) password check, so many at once can't get past the limit; the same wrong
+        name and password again (a browser resending one it saved) counts once."""
+        ip, now = self.client_address[0], time.time()
+        nkey = p833_users.key_of(home_name(name))
+        g = ("\0" if given is None else given).encode("utf-8", "replace")
+        pair = hmac.new(_LOGIN_KEY, nkey.encode("utf-8") + b"\0" + g, "sha256").digest()[:12]
+        pw = hmac.new(_LOGIN_KEY, g, "sha256").digest()[:12]
+        with self.login_lock:
+            if self._recent(self.login_fails, ip, now) >= ADDRESS_FAILS:
+                return None, None, "locked"
+            if self._recent(self.name_fails, nkey, now) >= LOGIN_FAILS:
+                return None, None, "name_locked"
+            tried, named = self.login_fails.setdefault(ip, {}), self.name_fails.setdefault(nkey, {})
+            new_pair, new_pw = pair not in tried, pw not in named
+            tried[pair], named[pw] = now, now
+            if len(self.login_fails) > 1000 or len(self.name_fails) > 2000:   # keep the tables small
                 self.login_fails.clear()
-        if new:                                       # (not again for every refresh of a page left open)
-            LOG.warning("wrong password from %s%s", ip,
-                        "; locked out for %d min" % (LOGIN_WINDOW_S // 60) if n >= LOGIN_FAILS else "")
+                self.name_fails.clear()
+        who, check = self._check_login(name, given) if given is not None else (None, None)
+        if who is not None:                           # right after all: not a wrong try
+            with self.login_lock:
+                if new_pair:
+                    self.login_fails.get(ip, {}).pop(pair, None)
+                if new_pw:
+                    self.name_fails.get(nkey, {}).pop(pw, None)
+            return who, check, ""
+        if new_pair:                                  # (not again for every refresh of a page left open)
+            locked = self._locked(name)
+            LOG.warning("wrong password from %s for the name %s%s", ip, plain(nkey, 40),
+                        {"locked": "; that address is locked out for %d min",
+                         "name_locked": "; that name is locked out for %d min"}.get(locked, "%s") % (LOGIN_WINDOW_S // 60)
+                        if locked else "")
+        return None, None, "wrong"
 
     def _check_login(self, name, given):
         """Who a name and password sign in as: (who, check) or (None, None). The admin password
@@ -1790,14 +1833,13 @@ class Handler(BaseHTTPRequestHandler):
         if admin_pw and hmac.compare_digest(given.encode("utf-8"), admin_pw.encode("utf-8")):
             return ({"name": shown or "admin", "role": "admin", "kind": "admin", "key": ""},
                     app_sessions(self.app).fingerprint(admin_pw))
-        users = app_users(self.app)
+        users, pp = app_users(self.app), paging_password(self.app)
+        shared = pp.is_set() and pp.check(given)      # (always: the time doesn't tell whether a name is an account)
         u = users.check(shown, given)
         if u:
             return {"name": u["name"], "role": u["role"], "kind": "user", "key": u["key"]}, u["pw_set"]
-        pp = paging_password(self.app)
-        if pp.is_set() and users.get(p833_users.key_of(shown)) is None and pp.check(given):
-            return ({"name": shown or "supervisor", "role": "supervisor", "kind": "shared", "key": ""},
-                    pp.rec.get("set", ""))
+        if shared and not p833_users.name_problem(shown) and users.get(p833_users.key_of(shown)) is None:
+            return ({"name": shown, "role": "supervisor", "kind": "shared", "key": ""}, pp.rec.get("set", ""))
         return None, None
 
     def _session_who(self, s):
@@ -1814,7 +1856,8 @@ class Handler(BaseHTTPRequestHandler):
                 return {"name": s.get("name") or "admin", "role": "admin", "kind": "admin", "key": ""}
         elif kind == "shared":
             pp = paging_password(self.app)
-            if pp.is_set() and pp.rec.get("set") == s.get("check"):
+            if pp.is_set() and pp.rec.get("set") == s.get("check") \
+                    and app_users(self.app).get(p833_users.key_of(s.get("name", ""))) is None:  # (now an account's name)
                 return {"name": s.get("name") or "supervisor", "role": "supervisor", "kind": "shared", "key": ""}
         return None
 
@@ -1829,23 +1872,28 @@ class Handler(BaseHTTPRequestHandler):
         """Who is signed in: {"name", "role", "kind", "key"}, or None."""
         if getattr(self, "_who", False) is not False:
             return self._who
-        who = None
+        who, self._why = None, ""
         token = self._cookie(SESSION_COOKIE)
         if token:
             s = app_sessions(self.app).get(token)
             who = self._session_who(s) if s else None
+            if who is not None:
+                self._refresh_cookie = token
         auth = self.headers.get("Authorization", "")
-        # HTTP Basic is for scripts: a browser (it sends Sec-Fetch-Mode) uses the sign-in page, so a
-        # password it saved from the old sign-in box can't skip that page or Sign out.
-        if who is None and auth.startswith("Basic ") and not self.headers.get("Sec-Fetch-Mode") \
-                and not self._locked():
+        # HTTP Basic is for scripts: a browser uses the sign-in page, so a password it saved from the
+        # old sign-in box can't skip that page or Sign out.
+        browser = self.headers.get("Sec-Fetch-Mode") or self.headers.get("Upgrade-Insecure-Requests") \
+            or "text/html" in self.headers.get("Accept", "")
+        if who is None and auth.startswith("Basic ") and not browser:
             try:
                 user, given = base64.b64decode(auth[6:]).decode("utf-8").split(":", 1)
             except (ValueError, UnicodeDecodeError):      # (bad base64 is a ValueError too)
                 user, given = "", None
-            who, _ = self._check_login(user, given)
-            if who is None:
-                self._note_wrong(given)
+            who, _, why = self._try_login(user, given)
+            if why in ("locked", "name_locked"):
+                self._why = why
+            elif why == "wrong":
+                self._why = self._locked(user)            # (this try may have locked it)
         self._who = who
         return who
 
@@ -1863,11 +1911,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _ask_login(self, admin=False):
         """Not signed in (or not as an admin): a page goes to the sign-in page, the rest gets 401."""
-        if self._locked():
-            return self._reply(429, ("Too many wrong passwords from this address. Try again in 10 minutes.\n"
-                                     "Demasiadas contrase\u00f1as equivocadas desde esta direcci\u00f3n. Intente de "
-                                     "nuevo en 10 minutos.").encode("utf-8"), "text/plain; charset=utf-8")
         who = self._identity()
+        why = getattr(self, "_why", "") or self._locked()
+        if why:
+            return self._reply(429, ("%s\n%s" % (LOGIN_TEXT["en"][why], LOGIN_TEXT["es"][why])).encode("utf-8"),
+                               "text/plain; charset=utf-8")
         if who and admin:
             return self._reply(403, not_admin_html(who, self._home_lang()).encode("utf-8"),
                                "text/html; charset=utf-8")
@@ -1901,15 +1949,13 @@ class Handler(BaseHTTPRequestHandler):
                 "Set-Cookie": "%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax%s" % (SESSION_COOKIE, secure)})
         name = " ".join(q.get("name", [""])[0].split())[:40]
         given, target = q.get("password", [""])[0], safe_next(q.get("next", ["/"])[0])
-        if self._locked():
-            return self._login_page(lang, target, LOGIN_TEXT[lang]["locked"], name, 429)
-        who, check = self._check_login(name, given)
+        who, check, why = self._try_login(name, given)
         if who is None:
-            self._note_wrong(given)
-            return self._login_page(lang, target, LOGIN_TEXT[lang]["locked" if self._locked() else "wrong"], name, 401)
+            why = self._locked(name) or why
+            return self._login_page(lang, target, LOGIN_TEXT[lang][why], name, 429 if why != "wrong" else 401)
         if who["kind"] == "user":
             app_users(self.app).note_login(who["key"])
-        token = app_sessions(self.app).create(who["kind"], who["key"], who["name"], check)
+        token = app_sessions(self.app).create(who["kind"], who["key"], who["name"], check, self.client_address[0])
         LOG.info("signed in: %s (%s) from %s", who["name"], who["role"], self.client_address[0])
         return self._reply(303, b"", "text/plain", {
             "Location": target,
@@ -2067,7 +2113,8 @@ class Handler(BaseHTTPRequestHandler):
             en, es = build_message(cfg, code, press)
             rec = {"time": now_text(), "board": "paging", "cell": "Paging page", "press": press, "code": code,
                    "who": c["who"], "message": en, "en": en, "es": es, "zone": PAGING_ZONE,
-                   "note": "from the paging page" + (" by %s" % name if name else "")}
+                   "note": "from the paging page" + (" by %s" % name if name else "") +
+                           (" (shared password)" if who.get("kind") == "shared" else "")}
         elif path == "/page/custom":
             zone = form.get("zone", "floor") if form.get("zone") in ("floor", "office") else "floor"
             if zone == "office" and who["role"] not in ("office", "admin"):
@@ -2090,6 +2137,7 @@ class Handler(BaseHTTPRequestHandler):
                    "who": "Custom", "message": en or es, "en": en, "es": es,
                    "zone": PAGING_ZONE if zone == "floor" else "office",
                    "note": "typed on the paging page" + (" by %s" % name if name else "") +
+                           (" (shared password)" if who.get("kind") == "shared" else "") +
                            (", to the office" if zone == "office" else "")}
         else:
             return self._reply(404, {"ok": False, "error": "not found"})
@@ -2276,6 +2324,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._back("Not saved: this admin page isn't encrypted (no HTTPS certificate), so the "
                                   "password would cross the network as plain text. Run sudo bash "
                                   "install/install.sh on the laptop, then try again.", "users")
+            if pw and self.app["admin_password"] and pw == self.app["admin_password"]:
+                return self._back("Not saved: that is the built-in admin password; give each person their own.",
+                                  "users")
             if path == "/admin/users/add":
                 name, role = " ".join(form.get("name", "").split()), form.get("role", "")
                 problem = users.add(name, pw, role)
@@ -2293,6 +2344,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._back("Password not changed: %s." % problem, "users")
                 LOG.info("password of user %s changed on the admin page (by %s, %s)", u["name"], me, who)
                 return self._back("New password for %s. They are signed out on every device." % u["name"], "users")
+            last_admin = (not self.app["admin_password"] and u["role"] == "admin" and len(users.admins()) == 1)
+            if last_admin and (path == "/admin/users/remove" or form.get("role") != "admin"):
+                return self._back("Not changed: %s is the only Admin, and there is no built-in admin password "
+                                  "(P833_ADMIN_PASSWORD): make another Admin first." % u["name"], "users")
             if path == "/admin/users/role":
                 role = form.get("role", "")
                 problem = users.set_role(key, role)
@@ -2301,7 +2356,9 @@ class Handler(BaseHTTPRequestHandler):
                 LOG.info("user %s is now %s (by %s, %s)", u["name"], role, me, who)
                 return self._back("%s is now %s." % (u["name"], ROLE_TEXT["en"][role]), "users")
             if path == "/admin/users/remove":
-                users.remove(key)
+                problem = users.remove(key)
+                if problem:
+                    return self._back("Not removed: %s." % problem, "users")
                 app_sessions(self.app).drop_for("user", key)
                 LOG.info("user %s removed on the admin page (by %s, %s)", u["name"], me, who)
                 return self._back("%s removed: they can't sign in any more." % u["name"], "users")
@@ -3681,7 +3738,8 @@ def main(argv=None):
         LOG.error("P833_BOARD_KEY is not set: calls from boards are REFUSED. Run: sudo bash install/install.sh")
     admin_pw = os.environ.pop("P833_ADMIN_PASSWORD", "").strip()
     if not admin_pw:
-        LOG.error("P833_ADMIN_PASSWORD is not set: the admin page is OFF. Run: sudo bash install/install.sh")
+        LOG.error("P833_ADMIN_PASSWORD is not set: only Admin accounts (if any) open the admin page. "
+                  "Run: sudo bash install/install.sh")
     elif len(admin_pw) < 12:
         LOG.warning("the admin password is short (%d characters); 12 or more is safer", len(admin_pw))
 

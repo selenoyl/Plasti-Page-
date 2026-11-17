@@ -25,6 +25,7 @@ sys.path.insert(0, HERE)
 import p833_receiver as R          # noqa: E402
 import p833_test_sender as S       # noqa: E402
 import p833_audio as A             # noqa: E402
+import p833_users                  # noqa: E402
 import make_audio as M             # noqa: E402  (stdlib part only; piper not needed)
 
 
@@ -370,7 +371,7 @@ class ConfigUpdate(unittest.TestCase):
 
 class Server(unittest.TestCase):
     def setUp(self):
-        R.Handler.login_fails.clear()
+        R.Handler.clear_fails()
         self.tmp = tempfile.mkdtemp()
         cfg = R.load_config(CONFIG)
         cfg["page_retry_wait_s"] = 0
@@ -540,7 +541,7 @@ class Server(unittest.TestCase):
             c.close()
 
     def test_wrong_passwords_lock_the_address_out(self):
-        self.addCleanup(R.Handler.login_fails.clear)
+        self.addCleanup(R.Handler.clear_fails)
         for _ in range(3 * R.LOGIN_FAILS):                 # the same wrong one again and again (a page left
             self.assertEqual(self.admin("/admin", pw="old-saved")[0], 303)   # open with an old saved password)
         self.assertEqual(self.admin("/admin")[0], 200)     # ...counts once: nobody is locked out
@@ -549,7 +550,7 @@ class Server(unittest.TestCase):
         self.assertEqual(self.admin("/admin", pw="wrong-last")[0], 429)          # 10 different ones: locked
         st, _, body = self.admin("/admin")                 # even the right one, for a while
         self.assertEqual(st, 429)
-        R.Handler.login_fails.clear()
+        R.Handler.clear_fails()
         self.assertEqual(self.admin("/admin")[0], 200)
 
     def test_admin_post_needs_origin_or_referer(self):
@@ -1589,6 +1590,15 @@ class Server(unittest.TestCase):
         except urllib.error.HTTPError as e:
             st = e.code
         self.assertEqual(st, 303)
+        req = urllib.request.Request("http://127.0.0.1:%d/admin" % self.port, headers={
+            "Authorization": "Basic " + base64.b64encode(("a:" + ADMIN_PW).encode()).decode(),
+            "Accept": "text/html,application/xhtml+xml", "Upgrade-Insecure-Requests": "1"})
+        try:
+            with urllib.request.build_opener(NoRedirect).open(req) as r:
+                st = r.status
+        except urllib.error.HTTPError as e:
+            st = e.code
+        self.assertEqual(st, 303)                                             # (plain HTTP: no Sec-Fetch-Mode)
         self.assertEqual(self.admin("/admin")[0], 200)                        # (scripts still can)
         st, _, _, h = self.browse("/page/live")
         self.assertEqual(st, 401)
@@ -1694,6 +1704,100 @@ class Server(unittest.TestCase):
         self.assertLessEqual(json.loads(self.browse("/page/live", cookie=ann)[2])["wait"]["2"], 30)
         self.wait_pages()
 
+    # ---- from the security review of the sign-in (0.18.1)
+    def test_trying_one_password_on_many_names_is_locked_out(self):
+        self.addCleanup(R.Handler.clear_fails)
+        self.add_user("Olga", "olga-pass-1", "office")
+        for i in range(R.LOGIN_FAILS - 1):                                  # one name, 9 wrong passwords
+            self.assertEqual(self.browse("/login", {"name": "Olga", "password": "guess-%d" % i})[0], 401)
+        st, _, page, _ = self.browse("/login", {"name": "Olga", "password": "guess-last"})
+        self.assertEqual(st, 429)                                           # the 10th locks that name...
+        self.assertIn("for this name", page)
+        self.assertEqual(self.browse("/login", {"name": "Olga", "password": "olga-pass-1"})[0], 429)
+        self.assertEqual(self.sign_in("Ryan", ADMIN_PW)[1], "/")            # ...not everyone on this address
+        R.Handler.clear_fails()
+        names = ["worker%d" % i for i in range(R.ADDRESS_FAILS)]             # spraying: a few passwords, many names
+        codes = [self.browse("/login", {"name": n, "password": "Welcome2026"})[0] for n in names]
+        self.assertEqual(codes.count(401), R.ADDRESS_FAILS - 1)
+        self.assertEqual(codes[-1], 429)                                     # the address is locked out
+        self.assertEqual(self.browse("/login", {"name": "Olga", "password": "olga-pass-1"})[0], 429)
+
+    def test_many_guesses_at_once_cant_get_past_the_limit(self):
+        self.addCleanup(R.Handler.clear_fails)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(24) as pool:
+            codes = list(pool.map(lambda i: self.browse("/login", {"name": "Ann", "password": "guess-%d" % i})[0],
+                                  range(24)))
+        self.assertLessEqual(codes.count(401), R.LOGIN_FAILS)                 # at most 10 were really checked
+        self.assertEqual(codes.count(401) + codes.count(429), 24)
+
+    def test_an_account_cant_have_the_admin_password(self):
+        self.assertIn("built-in admin password", self.add_user("Sam", ADMIN_PW, "supervisor"))
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        msg = urllib.parse.unquote(self.admin("/admin/users/password", {"key": "sam", "password": ADMIN_PW})[1])
+        self.assertIn("built-in admin password", msg)
+
+    def test_signing_in_over_and_over_cant_push_others_out(self):
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        ann, _ = self.sign_in("Ann", ADMIN_PW)
+        for _ in range(p833_users.MAX_PER_PERSON + 5):
+            self.sign_in("Sam", "sam-pass-1")
+        sams = [x for x in R.Handler.app["sessions"].sessions.values() if x.get("key") == "sam"]
+        self.assertEqual(len(sams), p833_users.MAX_PER_PERSON)
+        self.assertEqual(self.browse("/admin", cookie=ann)[0], 200)          # the admin is still signed in
+
+    def test_sign_in_lasts_14_days_from_last_use(self):
+        cookie, _ = self.sign_in("Ryan", ADMIN_PW)
+        st, _, _, h = self.browse("/", cookie=cookie)
+        self.assertEqual(h["Set-Cookie"].split(";")[0], cookie)              # renewed on each page
+        self.assertIn("Max-Age=%d" % (p833_users.SESSION_DAYS * 86400), h["Set-Cookie"])
+
+    def test_a_full_disk_doesnt_stop_signing_in(self):
+        self.add_user("Sam", "sam-pass-1", "supervisor")
+        users = R.app_users(R.Handler.app)
+
+        def full(*a, **k):
+            raise OSError(28, "No space left on device")
+        users._save = full
+        self.assertEqual(self.sign_in("Sam", "sam-pass-1")[1], "/")          # (only the last sign-in time is lost)
+        self.assertIn("couldn't be saved", self.add_user("Bo", "bo-pass-123", "supervisor"))
+        self.assertIsNone(users.get("bo"))                                  # undone, not half-made
+
+    def test_damaged_account_files_dont_stop_the_receiver(self):
+        for name, data in (("users.json", {"users": None}), ("users.json", {"users": {"x": {"role": "admin"}}}),
+                           ("sessions.json", {"sessions": []}), ("sessions.json", {"sessions": {"d": {"kind": "user"}}})):
+            with open(os.path.join(self.tmp, name), "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            R.Handler.app["users"], R.Handler.app["sessions"] = None, None
+            self.assertEqual(self.browse("/", cookie="p833s=whatever")[0], 303, data)   # read, nobody signed in
+        self.assertEqual(self.sign_in("Ryan", ADMIN_PW)[1], "/")
+
+    def test_shared_password_names_are_checked(self):
+        self.set_paging_pw()
+        self.add_user("Olga", "olga-pass-1", "office")
+        for bad in ("admin", "Оlga", "Olga", ""):                         # reserved, look-alike, an account's
+            self.assertEqual(self.browse("/login", {"name": bad, "password": self.PAGING_PW})[0], 401, bad)
+        cookie, _ = self.sign_in("Rosa", self.PAGING_PW)
+        self.use_fake_tts()
+        self.browse("/page/custom", {"zone": "floor", "en": "Hello floor."}, cookie=cookie)
+        self.wait_pages()
+        self.assertIn("by Rosa (shared password)", self.wait_row()["detail"])
+        self.add_user("Rosa", "rosa-pass-1", "supervisor")                   # now an account's name
+        self.assertEqual(self.browse("/", cookie=cookie)[0], 303)
+
+    def test_the_last_admin_is_kept_without_a_built_in_admin_password(self):
+        self.add_user("Ann", "ann-pass-1", "admin")
+        R.Handler.app["admin_password"] = ""
+        ann, _ = self.sign_in("Ann", "ann-pass-1")
+        st, loc, _, _ = self.browse("/admin/users/role", {"key": "ann", "role": "supervisor"}, cookie=ann)
+        self.assertIn("only Admin", urllib.parse.unquote(loc))
+        self.assertIn("only Admin", urllib.parse.unquote(self.browse("/admin/users/remove", {"key": "ann"}, cookie=ann)[1]))
+        self.assertEqual(self.browse("/admin", cookie=ann)[0], 200)
+
+    def test_no_line_break_after_sign_in(self):
+        self.assertEqual(R.safe_next("/admin\n"), "/")
+        self.assertEqual(R.safe_next("/admin?tab=users"), "/admin?tab=users")
+
     def test_shared_password_still_signs_in_supervisors(self):
         self.set_paging_pw()
         self.add_user("Sam", "sam-pass-1", "supervisor")
@@ -1764,8 +1868,8 @@ class Server(unittest.TestCase):
         self.assertEqual(self.home("/", pw=ADMIN_PW)[0], 200)           # the admin's opens it too
         self.assertIn("<b>set</b>", self.admin("/admin")[2])
         # it doesn't open the admin page, and isn't counted as a wrong guess there
-        R.Handler.login_fails.clear()
-        self.assertEqual(self.admin("/admin", pw=self.PAGING_PW)[0], 403)            # admins only
+        R.Handler.clear_fails()
+        self.assertEqual(self.home("/admin", user="Sam")[0], 403)                   # admins only
         self.assertFalse(R.Handler.login_fails.get("127.0.0.1"))
         # kept through a restart
         self.assertTrue(R.PagingPassword(path).check(self.PAGING_PW))
@@ -1945,7 +2049,8 @@ class Server(unittest.TestCase):
         self.assertEqual(self.pager.sent, [])
         # names, messages and wording are escaped, also inside the page's script
         self.cfg["codes"][2]["en"] = "Maint </script><b>x</b> to press {press}."
-        page = self.home("/?ok=0&msg=%3Cscript%3Ealert(1)%3C/script%3E", user="<i>Bo</i>")[2]
+        self.assertEqual(self.home("/", user="<i>Bo</i>")[0], 303)          # the shared password needs a proper name
+        page = self.home("/?ok=0&msg=%3Cscript%3Ealert(1)%3C/script%3E", user="<i>Bo</i>", pw=ADMIN_PW)[2]
         self.assertNotIn("</script><b>x", page)
         self.assertNotIn("<script>alert", page)
         self.assertNotIn("<i>Bo</i>", page)
@@ -2148,7 +2253,7 @@ class Https(unittest.TestCase):
                                    dry_pager=R.DryRunPager(os.path.join(self.tmp, "lp"), cfg),
                                    audio=A.AudioLibrary(make_fake_audio(os.path.join(self.tmp, "audio"))))
         self.worker.start()
-        R.Handler.login_fails.clear()
+        R.Handler.clear_fails()
         R.Handler.app = {"cfg": cfg, "state": self.state, "worker": self.worker, "key": KEY,
                          "admin_password": ADMIN_PW, "state_dir": self.tmp}
         tls, why = R.tls_context(cfg)

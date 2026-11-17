@@ -15,7 +15,7 @@ PLC 24 V output --> Waveshare ESP32-S3 board --Wi-Fi--> AlmaLinux laptop
                     page zone 1 (floor)
 ```
 
-**Status, version 0.18.0:** receiving, checking, logging, the admin page (HTTPS),
+**Status, version 0.18.1:** receiving, checking, logging, the admin page (HTTPS),
 paging through the HT813 (working on the floor), the recorded page audio, the Piper page
 voice, the voice lab and the optional voip.ms texts (off until set up) are in and tested. The whole
 project was security-reviewed on 12 Nov 2026; see "Security". A fresh install starts
@@ -182,7 +182,9 @@ Everyone signs in on the **sign-in page** with their own **name and password** (
 - The **built-in admin** is `P833_ADMIN_PASSWORD` from `secrets.env`: it signs in as an admin with any name, so you can always get in to make the first accounts.
 - The **shared paging password** from before accounts (Users tab, "Shared paging password (old)") still signs in, as a Supervisor, with any name that isn't an account's. Remove it once everyone has an account.
 - Passwords are 8 to 64 characters. The laptop keeps only salted hashes (`/var/lib/p833-receiver/users.json`), and for each signed-in device only a hash of its sign-in cookie (`sessions.json`); both are readable by the service only. A forgotten password can't be shown: set a new one on the Users tab.
-- 10 *different* wrong passwords from one address lock that address out for 10 minutes; the same wrong one again counts once. A page left open after its password was changed says it **stopped updating**: reload it and sign in again.
+- **Lock-out:** 10 different wrong passwords for one name lock that name out for 10 minutes (others can still sign in from the same place); 30 different wrong name-and-password tries from one address lock that address out, so nobody can try a few common passwords on everyone's name. The same wrong one again counts once. A page left open after its password was changed says it **stopped updating**: reload it and sign in again.
+- An account can't be given the built-in admin password. Without a built-in admin password, the last Admin account can't be removed or made a Supervisor.
+- The shared password needs a proper name (letters, numbers, spaces, `. _ ' -`) that isn't an account's or `admin`; its pages are logged as "(shared password)".
 
 **Many people at once:** tested with 40 people loading the page at the same moment from one address (all behind one router, or on one PC): every page loaded. The receiver serves up to 24 connections from one address and 128 in all (16 kept for the boards); at a busy moment a connection waits up to 5 seconds for a free one instead of being refused.
 
@@ -514,7 +516,7 @@ What protects what (receiver 0.10.0, board firmware 1.1.3):
 | Texts | voip.ms API password write-only, stored 0600, sent only to voip.ms over checked HTTPS (no redirects). Only boards on the list send texts. Queue and hourly caps. |
 | Phone line | The laptop uses only SIP and audio from the HT813's address that belong to the call, so other devices can't hang up or divert a page. Optional password on calls (above). |
 | Laptop | Service runs as `p833` in a systemd sandbox; logs and state readable only by root and the service; secrets root-only; SELinux on; firewalld opens only 8833/tcp. The installer checks a new version loads before installing it; `update.sh` asks first. |
-| Sign-in | Accounts with roles (Supervisor, Office, Admin); passwords kept as salted PBKDF2-SHA256 hashes; a random sign-in cookie (HttpOnly, SameSite=Lax, Secure over HTTPS), of which only a hash is kept; a session ends on Sign out, after 14 days unused, or when its password changes or its account is removed. 10 different wrong passwords lock an address out for 10 minutes. HTTPS only (plain HTTP is sent there). A browser can't use a saved Basic password (scripts can). |
+| Sign-in | Accounts with roles (Supervisor, Office, Admin); passwords kept as salted PBKDF2-SHA256 hashes; a random sign-in cookie (HttpOnly, SameSite=Lax, Secure over HTTPS), of which only a hash is kept; a session ends on Sign out, after 14 days unused, or when its password changes or its account is removed. 10 different wrong passwords lock a name out for 10 minutes, and 30 different wrong tries an address; each try is counted before it is checked. At most 20 sessions per person, so signing in over and over can't push others out. HTTPS only (plain HTTP is sent there). A browser can't use a saved Basic password (scripts can). |
 | Paging page | Signed-in people only. Forms only from the page itself. Department pages to the floor only; typed messages to the office only for Office and Admin accounts; 5 minutes per department and per zone's typed messages (30 s for admins); 6 pages a minute in all. Names, wording and messages escaped. |
 | Open log page (`/log`) | Shows no call details, dial digits, HT813 address or board addresses (those are on the admin page). |
 
